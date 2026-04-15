@@ -17,7 +17,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { createHost, createVulnerability, getHosts, getVulnerabilities } from "../api";
 import type { Host, Vulnerability } from "../types";
@@ -37,7 +37,7 @@ export function ProjectDetailPage() {
   const [vulnTitle, setVulnTitle] = useState("");
   const [vulnSeverity, setVulnSeverity] = useState<Vulnerability["severity"]>("medium");
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     if (!projectId) {
       return;
     }
@@ -48,11 +48,11 @@ export function ProjectDetailPage() {
     } catch {
       setError("Не удалось загрузить данные проекта");
     }
-  };
+  }, [projectId]);
 
   useEffect(() => {
     void loadData();
-  }, [projectId]);
+  }, [loadData]);
 
   useEffect(() => {
     if (!projectId) {
@@ -64,7 +64,7 @@ export function ProjectDetailPage() {
       void loadData();
     };
     return () => ws.close();
-  }, [projectId]);
+  }, [projectId, loadData]);
 
   const severityStats = useMemo(() => {
     const stats = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };

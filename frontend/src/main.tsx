@@ -7,12 +7,34 @@ import App from "./App";
 const theme = createTheme({
   palette: {
     mode: "dark",
-    primary: { main: "#4f8cff" },
-    secondary: { main: "#65c4ff" },
-    background: { default: "#0f1726", paper: "#182237" },
+    primary: { main: "#6EA8FE" },
+    secondary: { main: "#7EE0FF" },
+    background: { default: "#0B1220", paper: "#121D31" },
   },
   shape: {
-    borderRadius: 12,
+    borderRadius: 14,
+  },
+  typography: {
+    fontFamily: '"Inter", "SF Pro Text", "Segoe UI", "Roboto", sans-serif',
+  },
+  components: {
+    MuiPaper: {
+      styleOverrides: {
+        root: {
+          backdropFilter: "blur(12px)",
+          backgroundImage: "none",
+          border: "1px solid rgba(126, 224, 255, 0.14)",
+        },
+      },
+    },
+    MuiButton: {
+      styleOverrides: {
+        root: {
+          textTransform: "none",
+          fontWeight: 600,
+        },
+      },
+    },
   },
 });
 

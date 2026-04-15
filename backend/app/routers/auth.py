@@ -5,7 +5,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.dependencies import enforce_csrf, get_client_ip, get_current_user
 from app.models import User
-from app.schemas import LoginRequest
+from app.schemas import LoginRequest, LoginResponse, RefreshResponse
 from app.services import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -48,29 +48,29 @@ def _clear_auth_cookies(response: Response) -> None:
     )
 
 
-@router.post("/login", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/login", response_model=LoginResponse, status_code=status.HTTP_200_OK)
 async def login(
     payload: LoginRequest,
     response: Response,
     request: Request,
     _: None = Depends(enforce_csrf),
     db: AsyncSession = Depends(get_db),
-) -> Response:
+) -> LoginResponse:
     """Выполняет логин и устанавливает cookie-токены."""
     service = AuthService(db)
-    access_token, refresh_token, _user = await service.login(payload.username, payload.password, get_client_ip(request))
+    access_token, refresh_token, user = await service.login(payload.username, payload.password, get_client_ip(request))
     _set_auth_cookies(response, access_token, refresh_token)
-    response.status_code = status.HTTP_204_NO_CONTENT
-    return response
+    response.status_code = status.HTTP_200_OK
+    return LoginResponse(id=user.id, username=user.username, role=user.role)
 
 
-@router.post("/refresh", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/refresh", response_model=RefreshResponse, status_code=status.HTTP_200_OK)
 async def refresh(
     response: Response,
     request: Request,
     refresh_token: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
-) -> Response:
+) -> RefreshResponse:
     """Обновляет access cookie по refresh cookie."""
     service = AuthService(db)
     new_access = await service.refresh(refresh_token, get_client_ip(request))
@@ -83,8 +83,8 @@ async def refresh(
         max_age=settings.jwt_access_token_expire_minutes * 60,
         path="/",
     )
-    response.status_code = status.HTTP_204_NO_CONTENT
-    return response
+    response.status_code = status.HTTP_200_OK
+    return RefreshResponse(ok=True)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

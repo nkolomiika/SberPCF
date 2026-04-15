@@ -5,6 +5,9 @@ const proxyTarget = process.env.VITE_PROXY_TARGET ?? "http://backend:8000";
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".json"],
+  },
   server: {
     host: "0.0.0.0",
     port: 3000,

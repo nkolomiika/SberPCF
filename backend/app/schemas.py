@@ -28,6 +28,16 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class LoginResponse(BaseModel):
+    id: UUID
+    username: str
+    role: UserRole
+
+
+class RefreshResponse(BaseModel):
+    ok: bool = True
+
+
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     email: EmailStr
