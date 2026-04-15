@@ -41,6 +41,26 @@ export interface Host {
   updated_at: string;
 }
 
+export interface Port {
+  id: string;
+  host_id: string;
+  port_number: number;
+  protocol: "tcp" | "udp";
+  state: "open" | "closed" | "filtered";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Endpoint {
+  id: string;
+  host_id: string;
+  path: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | null;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Vulnerability {
   id: string;
   project_id: string;

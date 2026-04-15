@@ -60,6 +60,22 @@ export async function createHost(projectId, payload) {
     const { data } = await api.post(`/projects/${projectId}/hosts`, payload);
     return data;
 }
+export async function getPorts(projectId, hostId) {
+    const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/ports`);
+    return data;
+}
+export async function createPort(projectId, hostId, payload) {
+    const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/ports`, payload);
+    return data;
+}
+export async function getEndpoints(projectId, hostId) {
+    const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/endpoints`);
+    return data;
+}
+export async function createEndpoint(projectId, hostId, payload) {
+    const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
+    return data;
+}
 export async function getVulnerabilities(projectId) {
     const { data } = await api.get(`/projects/${projectId}/vulnerabilities`, {
         params: { page: 1, size: 100 },

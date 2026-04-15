@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Host, Notification, PaginatedResponse, Project, User, Vulnerability } from "./types";
+import type { Endpoint, Host, Notification, PaginatedResponse, Port, Project, User, Vulnerability } from "./types";
 
 const api = axios.create({
   baseURL: "/api/v1",
@@ -84,6 +84,42 @@ export async function createHost(
   }
 ): Promise<Host> {
   const { data } = await api.post<Host>(`/projects/${projectId}/hosts`, payload);
+  return data;
+}
+
+export async function getPorts(projectId: string, hostId: string): Promise<Port[]> {
+  const { data } = await api.get<Port[]>(`/projects/${projectId}/hosts/${hostId}/ports`);
+  return data;
+}
+
+export async function createPort(
+  projectId: string,
+  hostId: string,
+  payload: {
+    port_number: number;
+    protocol?: "tcp" | "udp";
+    state?: "open" | "closed" | "filtered";
+  }
+): Promise<Port> {
+  const { data } = await api.post<Port>(`/projects/${projectId}/hosts/${hostId}/ports`, payload);
+  return data;
+}
+
+export async function getEndpoints(projectId: string, hostId: string): Promise<Endpoint[]> {
+  const { data } = await api.get<Endpoint[]>(`/projects/${projectId}/hosts/${hostId}/endpoints`);
+  return data;
+}
+
+export async function createEndpoint(
+  projectId: string,
+  hostId: string,
+  payload: {
+    path: string;
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
+    description?: string;
+  }
+): Promise<Endpoint> {
+  const { data } = await api.post<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
   return data;
 }
 
