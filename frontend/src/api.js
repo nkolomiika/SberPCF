@@ -43,52 +43,23 @@ export async function getMe() {
     return data;
 }
 export async function getUsers(page = 1, size = 200) {
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-            sessionId: "a74592",
-            runId: "users-422-post-fix",
-            hypothesisId: "H11",
-            location: "api.ts:getUsers:request",
-            message: "Requesting users list",
-            data: { page, size },
-            timestamp: Date.now(),
-        }),
-    }).catch(() => { });
-    // #endregion
-    try {
-        const { data } = await api.get("/users", { params: { page, size } });
-        return data;
-    }
-    catch (error) {
-        const axiosError = error;
-        // #region agent log
-        fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-            body: JSON.stringify({
-                sessionId: "a74592",
-                runId: "users-422-post-fix",
-                hypothesisId: "H12",
-                location: "api.ts:getUsers:error",
-                message: "Users list request failed",
-                data: {
-                    page,
-                    size,
-                    status: axiosError.response?.status ?? null,
-                    responseData: axiosError.response?.data ?? null,
-                },
-                timestamp: Date.now(),
-            }),
-        }).catch(() => { });
-        // #endregion
-        throw error;
-    }
+    const { data } = await api.get("/users", { params: { page, size } });
+    return data;
 }
 export async function getProjects(page = 1, size = 20, status) {
     const { data } = await api.get("/projects", { params: { page, size, status } });
+    return data;
+}
+export async function getProjectFolders() {
+    const { data } = await api.get("/projects/folders");
+    return data;
+}
+export async function createProjectFolder(payload) {
+    const { data } = await api.post("/projects/folders", payload);
+    return data;
+}
+export async function moveProjectFolder(folderId, payload) {
+    const { data } = await api.patch(`/projects/folders/${folderId}/move`, payload);
     return data;
 }
 export async function createProject(payload) {
@@ -212,6 +183,9 @@ export async function getHostVulnerabilities(projectId, hostId) {
 export async function addVulnerabilityAsset(projectId, vulnerabilityId, payload) {
     const { data } = await api.post(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets`, payload);
     return data;
+}
+export async function deleteVulnerabilityAsset(projectId, vulnerabilityId, assetLinkId) {
+    await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets/${assetLinkId}`);
 }
 export async function listVulnerabilityFiles(projectId, vulnerabilityId) {
     const { data } = await api.get(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`);

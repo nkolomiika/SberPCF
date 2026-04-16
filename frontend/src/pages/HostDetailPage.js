@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { load as parseYaml } from "js-yaml";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
-import { addVulnerabilityAsset, createEndpoint, createPort, createService, createVulnerability, deleteEndpoint, deleteHost, deletePort, deleteService, deleteVulnerability, getServices, getHost, getHosts, getHostVulnerabilities, updateEndpoint, updateHost, updatePort, updateService, updateVulnerability, } from "../api";
+import { addVulnerabilityAsset, createHost, createEndpoint, createPort, createService, createVulnerability, deleteEndpoint, deleteHost, deletePort, deleteService, deleteVulnerability, getServices, getHost, getHosts, getHostVulnerabilities, updateEndpoint, updateHost, updatePort, updateService, updateVulnerability, } from "../api";
 import { ProjectTreeNav } from "../components/ProjectTreeNav";
 export function HostDetailPage() {
     const { projectId, hostId } = useParams();
@@ -63,6 +63,7 @@ export function HostDetailPage() {
     const [creatingEndpointDescription, setCreatingEndpointDescription] = useState("");
     const [creatingEndpointRequestRaw, setCreatingEndpointRequestRaw] = useState("");
     const [swaggerImporting, setSwaggerImporting] = useState(false);
+    const [nmapImporting, setNmapImporting] = useState(false);
     const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
     const [creatingVulnerabilityTitle, setCreatingVulnerabilityTitle] = useState("");
     const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
@@ -312,6 +313,118 @@ export function HostDetailPage() {
         setCreatingPortState("open");
         await loadHost();
     };
+    const normalizeImportedPortState = (value) => {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "open") {
+            return "open";
+        }
+        if (normalized === "closed") {
+            return "closed";
+        }
+        if (normalized === "filtered") {
+            return "filtered";
+        }
+        if (normalized.includes("open")) {
+            return "open";
+        }
+        if (normalized.includes("closed")) {
+            return "closed";
+        }
+        return "filtered";
+    };
+    const parseNmapPortsFromText = (rawText) => {
+        const entries = new Map();
+        const lines = rawText.replace(/\r/g, "").split("\n");
+        const addEntry = (portNumber, protocol, stateRaw) => {
+            if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+                return;
+            }
+            const key = `${portNumber}/${protocol}`;
+            entries.set(key, {
+                port_number: portNumber,
+                protocol,
+                state: normalizeImportedPortState(stateRaw),
+            });
+        };
+        // Regular Nmap output lines: "22/tcp open ssh"
+        lines.forEach((line) => {
+            const match = line.match(/^\s*(\d{1,5})\/(tcp|udp)\s+([a-zA-Z|_-]+)\b/i);
+            if (!match) {
+                return;
+            }
+            addEntry(Number(match[1]), match[2].toLowerCase(), match[3]);
+        });
+        // Grepable output fragments: "Ports: 22/open/tcp//ssh///, 53/open/udp//domain///"
+        lines.forEach((line) => {
+            const portsMatch = line.match(/Ports:\s*(.+)$/i);
+            if (!portsMatch) {
+                return;
+            }
+            const fragments = portsMatch[1].split(",").map((item) => item.trim());
+            fragments.forEach((fragment) => {
+                const parts = fragment.split("/");
+                if (parts.length < 3) {
+                    return;
+                }
+                const portNumber = Number(parts[0]);
+                const stateRaw = parts[1] || "";
+                const protocol = (parts[2] || "").toLowerCase();
+                if (protocol !== "tcp" && protocol !== "udp") {
+                    return;
+                }
+                addEntry(portNumber, protocol, stateRaw);
+            });
+        });
+        // XML output fragments: <port protocol="tcp" portid="443"> ... <state state="open"/>
+        const xmlPortRegex = /<port[^>]*protocol="(tcp|udp)"[^>]*portid="(\d{1,5})"[\s\S]*?<state[^>]*state="([^"]+)"/gi;
+        let xmlMatch;
+        while ((xmlMatch = xmlPortRegex.exec(rawText)) !== null) {
+            addEntry(Number(xmlMatch[2]), xmlMatch[1].toLowerCase(), xmlMatch[3]);
+        }
+        return Array.from(entries.values()).sort((left, right) => left.port_number - right.port_number);
+    };
+    const importPortsFromNmapFile = async (file) => {
+        if (!file || !projectId || !hostId) {
+            return;
+        }
+        setNmapImporting(true);
+        setError(null);
+        setInfoMessage(null);
+        try {
+            const rawText = await file.text();
+            const parsedPorts = parseNmapPortsFromText(rawText);
+            if (!parsedPorts.length) {
+                throw new Error("В Nmap файле не найдено портов для импорта.");
+            }
+            const existingKeys = new Set((host?.ports ?? []).map((item) => `${item.port_number}/${item.protocol}`));
+            let created = 0;
+            let skipped = 0;
+            let failed = 0;
+            for (const entry of parsedPorts) {
+                const key = `${entry.port_number}/${entry.protocol}`;
+                if (existingKeys.has(key)) {
+                    skipped += 1;
+                    continue;
+                }
+                try {
+                    await createPort(projectId, hostId, entry);
+                    existingKeys.add(key);
+                    created += 1;
+                }
+                catch {
+                    failed += 1;
+                }
+            }
+            await loadHost();
+            setInfoMessage(`Nmap импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}.`);
+        }
+        catch (importError) {
+            setError(importError instanceof Error ? importError.message : "Не удалось импортировать порты из Nmap.");
+        }
+        finally {
+            setNmapImporting(false);
+        }
+    };
     const openCreateServiceDialog = (portId) => {
         setCreateServicePortId(portId);
         setCreatingServiceName("");
@@ -450,7 +563,7 @@ export function HostDetailPage() {
         setError(null);
         setInfoMessage(null);
         try {
-            const rawText = await file.text();
+            const rawText = (await file.text()).replace(/^\uFEFF/, "");
             let parsedSpec;
             const lowerCaseName = file.name.toLowerCase();
             const looksLikeYaml = lowerCaseName.endsWith(".yaml") || lowerCaseName.endsWith(".yml");
@@ -463,6 +576,10 @@ export function HostDetailPage() {
                         parsedSpec = parseYaml(rawText);
                     }
                     catch {
+                        const looksLikeBrokenPseudoJson = /(^|\n)\s*swagger\s+2\.0\s*,?/i.test(rawText) && !/"swagger"\s*:\s*"2\.0"/i.test(rawText);
+                        if (looksLikeBrokenPseudoJson) {
+                            throw new Error("Swagger файл повреждён: отсутствуют JSON-кавычки/двоеточия. Сохрани файл как валидный JSON или YAML.");
+                        }
                         throw new Error("Swagger/OpenAPI файл должен быть валидным JSON или YAML.");
                     }
                 }
@@ -473,26 +590,78 @@ export function HostDetailPage() {
             if (!parsedSpec || typeof parsedSpec !== "object") {
                 throw new Error("Некорректный Swagger/OpenAPI документ.");
             }
-            const paths = parsedSpec.paths;
+            const specObject = parsedSpec;
+            const paths = specObject.paths;
             if (!paths || typeof paths !== "object") {
                 throw new Error("В Swagger/OpenAPI документе отсутствует объект paths.");
             }
+            const basePath = (typeof specObject.basePath === "string" ? specObject.basePath : "").trim();
+            const extractHostFromSpec = () => {
+                const swaggerHost = typeof specObject.host === "string" ? String(specObject.host).trim() : "";
+                if (swaggerHost) {
+                    return swaggerHost.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+                }
+                const servers = specObject.servers;
+                if (Array.isArray(servers)) {
+                    for (const server of servers) {
+                        if (!server || typeof server.url !== "string") {
+                            continue;
+                        }
+                        try {
+                            const parsed = new URL(server.url);
+                            if (parsed.hostname) {
+                                return parsed.hostname;
+                            }
+                        }
+                        catch {
+                            // ignore invalid URL entries and continue
+                        }
+                    }
+                }
+                return "";
+            };
+            let targetHostId = hostId;
+            const specHost = extractHostFromSpec();
+            const currentHostTarget = (host?.hostname || host?.ip_address || "").toLowerCase();
+            const normalizedSpecHost = specHost.toLowerCase();
+            const shouldOfferCreateHost = Boolean(projectId && normalizedSpecHost && normalizedSpecHost !== currentHostTarget);
+            if (shouldOfferCreateHost && projectId) {
+                const shouldCreateHost = window.confirm(`В Swagger найден хост "${specHost}". Создать новый хост и импортировать эндпоинты туда?\n\nНажми "Отмена", чтобы импортировать в текущий хост.`);
+                if (shouldCreateHost) {
+                    const isIpAddress = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(specHost);
+                    const createdHost = await createHost(projectId, {
+                        ip_address: isIpAddress ? specHost : undefined,
+                        hostname: isIpAddress ? undefined : specHost,
+                        notes: "Создано автоматически из Swagger/OpenAPI импорта",
+                        status: "unknown",
+                    });
+                    targetHostId = createdHost.id;
+                }
+            }
+            if (!targetHostId) {
+                throw new Error("Не удалось определить хост для импорта.");
+            }
             const methodOrder = ["get", "post", "put", "patch", "delete", "head", "options"];
+            const methodSet = new Set(methodOrder);
             const operations = [];
             Object.entries(paths).forEach(([pathValue, pathItem]) => {
                 if (!pathItem || typeof pathItem !== "object") {
                     return;
                 }
-                methodOrder.forEach((methodName) => {
-                    const operation = pathItem[methodName];
+                Object.entries(pathItem).forEach(([rawMethodName, operation]) => {
+                    const methodName = rawMethodName.toLowerCase();
+                    if (!methodSet.has(methodName)) {
+                        return;
+                    }
                     if (!operation || typeof operation !== "object") {
                         return;
                     }
                     const opInfo = operation;
                     const combinedDescription = [opInfo.summary, opInfo.description].filter(Boolean).join("\n\n");
+                    const normalizedPath = `${basePath}${pathValue}`.replace(/\/{2,}/g, "/");
                     operations.push({
                         method: methodName.toUpperCase(),
-                        path: pathValue,
+                        path: normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`,
                         description: combinedDescription || undefined,
                     });
                 });
@@ -500,7 +669,7 @@ export function HostDetailPage() {
             if (!operations.length) {
                 throw new Error("В Swagger/OpenAPI документе не найдено методов для импорта.");
             }
-            const existingKeys = new Set((host?.endpoints ?? []).map((item) => `${item.method ?? "ANY"}:${item.path}`));
+            const existingKeys = new Set((targetHostId === hostId ? host?.endpoints ?? [] : []).map((item) => `${item.method ?? "ANY"}:${item.path}`));
             let created = 0;
             let skipped = 0;
             let failed = 0;
@@ -511,7 +680,7 @@ export function HostDetailPage() {
                     continue;
                 }
                 try {
-                    await createEndpoint(projectId, hostId, operation);
+                    await createEndpoint(projectId, targetHostId, operation);
                     existingKeys.add(key);
                     created += 1;
                 }
@@ -519,8 +688,13 @@ export function HostDetailPage() {
                     failed += 1;
                 }
             }
-            await loadHost();
-            setInfoMessage(`Swagger импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}.`);
+            if (targetHostId === hostId) {
+                await loadHost();
+            }
+            else {
+                navigate(`/projects/${projectId}/hosts/${targetHostId}`);
+            }
+            setInfoMessage(`Swagger импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}${targetHostId !== hostId ? ` (в хост ${specHost || "из Swagger"})` : ""}.`);
         }
         catch (importError) {
             setError(importError instanceof Error ? importError.message : "Не удалось импортировать Swagger/OpenAPI.");
@@ -602,25 +776,30 @@ export function HostDetailPage() {
     if (loading) {
         return (_jsx(Box, { display: "flex", justifyContent: "center", py: 6, children: _jsx(CircularProgress, {}) }));
     }
-    return (_jsxs(Stack, { spacing: 2.5, children: [error && _jsx(Alert, { severity: "error", children: error }), infoMessage && _jsx(Alert, { severity: "success", children: infoMessage }), _jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1, children: [_jsx(Stack, { spacing: 0.2, children: _jsxs(Typography, { variant: "h4", fontWeight: 700, children: ["\u0425\u043E\u0441\u0442: ", hostTitle] }) }), _jsx(IconButton, { onClick: openHostActionsMenu, sx: { border: "1px solid rgba(126,224,255,0.2)", borderRadius: 2 }, children: _jsx(MoreVertIcon, {}) })] }), _jsxs(Menu, { anchorEl: hostActionsAnchorEl, open: hostActionsOpen, onClose: closeHostActionsMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: [_jsxs(MenuItem, { onClick: openHostEdit, children: [_jsx(EditIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442"] }), _jsxs(MenuItem, { onClick: () => {
+    return (_jsxs(Stack, { spacing: 2.5, children: [error && _jsx(Alert, { severity: "error", children: error }), infoMessage && _jsx(Alert, { severity: "success", children: infoMessage }), _jsx(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1, children: _jsxs(Stack, { spacing: 0.2, children: [_jsx(Typography, { variant: "overline", color: "primary.main", sx: { letterSpacing: 1.4, fontWeight: 700 }, children: "Host Workspace" }), _jsxs(Typography, { variant: "h4", fontWeight: 700, children: ["\u0425\u043E\u0441\u0442: ", hostTitle] }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { maxWidth: 760 }, children: "\u0414\u0435\u0442\u0430\u043B\u0438 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E \u0430\u043A\u0442\u0438\u0432\u0430, \u0441\u0435\u0442\u0435\u0432\u044B\u0435 \u0442\u043E\u0447\u043A\u0438, endpoint-\u0441\u0442\u0440\u0443\u043A\u0442\u0443\u0440\u0430 \u0438 \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0435 \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438." })] }) }), _jsxs(Menu, { anchorEl: hostActionsAnchorEl, open: hostActionsOpen, onClose: closeHostActionsMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: [_jsxs(MenuItem, { onClick: openHostEdit, children: [_jsx(EditIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442"] }), _jsxs(MenuItem, { onClick: () => {
                             closeHostActionsMenu();
                             void removeHost();
                         }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0445\u043E\u0441\u0442"] })] }), _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 2, children: [_jsx(ProjectTreeNav, { hosts: hosts, selectedHostId: hostId ?? null, selectedSection: selectedSection, isCollapsed: isSidebarCollapsed, portsCount: portsCount, endpointsCount: endpointsCount, vulnerabilitiesCount: vulnerabilitiesCount, hostStatsById: hostStatsById, onToggleCollapsed: () => setSidebarCollapsed((v) => !v), onSelectSection: setSelectedSection, onSelectProjectOverview: () => navigate(`/projects/${projectId}`), onSelectHost: (nextHostId) => navigate(`/projects/${projectId}/hosts/${nextHostId}`), onOpenHost: (nextHostId) => navigate(`/projects/${projectId}/hosts/${nextHostId}`) }), _jsxs(Stack, { flex: 1, spacing: 2, children: [_jsxs(Grid, { container: true, spacing: 2, children: [_jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("ports"), sx: {
                                                 cursor: "pointer",
                                                 border: selectedSection === "ports" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
-                                                borderRadius: 0,
-                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u041F\u043E\u0440\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: portsCount })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("endpoints"), sx: {
+                                                backgroundColor: selectedSection === "ports" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
+                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u041F\u043E\u0440\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: portsCount }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { mt: 0.6 }, children: "\u0421\u0435\u0442\u0435\u0432\u044B\u0435 \u0432\u0445\u043E\u0434\u044B \u0438 \u043E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u043D\u044B\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044B." })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("endpoints"), sx: {
                                                 cursor: "pointer",
                                                 border: selectedSection === "endpoints" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
-                                                borderRadius: 0,
-                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: endpointsCount })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("vulns"), sx: {
+                                                backgroundColor: selectedSection === "endpoints" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
+                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: endpointsCount }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { mt: 0.6 }, children: "HTTP-\u043C\u0430\u0440\u0448\u0440\u0443\u0442\u044B \u0438 \u0438\u043C\u043F\u043E\u0440\u0442 \u0438\u0437 Swagger/OpenAPI." })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("vulns"), sx: {
                                                 cursor: "pointer",
                                                 border: selectedSection === "vulns" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
-                                                borderRadius: 0,
-                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0435\u0439 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: vulnerabilitiesCount })] }) }) })] }), selectedSection === "overview" && (_jsx(Stack, { spacing: 2, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsx(Typography, { variant: "h6", fontWeight: 700, mb: 1, children: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Box, { sx: { border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0 }, children: _jsx(ReactMarkdown, { children: host?.notes || "_Описание хоста не заполнено_" }) })] }) }) })), selectedSection === "ports" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u041F\u043E\u0440\u0442\u044B" }), _jsx(Tooltip, { title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043F\u043E\u0440\u0442", children: _jsx(IconButton, { size: "small", onClick: () => setCreatePortOpen(true), children: _jsx(AddIcon, { fontSize: "small" }) }) })] }), _jsxs(Stack, { spacing: 1, children: [host?.ports.map((port) => (_jsxs(Stack, { onClick: () => toggleExpandedId(port.id, setExpandedPortIds), sx: {
+                                                backgroundColor: selectedSection === "vulns" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
+                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0435\u0439 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: vulnerabilitiesCount }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { mt: 0.6 }, children: "\u041D\u0430\u0439\u0434\u0435\u043D\u043D\u044B\u0435 \u043F\u0440\u043E\u0431\u043B\u0435\u043C\u044B \u0438 \u0440\u0430\u0431\u043E\u0447\u0438\u0435 \u043A\u0430\u0440\u0442\u043E\u0447\u043A\u0438 \u0438\u0441\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u044F." })] }) }) })] }), selectedSection === "overview" && (_jsx(Stack, { spacing: 2, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0445\u043E\u0441\u0442\u0430" }), _jsx(IconButton, { size: "small", onClick: openHostActionsMenu, sx: { border: "1px solid rgba(126,224,255,0.2)", backgroundColor: "rgba(15,27,45,0.6)" }, children: _jsx(MoreVertIcon, { fontSize: "small" }) })] }), _jsx(Box, { sx: { border: "1px solid rgba(126,224,255,0.12)", p: 2, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }, children: _jsx(ReactMarkdown, { children: host?.notes || "_Описание хоста не заполнено_" }) })] }) }) })), selectedSection === "ports" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u041F\u043E\u0440\u0442\u044B" }), _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(Tooltip, { title: "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u0440\u0442\u044B \u0438\u0437 Nmap", children: _jsxs(IconButton, { size: "small", component: "label", disabled: nmapImporting, children: [_jsx(UploadFileIcon, { fontSize: "small" }), _jsx("input", { hidden: true, type: "file", accept: ".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml", onChange: (event) => {
+                                                                            const selectedFile = event.target.files?.[0] ?? null;
+                                                                            void importPortsFromNmapFile(selectedFile);
+                                                                            event.target.value = "";
+                                                                        } })] }) }), _jsx(Tooltip, { title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043F\u043E\u0440\u0442", children: _jsx(IconButton, { size: "small", onClick: () => setCreatePortOpen(true), children: _jsx(AddIcon, { fontSize: "small" }) }) })] })] }), _jsxs(Stack, { spacing: 1, children: [host?.ports.map((port) => (_jsxs(Stack, { onClick: () => toggleExpandedId(port.id, setExpandedPortIds), sx: {
                                                         border: "1px solid rgba(126,224,255,0.12)",
-                                                        p: 1.2,
+                                                        p: 1.4,
                                                         borderRadius: 0,
+                                                        backgroundColor: "rgba(8,17,31,0.24)",
                                                         cursor: "pointer",
                                                         "& .port-actions": {
                                                             opacity: 0,
@@ -634,7 +813,7 @@ export function HostDetailPage() {
                                                     }, children: [_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", children: [_jsxs(Stack, { direction: "row", spacing: 1, alignItems: "center", children: [_jsxs(Typography, { fontWeight: 600, children: [port.port_number, "/", port.protocol] }), _jsx(Chip, { label: port.state, size: "small" })] }), _jsx(Stack, { direction: "row", spacing: 0.4, className: "port-actions", children: _jsx(Tooltip, { title: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F", children: _jsx(IconButton, { size: "small", onClick: (event) => openPortActions(event, port), children: _jsx(MoreVertIcon, { fontSize: "small" }) }) }) })] }), _jsx(Collapse, { in: expandedPortIds.includes(port.id), timeout: "auto", unmountOnExit: true, children: _jsxs(Stack, { mt: 1, spacing: 1, children: [_jsxs(Typography, { color: "text.secondary", variant: "body2", children: ["\u041F\u043E\u0440\u0442 ", port.port_number, "/", port.protocol, " \u0441\u0435\u0439\u0447\u0430\u0441 \u0432 \u0441\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0438 ", port.state, "."] }), _jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", children: [_jsx(Typography, { variant: "body2", fontWeight: 600, children: "\u0421\u0435\u0440\u0432\u0438\u0441\u044B" }), _jsx(Tooltip, { title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441", children: _jsx(IconButton, { size: "small", onClick: (event) => {
                                                                                         event.stopPropagation();
                                                                                         openCreateServiceDialog(port.id);
-                                                                                    }, children: _jsx(AddIcon, { fontSize: "small" }) }) })] }), _jsxs(Stack, { spacing: 0.8, children: [(servicesByPortId[port.id] ?? []).map((service) => (_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", sx: { border: "1px solid rgba(126,224,255,0.12)", p: 0.8, borderRadius: 0 }, children: [_jsxs(Stack, { spacing: 0.2, children: [_jsx(Typography, { variant: "body2", fontWeight: 600, children: service.name }), _jsx(Typography, { variant: "caption", color: "text.secondary", children: service.version || "version n/a" })] }), _jsxs(Stack, { direction: "row", spacing: 0.4, children: [_jsx(Tooltip, { title: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441", children: _jsx(IconButton, { size: "small", onClick: (event) => {
+                                                                                    }, children: _jsx(AddIcon, { fontSize: "small" }) }) })] }), _jsxs(Stack, { spacing: 0.8, children: [(servicesByPortId[port.id] ?? []).map((service) => (_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", sx: { border: "1px solid rgba(126,224,255,0.12)", p: 1, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.26)" }, children: [_jsxs(Stack, { spacing: 0.2, children: [_jsx(Typography, { variant: "body2", fontWeight: 600, children: service.name }), _jsx(Typography, { variant: "caption", color: "text.secondary", children: service.version || "version n/a" })] }), _jsxs(Stack, { direction: "row", spacing: 0.4, children: [_jsx(Tooltip, { title: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441", children: _jsx(IconButton, { size: "small", onClick: (event) => {
                                                                                                         event.stopPropagation();
                                                                                                         openEditServiceDialog(port.id, service);
                                                                                                     }, children: _jsx(EditIcon, { fontSize: "small" }) }) }), _jsx(Tooltip, { title: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441", children: _jsx(IconButton, { size: "small", color: "error", onClick: (event) => {
@@ -650,14 +829,15 @@ export function HostDetailPage() {
                                                             void removePort(activePort.id);
                                                         }
                                                         closePortActions();
-                                                    }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] })] })] }) })), selectedSection === "endpoints" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u044B" }), _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(Tooltip, { title: "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0438\u0437 Swagger/OpenAPI (JSON/YAML)", children: _jsxs(IconButton, { size: "small", component: "label", disabled: swaggerImporting, children: [_jsx(UploadFileIcon, { fontSize: "small" }), _jsx("input", { hidden: true, type: "file", accept: "application/json,.json,.yaml,.yml,text/yaml,application/yaml", onChange: (event) => {
+                                                    }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] })] })] }) })), selectedSection === "endpoints" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u044B" }), _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(Tooltip, { title: "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0438\u0437 Swagger/OpenAPI (JSON/YAML)", children: _jsxs(IconButton, { size: "small", component: "label", disabled: swaggerImporting, children: [_jsx(UploadFileIcon, { fontSize: "small" }), _jsx("input", { hidden: true, type: "file", accept: "application/json,.json,.yaml,.yml,text/yaml,application/yaml", onChange: (event) => {
                                                                             const selectedFile = event.target.files?.[0] ?? null;
                                                                             void importEndpointsFromSwaggerFile(selectedFile);
                                                                             event.target.value = "";
                                                                         } })] }) }), _jsx(Tooltip, { title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442", children: _jsx(IconButton, { size: "small", onClick: () => setCreateEndpointOpen(true), children: _jsx(AddIcon, { fontSize: "small" }) }) })] })] }), _jsxs(Stack, { spacing: 1, children: [host?.endpoints.map((endpoint) => (_jsxs(Box, { onClick: () => toggleExpandedId(endpoint.id, setExpandedEndpointIds), sx: {
                                                         border: "1px solid rgba(126,224,255,0.12)",
-                                                        p: 1.2,
+                                                        p: 1.4,
                                                         borderRadius: 0,
+                                                        backgroundColor: "rgba(8,17,31,0.24)",
                                                         cursor: "pointer",
                                                         "& .endpoint-actions": {
                                                             opacity: 0,
@@ -678,10 +858,11 @@ export function HostDetailPage() {
                                                             void removeEndpoint(activeEndpoint.id);
                                                         }
                                                         closeEndpointActions();
-                                                    }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] }), _jsxs(MenuItem, { onClick: () => void copyEndpointRequest("curl"), children: [_jsx(ContentCopyIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u0430\u043A cURL"] }), _jsxs(MenuItem, { onClick: () => void copyEndpointRequest("raw"), children: [_jsx(ContentCopyIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u0430\u043A Raw"] })] })] }) })), selectedSection === "vulns" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Tooltip, { title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C", children: _jsx(IconButton, { size: "small", onClick: () => setCreateVulnerabilityOpen(true), children: _jsx(AddIcon, { fontSize: "small" }) }) })] }), _jsxs(Stack, { spacing: 1, children: [vulnerabilities.map((item) => (_jsxs(Box, { onClick: () => toggleExpandedId(item.id, setExpandedVulnerabilityIds), sx: {
+                                                    }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] }), _jsxs(MenuItem, { onClick: () => void copyEndpointRequest("curl"), children: [_jsx(ContentCopyIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u0430\u043A cURL"] }), _jsxs(MenuItem, { onClick: () => void copyEndpointRequest("raw"), children: [_jsx(ContentCopyIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u0430\u043A Raw"] })] })] }) })), selectedSection === "vulns" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Tooltip, { title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C", children: _jsx(IconButton, { size: "small", onClick: () => setCreateVulnerabilityOpen(true), children: _jsx(AddIcon, { fontSize: "small" }) }) })] }), _jsxs(Stack, { spacing: 1, children: [vulnerabilities.map((item) => (_jsxs(Box, { onClick: () => toggleExpandedId(item.id, setExpandedVulnerabilityIds), sx: {
                                                         border: "1px solid rgba(126,224,255,0.12)",
-                                                        p: 1.2,
+                                                        p: 1.4,
                                                         borderRadius: 0,
+                                                        backgroundColor: "rgba(8,17,31,0.24)",
                                                         cursor: "pointer",
                                                         "& .vuln-actions": {
                                                             opacity: 0,
