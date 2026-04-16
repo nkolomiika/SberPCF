@@ -107,7 +107,6 @@ class ProjectMemberOut(BaseModel):
 class HostCreate(BaseModel):
     ip_address: str | None = Field(default=None, max_length=45)
     hostname: str | None = Field(default=None, max_length=255)
-    os: str | None = Field(default=None, max_length=255)
     status: HostStatus = HostStatus.UNKNOWN
     notes: str | None = None
 
@@ -121,7 +120,6 @@ class HostCreate(BaseModel):
 class HostUpdate(BaseModel):
     ip_address: str | None = Field(default=None, max_length=45)
     hostname: str | None = Field(default=None, max_length=255)
-    os: str | None = Field(default=None, max_length=255)
     status: HostStatus | None = None
     notes: str | None = None
 
@@ -131,7 +129,6 @@ class HostOut(ORMBase):
     project_id: UUID
     ip_address: str | None
     hostname: str | None
-    os: str | None
     status: HostStatus
     notes: str | None
     created_at: datetime
@@ -145,6 +142,8 @@ class PortCreate(BaseModel):
 
 
 class PortUpdate(BaseModel):
+    port_number: int | None = Field(default=None, ge=1, le=65535)
+    protocol: Protocol | None = None
     state: PortState | None = None
 
 

@@ -22,7 +22,7 @@ def test_user_create_rejects_short_password_tc_usr_008() -> None:
 
 def test_host_create_requires_ip_or_hostname_tc_host_003() -> None:
     with pytest.raises(PydanticValidationError):
-        HostCreate(os="Ubuntu 22.04")
+        HostCreate(notes="Host without ip and hostname")
 
 
 def test_host_create_accepts_hostname_only_tc_host_002() -> None:

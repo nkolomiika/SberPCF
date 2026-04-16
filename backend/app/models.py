@@ -113,7 +113,6 @@ class Host(Base, TimestampMixin):
     project_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    os: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[HostStatus] = mapped_column(Enum(HostStatus, name="host_status"), nullable=False, default=HostStatus.UNKNOWN)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 

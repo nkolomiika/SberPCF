@@ -1,5 +1,7 @@
 import os
 import datetime
+import sys
+import types
 
 
 REQUIRED_TEST_ENV = {
@@ -18,3 +20,8 @@ for key, value in REQUIRED_TEST_ENV.items():
 
 if not hasattr(datetime, "UTC"):
     datetime.UTC = datetime.timezone.utc  # type: ignore[attr-defined]
+
+if "magic" not in sys.modules:
+    magic_stub = types.ModuleType("magic")
+    magic_stub.from_buffer = lambda _content, mime=True: "application/octet-stream"
+    sys.modules["magic"] = magic_stub
