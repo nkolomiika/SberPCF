@@ -119,7 +119,16 @@ function PrivateLayout() {
               <IconButton
                 color="inherit"
                 onClick={openNotifications}
-                sx={{ border: "1px solid rgba(126,224,255,0.2)", borderRadius: 2, width: 40, height: 40 }}
+                sx={{
+                  border: "1px solid rgba(126,224,255,0.28)",
+                  borderRadius: 2,
+                  width: 44,
+                  height: 44,
+                  backgroundColor: "rgba(22,36,58,0.55)",
+                  "&:hover": {
+                    backgroundColor: "rgba(28,46,72,0.7)",
+                  },
+                }}
               >
                 <Badge color="error" badgeContent={count}>
                   <NotificationsIcon />
@@ -133,7 +142,8 @@ function PrivateLayout() {
                   borderRadius: 2,
                   textTransform: "none",
                   px: 1.4,
-                  py: 0.6,
+                  py: 0,
+                  height: 44,
                   minHeight: 44,
                   minWidth: 220,
                   justifyContent: "flex-end",
@@ -166,13 +176,20 @@ function PrivateLayout() {
         onClose={closeProfileMenu}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{
+          paper: {
+            sx: {
+              width: 220,
+            },
+          },
+        }}
       >
         <MenuItem
           onClick={() => {
             navigate("/");
             closeProfileMenu();
           }}
-          sx={{ minWidth: 170 }}
+          sx={{ minWidth: 220 }}
         >
           <ListItemIcon sx={{ minWidth: 30 }}>
             <HomeIcon fontSize="small" />
@@ -184,7 +201,7 @@ function PrivateLayout() {
             closeProfileMenu();
             void signOut();
           }}
-          sx={{ minWidth: 170 }}
+          sx={{ minWidth: 220 }}
         >
           <ListItemIcon sx={{ minWidth: 30 }}>
             <LogoutIcon fontSize="small" />

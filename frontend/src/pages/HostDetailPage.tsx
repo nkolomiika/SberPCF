@@ -1,5 +1,6 @@
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
+import AddIcon from "@mui/icons-material/Add";
 import {
   Alert,
   Box,
@@ -24,6 +25,10 @@ import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  addVulnerabilityAsset,
+  createEndpoint,
+  createPort,
+  createVulnerability,
   deleteEndpoint,
   deleteHost,
   deletePort,
@@ -70,6 +75,19 @@ export function HostDetailPage() {
   const [editingVulnerabilityDescription, setEditingVulnerabilityDescription] = useState("");
   const [editingVulnerabilitySeverity, setEditingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
   const [editingVulnerabilityStatus, setEditingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
+  const [isCreatePortOpen, setCreatePortOpen] = useState(false);
+  const [creatingPortNumber, setCreatingPortNumber] = useState("443");
+  const [creatingPortProtocol, setCreatingPortProtocol] = useState<Port["protocol"]>("tcp");
+  const [creatingPortState, setCreatingPortState] = useState<Port["state"]>("open");
+  const [isCreateEndpointOpen, setCreateEndpointOpen] = useState(false);
+  const [creatingEndpointPath, setCreatingEndpointPath] = useState("");
+  const [creatingEndpointMethod, setCreatingEndpointMethod] = useState<Exclude<Endpoint["method"], null>>("GET");
+  const [creatingEndpointDescription, setCreatingEndpointDescription] = useState("");
+  const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
+  const [creatingVulnerabilityTitle, setCreatingVulnerabilityTitle] = useState("");
+  const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
+  const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
+  const [creatingVulnerabilityStatus, setCreatingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
 
   const loadHost = useCallback(async () => {
     if (!projectId || !hostId) {
@@ -192,6 +210,22 @@ export function HostDetailPage() {
     await loadHost();
   };
 
+  const createHostPort = async () => {
+    if (!projectId || !hostId) {
+      return;
+    }
+    await createPort(projectId, hostId, {
+      port_number: Number(creatingPortNumber),
+      protocol: creatingPortProtocol,
+      state: creatingPortState,
+    });
+    setCreatePortOpen(false);
+    setCreatingPortNumber("443");
+    setCreatingPortProtocol("tcp");
+    setCreatingPortState("open");
+    await loadHost();
+  };
+
   const openEndpointEdit = (endpoint: Endpoint) => {
     setEditingEndpointId(endpoint.id);
     setEditingEndpointPath(endpoint.path);
@@ -221,6 +255,22 @@ export function HostDetailPage() {
       return;
     }
     await deleteEndpoint(projectId, hostId, endpointId);
+    await loadHost();
+  };
+
+  const createHostEndpoint = async () => {
+    if (!projectId || !hostId) {
+      return;
+    }
+    await createEndpoint(projectId, hostId, {
+      path: creatingEndpointPath.trim(),
+      method: creatingEndpointMethod,
+      description: creatingEndpointDescription.trim() || undefined,
+    });
+    setCreateEndpointOpen(false);
+    setCreatingEndpointPath("");
+    setCreatingEndpointMethod("GET");
+    setCreatingEndpointDescription("");
     await loadHost();
   };
 
@@ -258,10 +308,46 @@ export function HostDetailPage() {
     await loadHost();
   };
 
+  const createHostVulnerability = async () => {
+    if (!projectId || !hostId) {
+      return;
+    }
+    const vulnerability = await createVulnerability(projectId, {
+      title: creatingVulnerabilityTitle.trim(),
+      description: creatingVulnerabilityDescription.trim() || undefined,
+      severity: creatingVulnerabilitySeverity,
+      status: creatingVulnerabilityStatus,
+    });
+    await addVulnerabilityAsset(projectId, vulnerability.id, {
+      asset_type: "host",
+      asset_id: hostId,
+    });
+    setCreateVulnerabilityOpen(false);
+    setCreatingVulnerabilityTitle("");
+    setCreatingVulnerabilityDescription("");
+    setCreatingVulnerabilitySeverity("medium");
+    setCreatingVulnerabilityStatus("open");
+    await loadHost();
+  };
+
   const hostTitle = host?.hostname || host?.ip_address || "unknown-host";
   const portsCount = host?.ports.length ?? 0;
   const endpointsCount = host?.endpoints.length ?? 0;
   const vulnerabilitiesCount = vulnerabilities.length;
+  const severityChipSx: Record<Vulnerability["severity"], object> = {
+    critical: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
+    high: { bgcolor: "rgba(255,152,0,0.18)", color: "#ffcc80", border: "1px solid rgba(255,152,0,0.4)" },
+    medium: { bgcolor: "rgba(255,235,59,0.14)", color: "#fff59d", border: "1px solid rgba(255,235,59,0.35)" },
+    low: { bgcolor: "rgba(76,175,80,0.16)", color: "#a5d6a7", border: "1px solid rgba(76,175,80,0.38)" },
+    info: { bgcolor: "rgba(33,150,243,0.18)", color: "#90caf9", border: "1px solid rgba(33,150,243,0.38)" },
+  };
+  const vulnerabilityStatusChipSx: Record<Vulnerability["status"], object> = {
+    open: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
+    in_progress: { bgcolor: "rgba(255,152,0,0.18)", color: "#ffcc80", border: "1px solid rgba(255,152,0,0.4)" },
+    fixed: { bgcolor: "rgba(76,175,80,0.16)", color: "#a5d6a7", border: "1px solid rgba(76,175,80,0.38)" },
+    wont_fix: { bgcolor: "rgba(156,39,176,0.16)", color: "#ce93d8", border: "1px solid rgba(156,39,176,0.38)" },
+    accepted_risk: { bgcolor: "rgba(96,125,139,0.2)", color: "#b0bec5", border: "1px solid rgba(96,125,139,0.38)" },
+  };
 
   if (loading) {
     return (
@@ -390,9 +476,16 @@ export function HostDetailPage() {
           {selectedSection === "ports" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
               <CardContent>
-                <Typography variant="h6" fontWeight={700} mb={1}>
-                  Порты
-                </Typography>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                  <Typography variant="h6" fontWeight={700}>
+                    Порты
+                  </Typography>
+                  <Tooltip title="Добавить порт">
+                    <IconButton size="small" onClick={() => setCreatePortOpen(true)}>
+                      <AddIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
                 <Stack spacing={1}>
                   {host?.ports.map((port) => (
                     <Stack
@@ -431,9 +524,16 @@ export function HostDetailPage() {
           {selectedSection === "endpoints" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
               <CardContent>
-                <Typography variant="h6" fontWeight={700} mb={1}>
-                  Эндпоинты
-                </Typography>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                  <Typography variant="h6" fontWeight={700}>
+                    Эндпоинты
+                  </Typography>
+                  <Tooltip title="Добавить эндпоинт">
+                    <IconButton size="small" onClick={() => setCreateEndpointOpen(true)}>
+                      <AddIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
                 <Stack spacing={1}>
                   {host?.endpoints.map((endpoint) => (
                     <Box key={endpoint.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, borderRadius: 0 }}>
@@ -469,15 +569,28 @@ export function HostDetailPage() {
           {selectedSection === "vulns" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
               <CardContent>
-                <Typography variant="h6" fontWeight={700} mb={1}>
-                  Уязвимости хоста
-                </Typography>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                  <Typography variant="h6" fontWeight={700}>
+                    Уязвимости хоста
+                  </Typography>
+                  <Tooltip title="Добавить уязвимость">
+                    <IconButton size="small" onClick={() => setCreateVulnerabilityOpen(true)}>
+                      <AddIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
                 <Stack spacing={1}>
                   {vulnerabilities.map((item) => (
                     <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, borderRadius: 0 }}>
-                      <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="center">
-                        <Typography fontWeight={600}>{item.title}</Typography>
-                        <Stack direction="row" spacing={0.4}>
+                      <Stack direction="row" justifyContent="space-between" alignItems="center">
+                        <Stack spacing={0.8}>
+                          <Typography fontWeight={600}>{item.title}</Typography>
+                          <Stack direction="row" spacing={1}>
+                            <Chip size="small" label={item.severity} sx={severityChipSx[item.severity]} />
+                            <Chip size="small" label={item.status} sx={vulnerabilityStatusChipSx[item.status]} />
+                          </Stack>
+                        </Stack>
+                        <Stack direction="row" spacing={0.4} alignItems="center">
                           <Tooltip title="Редактировать">
                             <IconButton size="small" onClick={() => openVulnerabilityEdit(item)}>
                               <EditIcon fontSize="small" />
@@ -489,10 +602,6 @@ export function HostDetailPage() {
                             </IconButton>
                           </Tooltip>
                         </Stack>
-                      </Stack>
-                      <Stack direction="row" spacing={1} mt={0.8}>
-                        <Chip size="small" label={item.severity} />
-                        <Chip size="small" label={item.status} />
                       </Stack>
                     </Box>
                   ))}
@@ -557,6 +666,36 @@ export function HostDetailPage() {
         </DialogActions>
       </Dialog>
 
+      <Dialog open={isCreatePortOpen} onClose={() => setCreatePortOpen(false)} fullWidth>
+        <DialogTitle>Добавить порт</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              label="Номер порта"
+              type="number"
+              inputProps={{ min: 1, max: 65535 }}
+              value={creatingPortNumber}
+              onChange={(event) => setCreatingPortNumber(event.target.value)}
+            />
+            <TextField select label="Протокол" value={creatingPortProtocol} onChange={(event) => setCreatingPortProtocol(event.target.value as Port["protocol"])}>
+              <MenuItem value="tcp">tcp</MenuItem>
+              <MenuItem value="udp">udp</MenuItem>
+            </TextField>
+            <TextField select label="Состояние" value={creatingPortState} onChange={(event) => setCreatingPortState(event.target.value as Port["state"])}>
+              <MenuItem value="open">open</MenuItem>
+              <MenuItem value="closed">closed</MenuItem>
+              <MenuItem value="filtered">filtered</MenuItem>
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreatePortOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void createHostPort()}>
+            Создать
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={isEditEndpointOpen} onClose={() => setEditEndpointOpen(false)} fullWidth>
         <DialogTitle>Редактировать эндпоинт</DialogTitle>
         <DialogContent>
@@ -587,6 +726,40 @@ export function HostDetailPage() {
           <Button onClick={() => setEditEndpointOpen(false)}>Отмена</Button>
           <Button variant="contained" onClick={() => void saveEndpointEdit()} disabled={!editingEndpointPath.trim()}>
             Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={isCreateEndpointOpen} onClose={() => setCreateEndpointOpen(false)} fullWidth>
+        <DialogTitle>Добавить эндпоинт</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Путь" value={creatingEndpointPath} onChange={(event) => setCreatingEndpointPath(event.target.value)} />
+            <TextField
+              select
+              label="HTTP-метод"
+              value={creatingEndpointMethod}
+              onChange={(event) => setCreatingEndpointMethod(event.target.value as Exclude<Endpoint["method"], null>)}
+            >
+              {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((method) => (
+                <MenuItem key={method} value={method}>
+                  {method}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              multiline
+              minRows={3}
+              label="Описание"
+              value={creatingEndpointDescription}
+              onChange={(event) => setCreatingEndpointDescription(event.target.value)}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreateEndpointOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void createHostEndpoint()} disabled={!creatingEndpointPath.trim()}>
+            Создать
           </Button>
         </DialogActions>
       </Dialog>
@@ -633,6 +806,56 @@ export function HostDetailPage() {
           <Button onClick={() => setEditVulnerabilityOpen(false)}>Отмена</Button>
           <Button variant="contained" onClick={() => void saveVulnerabilityEdit()} disabled={!editingVulnerabilityTitle.trim()}>
             Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={isCreateVulnerabilityOpen} onClose={() => setCreateVulnerabilityOpen(false)} fullWidth>
+        <DialogTitle>Добавить уязвимость к хосту</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              label="Название"
+              value={creatingVulnerabilityTitle}
+              onChange={(event) => setCreatingVulnerabilityTitle(event.target.value)}
+            />
+            <TextField
+              multiline
+              minRows={3}
+              label="Описание"
+              value={creatingVulnerabilityDescription}
+              onChange={(event) => setCreatingVulnerabilityDescription(event.target.value)}
+            />
+            <TextField
+              select
+              label="Критичность"
+              value={creatingVulnerabilitySeverity}
+              onChange={(event) => setCreatingVulnerabilitySeverity(event.target.value as Vulnerability["severity"])}
+            >
+              <MenuItem value="critical">critical</MenuItem>
+              <MenuItem value="high">high</MenuItem>
+              <MenuItem value="medium">medium</MenuItem>
+              <MenuItem value="low">low</MenuItem>
+              <MenuItem value="info">info</MenuItem>
+            </TextField>
+            <TextField
+              select
+              label="Статус"
+              value={creatingVulnerabilityStatus}
+              onChange={(event) => setCreatingVulnerabilityStatus(event.target.value as Vulnerability["status"])}
+            >
+              <MenuItem value="open">open</MenuItem>
+              <MenuItem value="in_progress">in_progress</MenuItem>
+              <MenuItem value="fixed">fixed</MenuItem>
+              <MenuItem value="wont_fix">wont_fix</MenuItem>
+              <MenuItem value="accepted_risk">accepted_risk</MenuItem>
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreateVulnerabilityOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void createHostVulnerability()} disabled={!creatingVulnerabilityTitle.trim()}>
+            Создать
           </Button>
         </DialogActions>
       </Dialog>

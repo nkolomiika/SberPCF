@@ -51,8 +51,8 @@ export async function getMe(): Promise<User> {
   return data;
 }
 
-export async function getProjects(page = 1, size = 20): Promise<PaginatedResponse<Project>> {
-  const { data } = await api.get<PaginatedResponse<Project>>("/projects", { params: { page, size } });
+export async function getProjects(page = 1, size = 20, status?: Project["status"]): Promise<PaginatedResponse<Project>> {
+  const { data } = await api.get<PaginatedResponse<Project>>("/projects", { params: { page, size, status } });
   return data;
 }
 
@@ -69,6 +69,10 @@ export async function createProject(payload: {
 export async function getProjectMembers(projectId: string): Promise<ProjectMember[]> {
   const { data } = await api.get<ProjectMember[]>(`/projects/${projectId}/members`);
   return data;
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}`);
 }
 
 export async function getHosts(projectId: string): Promise<PaginatedResponse<Host>> {

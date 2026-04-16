@@ -173,6 +173,20 @@ export function ProjectDetailPage() {
     });
     return stats;
   }, [vulnerabilities]);
+  const severityChipSx: Record<Vulnerability["severity"], object> = {
+    critical: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
+    high: { bgcolor: "rgba(255,152,0,0.18)", color: "#ffcc80", border: "1px solid rgba(255,152,0,0.4)" },
+    medium: { bgcolor: "rgba(255,235,59,0.14)", color: "#fff59d", border: "1px solid rgba(255,235,59,0.35)" },
+    low: { bgcolor: "rgba(76,175,80,0.16)", color: "#a5d6a7", border: "1px solid rgba(76,175,80,0.38)" },
+    info: { bgcolor: "rgba(33,150,243,0.18)", color: "#90caf9", border: "1px solid rgba(33,150,243,0.38)" },
+  };
+  const vulnerabilityStatusChipSx: Record<Vulnerability["status"], object> = {
+    open: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
+    in_progress: { bgcolor: "rgba(255,152,0,0.18)", color: "#ffcc80", border: "1px solid rgba(255,152,0,0.4)" },
+    fixed: { bgcolor: "rgba(76,175,80,0.16)", color: "#a5d6a7", border: "1px solid rgba(76,175,80,0.38)" },
+    wont_fix: { bgcolor: "rgba(156,39,176,0.16)", color: "#ce93d8", border: "1px solid rgba(156,39,176,0.38)" },
+    accepted_risk: { bgcolor: "rgba(96,125,139,0.2)", color: "#b0bec5", border: "1px solid rgba(96,125,139,0.38)" },
+  };
 
   const submitHost = async () => {
     if (!projectId) {
@@ -403,8 +417,8 @@ export function ProjectDetailPage() {
                     <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }}>
                       <Typography>{item.title}</Typography>
                       <Stack direction="row" spacing={1} mt={1}>
-                        <Chip label={item.severity} size="small" />
-                        <Chip label={item.status} size="small" color="warning" />
+                        <Chip label={item.severity} size="small" sx={severityChipSx[item.severity]} />
+                        <Chip label={item.status} size="small" sx={vulnerabilityStatusChipSx[item.status]} />
                       </Stack>
                     </Box>
                   ))}
