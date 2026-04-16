@@ -4,6 +4,7 @@ import enum
 class UserRole(str, enum.Enum):
     ADMIN = "admin"
     PENTESTER = "pentester"
+    DEVELOPER = "developer"
 
 
 class ProjectStatus(str, enum.Enum):

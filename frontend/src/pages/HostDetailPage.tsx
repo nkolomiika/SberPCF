@@ -34,21 +34,25 @@ import {
   addVulnerabilityAsset,
   createEndpoint,
   createPort,
+  createService,
   createVulnerability,
   deleteEndpoint,
   deleteHost,
   deletePort,
+  deleteService,
   deleteVulnerability,
+  getServices,
   getHost,
   getHosts,
   getHostVulnerabilities,
   updateEndpoint,
   updateHost,
   updatePort,
+  updateService,
   updateVulnerability,
 } from "../api";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
-import type { Endpoint, Host, HostDetails, HostTreeStats, Port, Vulnerability } from "../types";
+import type { Endpoint, Host, HostDetails, HostTreeStats, Port, Service, Vulnerability } from "../types";
 
 export function HostDetailPage() {
   const { projectId, hostId } = useParams<{ projectId: string; hostId: string }>();
@@ -68,6 +72,18 @@ export function HostDetailPage() {
   const [editingPortNumber, setEditingPortNumber] = useState("1");
   const [editingPortProtocol, setEditingPortProtocol] = useState<Port["protocol"]>("tcp");
   const [editingPortState, setEditingPortState] = useState<Port["state"]>("open");
+  const [servicesByPortId, setServicesByPortId] = useState<Record<string, Service[]>>({});
+  const [isCreateServiceOpen, setCreateServiceOpen] = useState(false);
+  const [createServicePortId, setCreateServicePortId] = useState<string | null>(null);
+  const [creatingServiceName, setCreatingServiceName] = useState("");
+  const [creatingServiceVersion, setCreatingServiceVersion] = useState("");
+  const [creatingServiceBanner, setCreatingServiceBanner] = useState("");
+  const [isEditServiceOpen, setEditServiceOpen] = useState(false);
+  const [editServicePortId, setEditServicePortId] = useState<string | null>(null);
+  const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
+  const [editingServiceName, setEditingServiceName] = useState("");
+  const [editingServiceVersion, setEditingServiceVersion] = useState("");
+  const [editingServiceBanner, setEditingServiceBanner] = useState("");
   const [isEditEndpointOpen, setEditEndpointOpen] = useState(false);
   const [editingEndpointId, setEditingEndpointId] = useState<string | null>(null);
   const [editingEndpointPath, setEditingEndpointPath] = useState("");
@@ -170,6 +186,30 @@ export function HostDetailPage() {
   useEffect(() => {
     void loadHost();
   }, [loadHost]);
+
+  useEffect(() => {
+    const loadServices = async () => {
+      if (!projectId || !hostId || !host?.ports.length) {
+        setServicesByPortId({});
+        return;
+      }
+      const entries = await Promise.allSettled(
+        host.ports.map(async (port) => {
+          const services = await getServices(projectId, hostId, port.id);
+          return [port.id, services] as const;
+        })
+      );
+      const mapped: Record<string, Service[]> = {};
+      entries.forEach((result) => {
+        if (result.status === "fulfilled") {
+          const [portId, services] = result.value;
+          mapped[portId] = services;
+        }
+      });
+      setServicesByPortId(mapped);
+    };
+    void loadServices();
+  }, [host?.ports, hostId, projectId]);
 
   const hostActionsOpen = Boolean(hostActionsAnchorEl);
   const portActionsOpen = Boolean(portActionsAnchorEl);
@@ -339,6 +379,60 @@ export function HostDetailPage() {
     setCreatingPortNumber("443");
     setCreatingPortProtocol("tcp");
     setCreatingPortState("open");
+    await loadHost();
+  };
+
+  const openCreateServiceDialog = (portId: string) => {
+    setCreateServicePortId(portId);
+    setCreatingServiceName("");
+    setCreatingServiceVersion("");
+    setCreatingServiceBanner("");
+    setCreateServiceOpen(true);
+  };
+
+  const createPortService = async () => {
+    if (!projectId || !hostId || !createServicePortId) {
+      return;
+    }
+    await createService(projectId, hostId, createServicePortId, {
+      name: creatingServiceName.trim(),
+      version: creatingServiceVersion.trim() || undefined,
+      banner: creatingServiceBanner.trim() || undefined,
+    });
+    setCreateServiceOpen(false);
+    await loadHost();
+  };
+
+  const openEditServiceDialog = (portId: string, service: Service) => {
+    setEditServicePortId(portId);
+    setEditingServiceId(service.id);
+    setEditingServiceName(service.name);
+    setEditingServiceVersion(service.version || "");
+    setEditingServiceBanner(service.banner || "");
+    setEditServiceOpen(true);
+  };
+
+  const saveServiceEdit = async () => {
+    if (!projectId || !hostId || !editServicePortId || !editingServiceId) {
+      return;
+    }
+    await updateService(projectId, hostId, editServicePortId, editingServiceId, {
+      name: editingServiceName.trim() || undefined,
+      version: editingServiceVersion.trim() || undefined,
+      banner: editingServiceBanner.trim() || undefined,
+    });
+    setEditServiceOpen(false);
+    await loadHost();
+  };
+
+  const removeService = async (portId: string, serviceId: string) => {
+    if (!projectId || !hostId) {
+      return;
+    }
+    if (!window.confirm("Удалить сервис?")) {
+      return;
+    }
+    await deleteService(projectId, hostId, portId, serviceId);
     await loadHost();
   };
 
@@ -770,9 +864,77 @@ export function HostDetailPage() {
                         </Stack>
                       </Stack>
                       <Collapse in={expandedPortIds.includes(port.id)} timeout="auto" unmountOnExit>
-                        <Typography mt={0.8} color="text.secondary" variant="body2">
-                          Порт {port.port_number}/{port.protocol} сейчас в состоянии {port.state}.
-                        </Typography>
+                        <Stack mt={1} spacing={1}>
+                          <Typography color="text.secondary" variant="body2">
+                            Порт {port.port_number}/{port.protocol} сейчас в состоянии {port.state}.
+                          </Typography>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center">
+                            <Typography variant="body2" fontWeight={600}>
+                              Сервисы
+                            </Typography>
+                            <Tooltip title="Добавить сервис">
+                              <IconButton
+                                size="small"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openCreateServiceDialog(port.id);
+                                }}
+                              >
+                                <AddIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          </Stack>
+                          <Stack spacing={0.8}>
+                            {(servicesByPortId[port.id] ?? []).map((service) => (
+                              <Stack
+                                key={service.id}
+                                direction="row"
+                                justifyContent="space-between"
+                                alignItems="center"
+                                sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 0.8, borderRadius: 0 }}
+                              >
+                                <Stack spacing={0.2}>
+                                  <Typography variant="body2" fontWeight={600}>
+                                    {service.name}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    {service.version || "version n/a"}
+                                  </Typography>
+                                </Stack>
+                                <Stack direction="row" spacing={0.4}>
+                                  <Tooltip title="Редактировать сервис">
+                                    <IconButton
+                                      size="small"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openEditServiceDialog(port.id, service);
+                                      }}
+                                    >
+                                      <EditIcon fontSize="small" />
+                                    </IconButton>
+                                  </Tooltip>
+                                  <Tooltip title="Удалить сервис">
+                                    <IconButton
+                                      size="small"
+                                      color="error"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void removeService(port.id, service.id);
+                                      }}
+                                    >
+                                      <DeleteIcon fontSize="small" />
+                                    </IconButton>
+                                  </Tooltip>
+                                </Stack>
+                              </Stack>
+                            ))}
+                            {(servicesByPortId[port.id] ?? []).length === 0 && (
+                              <Typography variant="caption" color="text.secondary">
+                                Сервисы на порту пока не добавлены.
+                              </Typography>
+                            )}
+                          </Stack>
+                        </Stack>
                       </Collapse>
                     </Stack>
                   ))}
@@ -1106,6 +1268,40 @@ export function HostDetailPage() {
           <Button onClick={() => setCreatePortOpen(false)}>Отмена</Button>
           <Button variant="contained" onClick={() => void createHostPort()}>
             Создать
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={isCreateServiceOpen} onClose={() => setCreateServiceOpen(false)} fullWidth>
+        <DialogTitle>Добавить сервис</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Название сервиса" value={creatingServiceName} onChange={(event) => setCreatingServiceName(event.target.value)} />
+            <TextField label="Версия" value={creatingServiceVersion} onChange={(event) => setCreatingServiceVersion(event.target.value)} />
+            <TextField multiline minRows={3} label="Banner" value={creatingServiceBanner} onChange={(event) => setCreatingServiceBanner(event.target.value)} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreateServiceOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void createPortService()} disabled={!creatingServiceName.trim()}>
+            Создать
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={isEditServiceOpen} onClose={() => setEditServiceOpen(false)} fullWidth>
+        <DialogTitle>Редактировать сервис</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Название сервиса" value={editingServiceName} onChange={(event) => setEditingServiceName(event.target.value)} />
+            <TextField label="Версия" value={editingServiceVersion} onChange={(event) => setEditingServiceVersion(event.target.value)} />
+            <TextField multiline minRows={3} label="Banner" value={editingServiceBanner} onChange={(event) => setEditingServiceBanner(event.target.value)} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditServiceOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void saveServiceEdit()} disabled={!editingServiceName.trim()}>
+            Сохранить
           </Button>
         </DialogActions>
       </Dialog>

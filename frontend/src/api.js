@@ -42,6 +42,51 @@ export async function getMe() {
     const { data } = await api.get("/users/me");
     return data;
 }
+export async function getUsers(page = 1, size = 200) {
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+            sessionId: "a74592",
+            runId: "users-422-post-fix",
+            hypothesisId: "H11",
+            location: "api.ts:getUsers:request",
+            message: "Requesting users list",
+            data: { page, size },
+            timestamp: Date.now(),
+        }),
+    }).catch(() => { });
+    // #endregion
+    try {
+        const { data } = await api.get("/users", { params: { page, size } });
+        return data;
+    }
+    catch (error) {
+        const axiosError = error;
+        // #region agent log
+        fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+            body: JSON.stringify({
+                sessionId: "a74592",
+                runId: "users-422-post-fix",
+                hypothesisId: "H12",
+                location: "api.ts:getUsers:error",
+                message: "Users list request failed",
+                data: {
+                    page,
+                    size,
+                    status: axiosError.response?.status ?? null,
+                    responseData: axiosError.response?.data ?? null,
+                },
+                timestamp: Date.now(),
+            }),
+        }).catch(() => { });
+        // #endregion
+        throw error;
+    }
+}
 export async function getProjects(page = 1, size = 20, status) {
     const { data } = await api.get("/projects", { params: { page, size, status } });
     return data;
@@ -50,9 +95,23 @@ export async function createProject(payload) {
     const { data } = await api.post("/projects", payload);
     return data;
 }
+export async function getProject(projectId) {
+    const { data } = await api.get(`/projects/${projectId}`);
+    return data;
+}
+export async function updateProject(projectId, payload) {
+    const { data } = await api.put(`/projects/${projectId}`, payload);
+    return data;
+}
 export async function getProjectMembers(projectId) {
     const { data } = await api.get(`/projects/${projectId}/members`);
     return data;
+}
+export async function addProjectMember(projectId, userId) {
+    await api.post(`/projects/${projectId}/members`, { user_id: userId });
+}
+export async function removeProjectMember(projectId, userId) {
+    await api.delete(`/projects/${projectId}/members/${userId}`);
 }
 export async function deleteProject(projectId) {
     await api.delete(`/projects/${projectId}`);
@@ -92,6 +151,21 @@ export async function updatePort(projectId, hostId, portId, payload) {
 }
 export async function deletePort(projectId, hostId, portId) {
     await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}`);
+}
+export async function getServices(projectId, hostId, portId) {
+    const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`);
+    return data;
+}
+export async function createService(projectId, hostId, portId, payload) {
+    const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`, payload);
+    return data;
+}
+export async function updateService(projectId, hostId, portId, serviceId, payload) {
+    const { data } = await api.put(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`, payload);
+    return data;
+}
+export async function deleteService(projectId, hostId, portId, serviceId) {
+    await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`);
 }
 export async function getEndpoints(projectId, hostId) {
     const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/endpoints`);
@@ -164,6 +238,10 @@ export async function createVulnerabilityComment(projectId, vulnerabilityId, con
     const { data } = await api.post(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, { content });
     return data;
 }
+export async function updateVulnerabilityComment(projectId, vulnerabilityId, commentId, content) {
+    const { data } = await api.put(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`, { content });
+    return data;
+}
 export async function deleteVulnerabilityComment(projectId, vulnerabilityId, commentId) {
     await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`);
 }
@@ -189,4 +267,10 @@ export async function listNotifications() {
 export async function unreadCount() {
     const { data } = await api.get("/notifications/unread-count");
     return data.count;
+}
+export async function getAuditLogs(page = 1, size = 50, filters) {
+    const { data } = await api.get("/audit-logs", {
+        params: { page, size, ...filters },
+    });
+    return data;
 }

@@ -71,6 +71,12 @@ class ProjectCreate(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
 
+    @model_validator(mode="after")
+    def validate_dates(self) -> "ProjectCreate":
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValueError("Дата окончания проекта не может быть раньше даты начала")
+        return self
+
 
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
@@ -78,6 +84,12 @@ class ProjectUpdate(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     status: ProjectStatus | None = None
+
+    @model_validator(mode="after")
+    def validate_dates(self) -> "ProjectUpdate":
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValueError("Дата окончания проекта не может быть раньше даты начала")
+        return self
 
 
 class ProjectOut(ORMBase):

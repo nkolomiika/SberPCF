@@ -1,4 +1,5 @@
 import AddIcon from "@mui/icons-material/Add";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -47,19 +48,40 @@ import {
   getPorts,
   getProjectMembers,
   getUsers,
-  getProjects,
+  getProject,
   getVulnerability,
   importProjectData,
   listVulnerabilityComments,
   listVulnerabilityFiles,
   removeProjectMember,
+  updateProject,
   updateHost,
+  updateVulnerabilityComment,
   updateVulnerability,
   uploadVulnerabilityFile,
 } from "../api";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { useAuthStore } from "../store";
 import type { Endpoint, Host, HostTreeStats, ImportResult, Port, ProjectMember, User, Vulnerability, VulnerabilityComment, VulnerabilityDetails, VulnerabilityFile } from "../types";
+
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+const toDateInputValue = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const parseIsoDateOnly = (value: string | null) => {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(`${value}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
 
 export function ProjectDetailPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -75,6 +97,8 @@ export function ProjectDetailPage() {
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [projectName, setProjectName] = useState<string>("");
   const [projectDescription, setProjectDescription] = useState<string>("");
+  const [projectStartDate, setProjectStartDate] = useState<string | null>(null);
+  const [projectEndDate, setProjectEndDate] = useState<string | null>(null);
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   const [usersCatalog, setUsersCatalog] = useState<User[]>([]);
   const [membersDialogOpen, setMembersDialogOpen] = useState(false);
@@ -89,6 +113,9 @@ export function ProjectDetailPage() {
   const [actionsAnchorEl, setActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<"md" | "pdf" | "docx">("pdf");
+  const [extendDialogOpen, setExtendDialogOpen] = useState(false);
+  const [extendEndDate, setExtendEndDate] = useState("");
+  const [extendingProject, setExtendingProject] = useState(false);
 
   const [hostOpen, setHostOpen] = useState(false);
   const [hostIp, setHostIp] = useState("");
@@ -102,6 +129,9 @@ export function ProjectDetailPage() {
   const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [vulnBusy, setVulnBusy] = useState(false);
+  const [editCommentOpen, setEditCommentOpen] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentContent, setEditingCommentContent] = useState("");
 
   const availableUsers = useMemo(
     () => usersCatalog.filter((candidate) => !projectMembers.some((member) => member.user_id === candidate.id)),
@@ -113,16 +143,17 @@ export function ProjectDetailPage() {
       return;
     }
     try {
-      const [hostsResp, projectsResp, membersResp] = await Promise.all([
+      const [hostsResp, projectResp, membersResp] = await Promise.all([
         getHosts(projectId),
-        getProjects(1, 100),
+        getProject(projectId),
         getProjectMembers(projectId),
       ]);
       setHosts(hostsResp.items);
       setProjectMembers(membersResp);
-      const currentProject = projectsResp.items.find((project) => project.id === projectId);
-      setProjectName(currentProject?.name ?? projectId);
-      setProjectDescription(currentProject?.description ?? "");
+      setProjectName(projectResp.name ?? projectId);
+      setProjectDescription(projectResp.description ?? "");
+      setProjectStartDate(projectResp.start_date);
+      setProjectEndDate(projectResp.end_date);
       setSelectedHostId((previousHostId) => {
         if (previousHostId && hostsResp.items.some((host) => host.id === previousHostId)) {
           return previousHostId;
@@ -249,6 +280,108 @@ export function ProjectDetailPage() {
     wont_fix: { bgcolor: "rgba(156,39,176,0.16)", color: "#ce93d8", border: "1px solid rgba(156,39,176,0.38)" },
     accepted_risk: { bgcolor: "rgba(96,125,139,0.2)", color: "#b0bec5", border: "1px solid rgba(96,125,139,0.38)" },
   };
+  const projectTimeMetrics = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const start = parseIsoDateOnly(projectStartDate);
+    const end = parseIsoDateOnly(projectEndDate);
+    const startLabel = start ? start.toLocaleDateString("ru-RU") : "не задано";
+    const endLabel = end ? end.toLocaleDateString("ru-RU") : "не задано";
+
+    if (!end) {
+      return {
+        startLabel,
+        endLabel,
+        daysLeft: null as number | null,
+        progressPercent: null as number | null,
+        statusTone: "neutral" as "neutral" | "success" | "warning" | "error",
+        statusLabel: "Без дедлайна",
+      };
+    }
+
+    const daysLeft = Math.ceil((end.getTime() - today.getTime()) / DAY_IN_MS);
+    let progressPercent: number | null = null;
+    if (start && end.getTime() > start.getTime()) {
+      const total = Math.ceil((end.getTime() - start.getTime()) / DAY_IN_MS);
+      const passed = Math.ceil((today.getTime() - start.getTime()) / DAY_IN_MS);
+      progressPercent = Math.max(0, Math.min(100, Math.round((passed / total) * 100)));
+    }
+
+    if (daysLeft < 0) {
+      return {
+        startLabel,
+        endLabel,
+        daysLeft,
+        progressPercent,
+        statusTone: "error" as const,
+        statusLabel: "Просрочен",
+      };
+    }
+    if (daysLeft <= 3) {
+      return {
+        startLabel,
+        endLabel,
+        daysLeft,
+        progressPercent,
+        statusTone: "error" as const,
+        statusLabel: "Критичный срок",
+      };
+    }
+    if (daysLeft <= 14) {
+      return {
+        startLabel,
+        endLabel,
+        daysLeft,
+        progressPercent,
+        statusTone: "warning" as const,
+        statusLabel: "Риск срыва",
+      };
+    }
+    return {
+      startLabel,
+      endLabel,
+      daysLeft,
+      progressPercent,
+      statusTone: "success" as const,
+      statusLabel: "В графике",
+    };
+  }, [projectStartDate, projectEndDate]);
+  const timelineBar = useMemo(() => {
+    const start = parseIsoDateOnly(projectStartDate);
+    const end = parseIsoDateOnly(projectEndDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (!start || !end || end.getTime() <= start.getTime()) {
+      return {
+        ready: false as const,
+      };
+    }
+
+    const totalMs = end.getTime() - start.getTime();
+    const toPercent = (date: Date) => clampPercent(((date.getTime() - start.getTime()) / totalMs) * 100);
+
+    const warningStart = new Date(end.getTime() - 14 * DAY_IN_MS);
+    const criticalStart = new Date(end.getTime() - 3 * DAY_IN_MS);
+
+    const normalZonePercent = toPercent(warningStart);
+    const warningZonePercent = Math.max(0, toPercent(criticalStart) - normalZonePercent);
+    const criticalZonePercent = Math.max(0, 100 - normalZonePercent - warningZonePercent);
+    const todayPercent = toPercent(today);
+    const todayLabelPercent = Math.max(8, Math.min(92, todayPercent));
+
+    return {
+      ready: true as const,
+      normalZonePercent,
+      warningZonePercent,
+      criticalZonePercent,
+      todayPercent,
+      todayLabelPercent,
+      startLabel: start.toLocaleDateString("ru-RU"),
+      todayLabel: today.toLocaleDateString("ru-RU"),
+      endLabel: end.toLocaleDateString("ru-RU"),
+    };
+  }, [projectStartDate, projectEndDate]);
 
   const submitHost = async () => {
     if (!projectId) {
@@ -433,6 +566,31 @@ export function ProjectDetailPage() {
     }
   };
 
+  const openCommentEdit = (comment: VulnerabilityComment) => {
+    setEditingCommentId(comment.id);
+    setEditingCommentContent(comment.content);
+    setEditCommentOpen(true);
+  };
+
+  const saveCommentEdit = async () => {
+    if (!projectId || !activeVuln || !editingCommentId || !editingCommentContent.trim()) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await updateVulnerabilityComment(projectId, activeVuln.id, editingCommentId, editingCommentContent.trim());
+      const commentsPage = await listVulnerabilityComments(projectId, activeVuln.id);
+      setVulnComments(commentsPage.items);
+      setEditCommentOpen(false);
+      setEditingCommentId(null);
+      setEditingCommentContent("");
+    } catch {
+      setError("Не удалось обновить комментарий");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
   const submitImport = async () => {
     if (!projectId || !importFile) {
       return;
@@ -484,6 +642,43 @@ export function ProjectDetailPage() {
     setActionsAnchorEl(null);
   };
 
+  const openExtendDialog = () => {
+    setError(null);
+    setExtendEndDate(projectEndDate ?? "");
+    setExtendDialogOpen(true);
+  };
+
+  const applyQuickExtension = (days: number) => {
+    const baseDate = parseIsoDateOnly(extendEndDate || projectEndDate) ?? new Date();
+    baseDate.setDate(baseDate.getDate() + days);
+    setExtendEndDate(toDateInputValue(baseDate));
+  };
+
+  const submitProjectExtension = async () => {
+    if (!projectId || !extendEndDate) {
+      return;
+    }
+    if (projectStartDate && extendEndDate < projectStartDate) {
+      setError("Новая дата окончания не может быть раньше даты начала проекта");
+      return;
+    }
+    if (projectEndDate && extendEndDate <= projectEndDate) {
+      setError("Новая дата окончания должна быть позже текущей даты окончания");
+      return;
+    }
+    setExtendingProject(true);
+    setError(null);
+    try {
+      await updateProject(projectId, { end_date: extendEndDate });
+      setExtendDialogOpen(false);
+      await loadProjectData();
+    } catch {
+      setError("Не удалось продлить срок проекта");
+    } finally {
+      setExtendingProject(false);
+    }
+  };
+
   const openMembersDialog = async () => {
     if (!projectId) {
       return;
@@ -494,7 +689,22 @@ export function ProjectDetailPage() {
       return;
     }
     try {
-      const usersResponse = await getUsers(1, 300);
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "users-422-post-fix",
+          hypothesisId: "H13",
+          location: "ProjectDetailPage.tsx:openMembersDialog:beforeGetUsers",
+          message: "Opening members dialog and requesting user catalog",
+          data: { requestedSize: 200, projectId, userRole: user?.role ?? null },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      const usersResponse = await getUsers(1, 200);
       setUsersCatalog(usersResponse.items);
     } catch {
       setError("Не удалось загрузить список пользователей для управления участниками.");
@@ -601,6 +811,17 @@ export function ProjectDetailPage() {
           <GroupIcon fontSize="small" sx={{ mr: 1 }} />
           Участники проекта
         </MenuItem>
+        {user?.role === "admin" && (
+          <MenuItem
+            onClick={() => {
+              closeActionsMenu();
+              openExtendDialog();
+            }}
+          >
+            <AccessTimeIcon fontSize="small" sx={{ mr: 1 }} />
+            Продлить проект
+          </MenuItem>
+        )}
       </Menu>
 
       <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
@@ -646,6 +867,117 @@ export function ProjectDetailPage() {
                     Описание проекта
                   </Typography>
                   <Typography color="text.secondary">{projectDescription || "Описание проекта не заполнено"}</Typography>
+                  <Box sx={{ mt: 2, p: 1.5, border: "1px solid rgba(126,224,255,0.16)" }}>
+                    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1} alignItems={{ md: "center" }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                        <Typography variant="subtitle2" fontWeight={700}>
+                          Таймлайн проекта
+                        </Typography>
+                        <Chip
+                          size="small"
+                          color={projectTimeMetrics.statusTone === "neutral" ? "default" : projectTimeMetrics.statusTone}
+                          label={projectTimeMetrics.statusLabel}
+                        />
+                        {projectTimeMetrics.daysLeft !== null && (
+                          <Chip
+                            size="small"
+                            variant="outlined"
+                            label={
+                              projectTimeMetrics.daysLeft >= 0
+                                ? `${projectTimeMetrics.daysLeft} дн. осталось`
+                                : `${Math.abs(projectTimeMetrics.daysLeft)} дн. просрочки`
+                            }
+                          />
+                        )}
+                      </Stack>
+                      {user?.role === "admin" && (
+                        <Button size="small" variant="outlined" startIcon={<AccessTimeIcon />} onClick={openExtendDialog}>
+                          Продлить
+                        </Button>
+                      )}
+                    </Stack>
+
+                    <Box sx={{ mt: 1.5 }}>
+                      {timelineBar.ready ? (
+                        <>
+                          <Box sx={{ position: "relative", height: 14, border: "1px solid rgba(126,224,255,0.24)", overflow: "hidden" }}>
+                            <Box
+                              sx={{
+                                position: "absolute",
+                                left: 0,
+                                top: 0,
+                                bottom: 0,
+                                width: `${timelineBar.normalZonePercent}%`,
+                                bgcolor: "rgba(76,175,80,0.26)",
+                              }}
+                            />
+                            <Box
+                              sx={{
+                                position: "absolute",
+                                left: `${timelineBar.normalZonePercent}%`,
+                                top: 0,
+                                bottom: 0,
+                                width: `${timelineBar.warningZonePercent}%`,
+                                bgcolor: "rgba(255,152,0,0.3)",
+                              }}
+                            />
+                            <Box
+                              sx={{
+                                position: "absolute",
+                                left: `${timelineBar.normalZonePercent + timelineBar.warningZonePercent}%`,
+                                top: 0,
+                                bottom: 0,
+                                width: `${timelineBar.criticalZonePercent}%`,
+                                bgcolor: "rgba(244,67,54,0.32)",
+                              }}
+                            />
+                            <Box
+                              sx={{
+                                position: "absolute",
+                                left: `${timelineBar.todayPercent}%`,
+                                top: -3,
+                                bottom: -3,
+                                width: 2,
+                                bgcolor: "primary.main",
+                              }}
+                            />
+                          </Box>
+
+                          <Box sx={{ position: "relative", mt: 0.8, minHeight: 18 }}>
+                            <Typography variant="caption" color="text.secondary" sx={{ position: "absolute", left: 0 }}>
+                              Start
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              color="primary.main"
+                              sx={{ position: "absolute", left: `${timelineBar.todayLabelPercent}%`, transform: "translateX(-50%)" }}
+                            >
+                              Today
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" sx={{ position: "absolute", right: 0 }}>
+                              End
+                            </Typography>
+                          </Box>
+
+                          <Stack direction="row" justifyContent="space-between" mt={0.3}>
+                            <Typography variant="caption" color="text.secondary">
+                              {timelineBar.startLabel}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {timelineBar.todayLabel}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {timelineBar.endLabel}
+                            </Typography>
+                          </Stack>
+                        </>
+                      ) : (
+                        <Typography variant="body2" color="text.secondary">
+                          Для шкалы времени укажите дату начала и дату окончания проекта.
+                        </Typography>
+                      )}
+                    </Box>
+                  </Box>
                 </CardContent>
               </Card>
               <Grid container spacing={2}>
@@ -800,6 +1132,41 @@ export function ProjectDetailPage() {
           <Button onClick={() => setHostOpen(false)}>Отмена</Button>
           <Button variant="contained" disabled={!hostIp && !hostName} onClick={() => void submitHost()}>
             Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={extendDialogOpen} onClose={() => setExtendDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Продлить проект</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              Текущая дата окончания: {projectEndDate || "не задана"}
+            </Typography>
+            <TextField
+              label="Новая дата окончания"
+              type="date"
+              value={extendEndDate}
+              onChange={(event) => setExtendEndDate(event.target.value)}
+              InputLabelProps={{ shrink: true }}
+            />
+            <Stack direction="row" spacing={1}>
+              <Button size="small" variant="text" onClick={() => applyQuickExtension(7)}>
+                +7 дней
+              </Button>
+              <Button size="small" variant="text" onClick={() => applyQuickExtension(14)}>
+                +14 дней
+              </Button>
+              <Button size="small" variant="text" onClick={() => applyQuickExtension(30)}>
+                +30 дней
+              </Button>
+            </Stack>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setExtendDialogOpen(false)}>Отмена</Button>
+          <Button variant="contained" disabled={!extendEndDate || extendingProject} onClick={() => void submitProjectExtension()}>
+            Продлить
           </Button>
         </DialogActions>
       </Dialog>
@@ -1007,11 +1374,16 @@ export function ProjectDetailPage() {
                       key={comment.id}
                       alignItems="flex-start"
                       secondaryAction={
-                        (user?.role === "admin" || user?.id === comment.user_id) && (
-                          <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
-                            <DeleteOutlineIcon fontSize="small" />
-                          </IconButton>
-                        )
+                        (user?.role === "admin" || user?.id === comment.user_id) ? (
+                          <Stack direction="row" spacing={0.5}>
+                            <IconButton size="small" onClick={() => openCommentEdit(comment)}>
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
+                              <DeleteOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Stack>
+                        ) : null
                       }
                     >
                       <ListItemText
@@ -1032,6 +1404,27 @@ export function ProjectDetailPage() {
             Удалить
           </Button>
           <Button variant="contained" onClick={() => void saveActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
+            Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={editCommentOpen} onClose={() => setEditCommentOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Редактировать комментарий</DialogTitle>
+        <DialogContent>
+          <TextField
+            fullWidth
+            multiline
+            minRows={4}
+            sx={{ mt: 1 }}
+            label="Комментарий"
+            value={editingCommentContent}
+            onChange={(event) => setEditingCommentContent(event.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditCommentOpen(false)}>Отмена</Button>
+          <Button variant="contained" disabled={!editingCommentContent.trim() || vulnBusy} onClick={() => void saveCommentEdit()}>
             Сохранить
           </Button>
         </DialogActions>

@@ -21,7 +21,7 @@ import {
   IconButton,
   Tooltip,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createProject, deleteProject, getProjects } from "../api";
 import { useAuthStore } from "../store";
@@ -35,9 +35,12 @@ export function ProjectsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | Project["status"]>("all");
   const [sortBy, setSortBy] = useState<"start_date_desc" | "start_date_asc" | "status_asc" | "status_desc">("start_date_desc");
+  const domNestingLogSentRef = useRef(false);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -86,20 +89,90 @@ export function ProjectsPage() {
     });
   }, [projects, searchQuery, sortBy]);
 
+  useEffect(() => {
+    if (domNestingLogSentRef.current) {
+      return;
+    }
+    domNestingLogSentRef.current = true;
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+      body: JSON.stringify({
+        sessionId: "a74592",
+        runId: "dom-nesting-pre-fix",
+        hypothesisId: "H6",
+        location: "ProjectsPage.tsx:ListItemText-secondary",
+        message: "ProjectsPage secondary content shape",
+        data: {
+          visibleProjectsCount: visibleProjects.length,
+          hasStackInSecondary: true,
+          hasTypographyBody2InSecondary: true,
+          secondaryTypographyPropsConfigured: false,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [visibleProjects.length]);
+
+  useEffect(() => {
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+      body: JSON.stringify({
+        sessionId: "a74592",
+        runId: "dom-nesting-post-fix",
+        hypothesisId: "H10",
+        location: "ProjectsPage.tsx:post-fix-secondaryTypographyProps",
+        message: "Post-fix ListItemText secondary typography config",
+        data: {
+          secondaryTypographyComponent: "div",
+          warningExpected: false,
+          visibleProjectsCount: visibleProjects.length,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [visibleProjects.length]);
+
   const handleCreate = async () => {
-    await createProject({ name, description });
-    setCreateOpen(false);
-    setName("");
-    setDescription("");
-    await loadProjects();
+    setError(null);
+    if (startDate && endDate && startDate > endDate) {
+      setError("Дата окончания проекта не может быть раньше даты начала");
+      return;
+    }
+    try {
+      await createProject({
+        name: name.trim(),
+        description: description.trim() || undefined,
+        start_date: startDate || undefined,
+        end_date: endDate || undefined,
+      });
+      setCreateOpen(false);
+      setName("");
+      setDescription("");
+      setStartDate("");
+      setEndDate("");
+      await loadProjects();
+    } catch {
+      setError("Не удалось создать проект");
+    }
   };
 
   const handleDeleteProject = async (projectId: string, projectName: string) => {
     if (!window.confirm(`Удалить проект "${projectName}"?`)) {
       return;
     }
-    await deleteProject(projectId);
-    await loadProjects();
+    setError(null);
+    try {
+      await deleteProject(projectId);
+      await loadProjects();
+    } catch {
+      setError("Не удалось удалить проект");
+    }
   };
 
   return (
@@ -158,6 +231,7 @@ export function ProjectsPage() {
                 </ListItemIcon>
                 <ListItemText
                   primary={project.name}
+                  secondaryTypographyProps={{ component: "div" }}
                   secondary={
                     <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 0.5, md: 2 }} alignItems={{ md: "center" }}>
                       <Typography variant="body2" color="text.secondary">
@@ -205,10 +279,34 @@ export function ProjectsPage() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
+            <TextField
+              label="Дата начала"
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+            />
+            <TextField
+              label="Дата окончания"
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+            />
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setCreateOpen(false)}>Отмена</Button>
+          <Button
+            onClick={() => {
+              setCreateOpen(false);
+              setName("");
+              setDescription("");
+              setStartDate("");
+              setEndDate("");
+            }}
+          >
+            Отмена
+          </Button>
           <Button variant="contained" onClick={() => void handleCreate()} disabled={!name.trim()}>
             Создать
           </Button>

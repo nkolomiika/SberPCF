@@ -25,6 +25,7 @@ import HomeIcon from "@mui/icons-material/Home";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
 import NotificationsIcon from "@mui/icons-material/Notifications";
+import HistoryIcon from "@mui/icons-material/History";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import type { PaletteMode } from "@mui/material";
@@ -36,6 +37,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { AuditLogsPage } from "./pages/AuditLogsPage";
 
 type PrivateLayoutProps = {
   themeMode: PaletteMode;
@@ -95,6 +97,7 @@ function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
   const controlBorder = isDark ? "1px solid rgba(126,224,255,0.28)" : "1px solid rgba(148,163,184,0.42)";
   const controlBackground = isDark ? "rgba(22,36,58,0.55)" : "rgba(255,255,255,0.9)";
   const controlHover = isDark ? "rgba(28,46,72,0.7)" : "rgba(241,245,249,0.98)";
+  const roleLabel = user.role === "admin" ? "Администратор" : user.role === "developer" ? "Разработчик" : "Пентестер";
 
   return (
     <Box
@@ -193,7 +196,7 @@ function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
                       {user.username}
                     </Typography>
                     <Typography variant="caption" color="text.secondary" textAlign="right" noWrap>
-                      {user.role === "admin" ? "Администратор" : "Пентестер"}
+                      {roleLabel}
                     </Typography>
                   </Stack>
                   <KeyboardArrowDownIcon fontSize="small" sx={{ color: "text.secondary" }} />
@@ -229,6 +232,20 @@ function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
           </ListItemIcon>
           <ListItemText>Домой</ListItemText>
         </MenuItem>
+        {user.role === "admin" && (
+          <MenuItem
+            onClick={() => {
+              navigate("/audit-logs");
+              closeProfileMenu();
+            }}
+            sx={{ minWidth: 220 }}
+          >
+            <ListItemIcon sx={{ minWidth: 30 }}>
+              <HistoryIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Журнал действий</ListItemText>
+          </MenuItem>
+        )}
         <MenuItem
           onClick={() => {
             closeProfileMenu();
@@ -313,6 +330,7 @@ function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
           />
           <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId" element={<HostDetailPage />} />
+          <Route path="/audit-logs" element={user.role === "admin" ? <AuditLogsPage /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Container>

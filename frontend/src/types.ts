@@ -1,4 +1,4 @@
-export type UserRole = "admin" | "pentester";
+export type UserRole = "admin" | "pentester" | "developer";
 
 export interface User {
   id: string;
@@ -65,6 +65,16 @@ export interface Port {
   port_number: number;
   protocol: "tcp" | "udp";
   state: "open" | "closed" | "filtered";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Service {
+  id: string;
+  port_id: string;
+  name: string;
+  version: string | null;
+  banner: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -156,4 +166,15 @@ export interface Notification {
     project_id: string | null;
     commenter_username: string | null;
   } | null;
+}
+
+export interface AuditLog {
+  id: string;
+  user_id: string | null;
+  action: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  details: Record<string, unknown> | null;
+  ip_address: string | null;
+  created_at: string;
 }

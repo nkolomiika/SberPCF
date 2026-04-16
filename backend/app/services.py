@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from uuid import UUID
 
@@ -268,6 +268,11 @@ class ProjectService:
         self.db = db
         self.audit = AuditService(db)
 
+    @staticmethod
+    def _validate_project_dates(start_date: date | None, end_date: date | None) -> None:
+        if start_date and end_date and end_date < start_date:
+            raise ValidationError("Дата окончания проекта не может быть раньше даты начала")
+
     async def list_projects(self, current_user: User, page: int, size: int, status: str | None = None) -> tuple[list[Project], int]:
         """Возвращает список проектов с учётом доступа."""
         query: Select = select(Project)
@@ -289,6 +294,7 @@ class ProjectService:
 
     async def create_project(self, payload: dict, actor_id: UUID, ip_address: str | None = None) -> Project:
         """Создаёт новый проект."""
+        self._validate_project_dates(payload.get("start_date"), payload.get("end_date"))
         project = Project(**payload, created_by=actor_id)
         self.db.add(project)
         await self.db.commit()
@@ -299,6 +305,9 @@ class ProjectService:
     async def update_project(self, project_id: UUID, payload: dict, actor_id: UUID, ip_address: str | None = None) -> Project:
         """Обновляет проект."""
         project = await self.get_project(project_id)
+        next_start_date = payload.get("start_date", project.start_date)
+        next_end_date = payload.get("end_date", project.end_date)
+        self._validate_project_dates(next_start_date, next_end_date)
         old_status = project.status
         for key, value in payload.items():
             if value is not None:

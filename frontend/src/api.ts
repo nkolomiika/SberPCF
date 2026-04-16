@@ -4,6 +4,8 @@ import type {
   VulnerabilityDetails,
   VulnerabilityFile,
   Endpoint,
+  Service,
+  AuditLog,
   Host,
   HostDetails,
   ImportResult,
@@ -68,8 +70,48 @@ export async function getMe(): Promise<User> {
 }
 
 export async function getUsers(page = 1, size = 200): Promise<PaginatedResponse<User>> {
-  const { data } = await api.get<PaginatedResponse<User>>("/users", { params: { page, size } });
-  return data;
+  // #region agent log
+  fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+    body: JSON.stringify({
+      sessionId: "a74592",
+      runId: "users-422-post-fix",
+      hypothesisId: "H11",
+      location: "api.ts:getUsers:request",
+      message: "Requesting users list",
+      data: { page, size },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+  try {
+    const { data } = await api.get<PaginatedResponse<User>>("/users", { params: { page, size } });
+    return data;
+  } catch (error) {
+    const axiosError = error as { response?: { status?: number; data?: unknown } };
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+      body: JSON.stringify({
+        sessionId: "a74592",
+        runId: "users-422-post-fix",
+        hypothesisId: "H12",
+        location: "api.ts:getUsers:error",
+        message: "Users list request failed",
+        data: {
+          page,
+          size,
+          status: axiosError.response?.status ?? null,
+          responseData: axiosError.response?.data ?? null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+    throw error;
+  }
 }
 
 export async function getProjects(page = 1, size = 20, status?: Project["status"]): Promise<PaginatedResponse<Project>> {
@@ -84,6 +126,25 @@ export async function createProject(payload: {
   end_date?: string;
 }): Promise<Project> {
   const { data } = await api.post<Project>("/projects", payload);
+  return data;
+}
+
+export async function getProject(projectId: string): Promise<Project> {
+  const { data } = await api.get<Project>(`/projects/${projectId}`);
+  return data;
+}
+
+export async function updateProject(
+  projectId: string,
+  payload: {
+    name?: string;
+    description?: string;
+    start_date?: string;
+    end_date?: string;
+    status?: Project["status"];
+  }
+): Promise<Project> {
+  const { data } = await api.put<Project>(`/projects/${projectId}`, payload);
   return data;
 }
 
@@ -181,6 +242,36 @@ export async function updatePort(
 
 export async function deletePort(projectId: string, hostId: string, portId: string): Promise<void> {
   await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}`);
+}
+
+export async function getServices(projectId: string, hostId: string, portId: string): Promise<Service[]> {
+  const { data } = await api.get<Service[]>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`);
+  return data;
+}
+
+export async function createService(
+  projectId: string,
+  hostId: string,
+  portId: string,
+  payload: { name: string; version?: string; banner?: string }
+): Promise<Service> {
+  const { data } = await api.post<Service>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`, payload);
+  return data;
+}
+
+export async function updateService(
+  projectId: string,
+  hostId: string,
+  portId: string,
+  serviceId: string,
+  payload: { name?: string; version?: string; banner?: string }
+): Promise<Service> {
+  const { data } = await api.put<Service>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`, payload);
+  return data;
+}
+
+export async function deleteService(projectId: string, hostId: string, portId: string, serviceId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`);
 }
 
 export async function getEndpoints(projectId: string, hostId: string): Promise<Endpoint[]> {
@@ -327,6 +418,16 @@ export async function createVulnerabilityComment(projectId: string, vulnerabilit
   return data;
 }
 
+export async function updateVulnerabilityComment(
+  projectId: string,
+  vulnerabilityId: string,
+  commentId: string,
+  content: string
+): Promise<VulnerabilityComment> {
+  const { data } = await api.put<VulnerabilityComment>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`, { content });
+  return data;
+}
+
 export async function deleteVulnerabilityComment(projectId: string, vulnerabilityId: string, commentId: string): Promise<void> {
   await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`);
 }
@@ -356,4 +457,15 @@ export async function listNotifications(): Promise<PaginatedResponse<Notificatio
 export async function unreadCount(): Promise<number> {
   const { data } = await api.get<{ count: number }>("/notifications/unread-count");
   return data.count;
+}
+
+export async function getAuditLogs(
+  page = 1,
+  size = 50,
+  filters?: { user_id?: string; action?: string; entity_type?: string }
+): Promise<PaginatedResponse<AuditLog>> {
+  const { data } = await api.get<PaginatedResponse<AuditLog>>("/audit-logs", {
+    params: { page, size, ...filters },
+  });
+  return data;
 }

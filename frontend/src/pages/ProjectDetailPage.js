@@ -1,18 +1,36 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import AddIcon from "@mui/icons-material/Add";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
+import GroupIcon from "@mui/icons-material/Group";
+import PersonAddAlt1Icon from "@mui/icons-material/PersonAddAlt1";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { Alert, Box, Button, Card, CardContent, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Grid2 as Grid, IconButton, List, ListItem, ListItemText, Menu, MenuItem, Stack, TextField, Typography, } from "@mui/material";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { createHost, createVulnerabilityComment, deleteVulnerability, deleteVulnerabilityComment, deleteVulnerabilityFile, generateProjectReport, getEndpoints, getHostVulnerabilities, getHosts, getPorts, getProjectMembers, getProjects, getVulnerability, importProjectData, listVulnerabilityComments, listVulnerabilityFiles, updateHost, updateVulnerability, uploadVulnerabilityFile, } from "../api";
+import { createHost, createVulnerabilityComment, addProjectMember, deleteVulnerability, deleteVulnerabilityComment, deleteVulnerabilityFile, generateProjectReport, getEndpoints, getHostVulnerabilities, getHosts, getPorts, getProjectMembers, getUsers, getProject, getVulnerability, importProjectData, listVulnerabilityComments, listVulnerabilityFiles, removeProjectMember, updateProject, updateHost, updateVulnerabilityComment, updateVulnerability, uploadVulnerabilityFile, } from "../api";
 import { ProjectTreeNav } from "../components/ProjectTreeNav";
 import { useAuthStore } from "../store";
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const toDateInputValue = (date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+};
+const parseIsoDateOnly = (value) => {
+    if (!value) {
+        return null;
+    }
+    const parsed = new Date(`${value}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+const clampPercent = (value) => Math.max(0, Math.min(100, value));
 export function ProjectDetailPage() {
     const { projectId } = useParams();
     const navigate = useNavigate();
@@ -27,7 +45,13 @@ export function ProjectDetailPage() {
     const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [projectName, setProjectName] = useState("");
     const [projectDescription, setProjectDescription] = useState("");
+    const [projectStartDate, setProjectStartDate] = useState(null);
+    const [projectEndDate, setProjectEndDate] = useState(null);
     const [projectMembers, setProjectMembers] = useState([]);
+    const [usersCatalog, setUsersCatalog] = useState([]);
+    const [membersDialogOpen, setMembersDialogOpen] = useState(false);
+    const [selectedMemberUserId, setSelectedMemberUserId] = useState("");
+    const [membersBusy, setMembersBusy] = useState(false);
     const [hostStatsById, setHostStatsById] = useState({});
     const [importOpen, setImportOpen] = useState(false);
     const [importFile, setImportFile] = useState(null);
@@ -37,6 +61,9 @@ export function ProjectDetailPage() {
     const [actionsAnchorEl, setActionsAnchorEl] = useState(null);
     const [exportOpen, setExportOpen] = useState(false);
     const [exportFormat, setExportFormat] = useState("pdf");
+    const [extendDialogOpen, setExtendDialogOpen] = useState(false);
+    const [extendEndDate, setExtendEndDate] = useState("");
+    const [extendingProject, setExtendingProject] = useState(false);
     const [hostOpen, setHostOpen] = useState(false);
     const [hostIp, setHostIp] = useState("");
     const [hostName, setHostName] = useState("");
@@ -49,21 +76,26 @@ export function ProjectDetailPage() {
     const [vulnComments, setVulnComments] = useState([]);
     const [newComment, setNewComment] = useState("");
     const [vulnBusy, setVulnBusy] = useState(false);
+    const [editCommentOpen, setEditCommentOpen] = useState(false);
+    const [editingCommentId, setEditingCommentId] = useState(null);
+    const [editingCommentContent, setEditingCommentContent] = useState("");
+    const availableUsers = useMemo(() => usersCatalog.filter((candidate) => !projectMembers.some((member) => member.user_id === candidate.id)), [projectMembers, usersCatalog]);
     const loadProjectData = useCallback(async () => {
         if (!projectId) {
             return;
         }
         try {
-            const [hostsResp, projectsResp, membersResp] = await Promise.all([
+            const [hostsResp, projectResp, membersResp] = await Promise.all([
                 getHosts(projectId),
-                getProjects(1, 100),
+                getProject(projectId),
                 getProjectMembers(projectId),
             ]);
             setHosts(hostsResp.items);
             setProjectMembers(membersResp);
-            const currentProject = projectsResp.items.find((project) => project.id === projectId);
-            setProjectName(currentProject?.name ?? projectId);
-            setProjectDescription(currentProject?.description ?? "");
+            setProjectName(projectResp.name ?? projectId);
+            setProjectDescription(projectResp.description ?? "");
+            setProjectStartDate(projectResp.start_date);
+            setProjectEndDate(projectResp.end_date);
             setSelectedHostId((previousHostId) => {
                 if (previousHostId && hostsResp.items.some((host) => host.id === previousHostId)) {
                     return previousHostId;
@@ -184,6 +216,100 @@ export function ProjectDetailPage() {
         wont_fix: { bgcolor: "rgba(156,39,176,0.16)", color: "#ce93d8", border: "1px solid rgba(156,39,176,0.38)" },
         accepted_risk: { bgcolor: "rgba(96,125,139,0.2)", color: "#b0bec5", border: "1px solid rgba(96,125,139,0.38)" },
     };
+    const projectTimeMetrics = useMemo(() => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const start = parseIsoDateOnly(projectStartDate);
+        const end = parseIsoDateOnly(projectEndDate);
+        const startLabel = start ? start.toLocaleDateString("ru-RU") : "не задано";
+        const endLabel = end ? end.toLocaleDateString("ru-RU") : "не задано";
+        if (!end) {
+            return {
+                startLabel,
+                endLabel,
+                daysLeft: null,
+                progressPercent: null,
+                statusTone: "neutral",
+                statusLabel: "Без дедлайна",
+            };
+        }
+        const daysLeft = Math.ceil((end.getTime() - today.getTime()) / DAY_IN_MS);
+        let progressPercent = null;
+        if (start && end.getTime() > start.getTime()) {
+            const total = Math.ceil((end.getTime() - start.getTime()) / DAY_IN_MS);
+            const passed = Math.ceil((today.getTime() - start.getTime()) / DAY_IN_MS);
+            progressPercent = Math.max(0, Math.min(100, Math.round((passed / total) * 100)));
+        }
+        if (daysLeft < 0) {
+            return {
+                startLabel,
+                endLabel,
+                daysLeft,
+                progressPercent,
+                statusTone: "error",
+                statusLabel: "Просрочен",
+            };
+        }
+        if (daysLeft <= 3) {
+            return {
+                startLabel,
+                endLabel,
+                daysLeft,
+                progressPercent,
+                statusTone: "error",
+                statusLabel: "Критичный срок",
+            };
+        }
+        if (daysLeft <= 14) {
+            return {
+                startLabel,
+                endLabel,
+                daysLeft,
+                progressPercent,
+                statusTone: "warning",
+                statusLabel: "Риск срыва",
+            };
+        }
+        return {
+            startLabel,
+            endLabel,
+            daysLeft,
+            progressPercent,
+            statusTone: "success",
+            statusLabel: "В графике",
+        };
+    }, [projectStartDate, projectEndDate]);
+    const timelineBar = useMemo(() => {
+        const start = parseIsoDateOnly(projectStartDate);
+        const end = parseIsoDateOnly(projectEndDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        if (!start || !end || end.getTime() <= start.getTime()) {
+            return {
+                ready: false,
+            };
+        }
+        const totalMs = end.getTime() - start.getTime();
+        const toPercent = (date) => clampPercent(((date.getTime() - start.getTime()) / totalMs) * 100);
+        const warningStart = new Date(end.getTime() - 14 * DAY_IN_MS);
+        const criticalStart = new Date(end.getTime() - 3 * DAY_IN_MS);
+        const normalZonePercent = toPercent(warningStart);
+        const warningZonePercent = Math.max(0, toPercent(criticalStart) - normalZonePercent);
+        const criticalZonePercent = Math.max(0, 100 - normalZonePercent - warningZonePercent);
+        const todayPercent = toPercent(today);
+        const todayLabelPercent = Math.max(8, Math.min(92, todayPercent));
+        return {
+            ready: true,
+            normalZonePercent,
+            warningZonePercent,
+            criticalZonePercent,
+            todayPercent,
+            todayLabelPercent,
+            startLabel: start.toLocaleDateString("ru-RU"),
+            todayLabel: today.toLocaleDateString("ru-RU"),
+            endLabel: end.toLocaleDateString("ru-RU"),
+        };
+    }, [projectStartDate, projectEndDate]);
     const submitHost = async () => {
         if (!projectId) {
             return;
@@ -370,6 +496,31 @@ export function ProjectDetailPage() {
             setVulnBusy(false);
         }
     };
+    const openCommentEdit = (comment) => {
+        setEditingCommentId(comment.id);
+        setEditingCommentContent(comment.content);
+        setEditCommentOpen(true);
+    };
+    const saveCommentEdit = async () => {
+        if (!projectId || !activeVuln || !editingCommentId || !editingCommentContent.trim()) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await updateVulnerabilityComment(projectId, activeVuln.id, editingCommentId, editingCommentContent.trim());
+            const commentsPage = await listVulnerabilityComments(projectId, activeVuln.id);
+            setVulnComments(commentsPage.items);
+            setEditCommentOpen(false);
+            setEditingCommentId(null);
+            setEditingCommentContent("");
+        }
+        catch {
+            setError("Не удалось обновить комментарий");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
     const submitImport = async () => {
         if (!projectId || !importFile) {
             return;
@@ -421,6 +572,109 @@ export function ProjectDetailPage() {
     const closeActionsMenu = () => {
         setActionsAnchorEl(null);
     };
+    const openExtendDialog = () => {
+        setError(null);
+        setExtendEndDate(projectEndDate ?? "");
+        setExtendDialogOpen(true);
+    };
+    const applyQuickExtension = (days) => {
+        const baseDate = parseIsoDateOnly(extendEndDate || projectEndDate) ?? new Date();
+        baseDate.setDate(baseDate.getDate() + days);
+        setExtendEndDate(toDateInputValue(baseDate));
+    };
+    const submitProjectExtension = async () => {
+        if (!projectId || !extendEndDate) {
+            return;
+        }
+        if (projectStartDate && extendEndDate < projectStartDate) {
+            setError("Новая дата окончания не может быть раньше даты начала проекта");
+            return;
+        }
+        if (projectEndDate && extendEndDate <= projectEndDate) {
+            setError("Новая дата окончания должна быть позже текущей даты окончания");
+            return;
+        }
+        setExtendingProject(true);
+        setError(null);
+        try {
+            await updateProject(projectId, { end_date: extendEndDate });
+            setExtendDialogOpen(false);
+            await loadProjectData();
+        }
+        catch {
+            setError("Не удалось продлить срок проекта");
+        }
+        finally {
+            setExtendingProject(false);
+        }
+    };
+    const openMembersDialog = async () => {
+        if (!projectId) {
+            return;
+        }
+        setError(null);
+        setMembersDialogOpen(true);
+        if (user?.role !== "admin") {
+            return;
+        }
+        try {
+            // #region agent log
+            fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+                body: JSON.stringify({
+                    sessionId: "a74592",
+                    runId: "users-422-post-fix",
+                    hypothesisId: "H13",
+                    location: "ProjectDetailPage.tsx:openMembersDialog:beforeGetUsers",
+                    message: "Opening members dialog and requesting user catalog",
+                    data: { requestedSize: 200, projectId, userRole: user?.role ?? null },
+                    timestamp: Date.now(),
+                }),
+            }).catch(() => { });
+            // #endregion
+            const usersResponse = await getUsers(1, 200);
+            setUsersCatalog(usersResponse.items);
+        }
+        catch {
+            setError("Не удалось загрузить список пользователей для управления участниками.");
+        }
+    };
+    const addMemberToProject = async () => {
+        if (!projectId || !selectedMemberUserId) {
+            return;
+        }
+        setMembersBusy(true);
+        setError(null);
+        try {
+            await addProjectMember(projectId, selectedMemberUserId);
+            setSelectedMemberUserId("");
+            await loadProjectData();
+        }
+        catch {
+            setError("Не удалось добавить участника в проект.");
+        }
+        finally {
+            setMembersBusy(false);
+        }
+    };
+    const removeMemberFromProject = async (memberUserId) => {
+        if (!projectId) {
+            return;
+        }
+        setMembersBusy(true);
+        setError(null);
+        try {
+            await removeProjectMember(projectId, memberUserId);
+            await loadProjectData();
+        }
+        catch {
+            setError("Не удалось удалить участника из проекта.");
+        }
+        finally {
+            setMembersBusy(false);
+        }
+    };
     return (_jsxs(Stack, { spacing: 2.5, children: [error && _jsx(Alert, { severity: "error", children: error }), _jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", children: [_jsx(Box, { children: _jsx(Typography, { variant: "h4", fontWeight: 700, children: projectName ? `Проект: ${projectName}` : "Проект" }) }), _jsx(IconButton, { onClick: openActionsMenu, sx: { border: "1px solid rgba(126,224,255,0.2)", borderRadius: 2 }, children: _jsx(MoreVertIcon, {}) })] }), _jsxs(Menu, { anchorEl: actionsAnchorEl, open: actionsMenuOpen, onClose: closeActionsMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: [_jsxs(MenuItem, { onClick: () => {
                             closeActionsMenu();
                             setHostOpen(true);
@@ -433,11 +687,47 @@ export function ProjectDetailPage() {
                         }, children: [_jsx(UploadFileIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0418\u043C\u043F\u043E\u0440\u0442 JSON"] }), _jsxs(MenuItem, { onClick: () => {
                             closeActionsMenu();
                             setExportOpen(true);
-                        }, children: [_jsx(DownloadIcon, { fontSize: "small", sx: { mr: 1 } }), "\u042D\u043A\u0441\u043F\u043E\u0440\u0442"] })] }), _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 2, children: [_jsx(ProjectTreeNav, { hosts: hosts, selectedHostId: selectedHostId, selectedSection: selectedSection, isCollapsed: isSidebarCollapsed, portsCount: ports.length, endpointsCount: endpoints.length, vulnerabilitiesCount: vulnerabilities.length, hostStatsById: hostStatsById, autoExpandSelectedHost: false, onToggleCollapsed: () => setSidebarCollapsed((v) => !v), onSelectSection: setSelectedSection, onSelectProjectOverview: () => setSelectedSection("overview"), onSelectHost: setSelectedHostId, onOpenHost: (hostId) => navigate(`/projects/${projectId}/hosts/${hostId}`) }), _jsxs(Stack, { flex: 1, spacing: 2, children: [selectedSection !== "overview" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.18)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsxs(Typography, { variant: "h6", fontWeight: 700, children: [selectedSection === "hosts" && `Хост: ${hostLabel}`, selectedSection === "ports" && `Порты хоста: ${hostLabel}`, selectedSection === "endpoints" && `Эндпоинты хоста: ${hostLabel}`, selectedSection === "vulns" && `Уязвимости хоста: ${hostLabel}`] }), _jsx(Typography, { variant: "body2", color: "text.secondary", children: "\u0421\u043B\u0435\u0432\u0430 \u2014 \u0434\u0440\u0435\u0432\u043E\u0432\u0438\u0434\u043D\u0430\u044F \u043D\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u044F \u043F\u043E \u043F\u0440\u043E\u0435\u043A\u0442\u0443, \u043A\u0430\u043A \u0432 wiki-\u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0430\u0445." })] }) })), selectedSection === "overview" && (_jsxs(Stack, { spacing: 2, children: [_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsx(Typography, { variant: "h6", fontWeight: 700, mb: 1, children: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(Typography, { color: "text.secondary", children: projectDescription || "Описание проекта не заполнено" })] }) }), _jsxs(Grid, { container: true, spacing: 2, children: [_jsx(Grid, { size: { xs: 12, md: 6 }, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0, height: "100%" }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u0425\u043E\u0441\u0442\u043E\u0432" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: hosts.length })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 6 }, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0, height: "100%" }, children: _jsxs(CardContent, { sx: { height: "100%" }, children: [_jsx(Typography, { color: "text.secondary", mb: 1, children: "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(Stack, { spacing: 0.5, children: projectMembers.length > 0 ? (projectMembers.map((member) => (_jsxs(Typography, { variant: "body2", children: [member.username, " (", member.role, ")"] }, member.user_id)))) : (_jsx(Typography, { color: "text.secondary", children: "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B" })) })] }) }) })] })] })), selectedSection === "hosts" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsx(CardContent, { children: _jsx(Stack, { spacing: 1.2, children: hosts.map((host) => (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0, cursor: "pointer" }, onClick: () => navigate(`/projects/${projectId}/hosts/${host.id}`), children: [_jsx(Typography, { children: host.hostname || host.ip_address || "unknown-host" }), _jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["\u0421\u0442\u0430\u0442\u0443\u0441: ", host.status] })] }, host.id))) }) }) })), selectedSection === "ports" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsx(CardContent, { children: _jsxs(Stack, { spacing: 1.2, children: [ports.map((port) => (_jsx(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }, children: _jsxs(Stack, { direction: "row", spacing: 1, alignItems: "center", children: [_jsxs(Typography, { fontWeight: 600, children: [port.port_number, "/", port.protocol] }), _jsx(Chip, { size: "small", label: port.state })] }) }, port.id))), ports.length === 0 && (_jsx(Typography, { color: "text.secondary", children: "\u041F\u043E\u0440\u0442\u044B \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B. \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0445\u043E\u0441\u0442 \u0438 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043F\u0435\u0440\u0432\u044B\u0439 \u043F\u043E\u0440\u0442." }))] }) }) })), selectedSection === "endpoints" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsx(CardContent, { children: _jsxs(Stack, { spacing: 1.2, children: [endpoints.map((endpoint) => (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }, children: [_jsxs(Stack, { direction: "row", spacing: 1, alignItems: "center", children: [_jsx(Chip, { size: "small", label: endpoint.method || "ANY" }), _jsx(Typography, { fontWeight: 600, children: endpoint.path })] }), _jsx(Typography, { variant: "body2", color: "text.secondary", mt: 0.8, children: endpoint.description || "Описание не указано" })] }, endpoint.id))), endpoints.length === 0 && (_jsx(Typography, { color: "text.secondary", children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u044B \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B. \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0445\u043E\u0441\u0442 \u0438 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043F\u0435\u0440\u0432\u044B\u0439 \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442." }))] }) }) })), selectedSection === "vulns" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsx(Stack, { direction: "row", spacing: 1, mb: 2, flexWrap: "wrap", children: Object.entries(severityStats).map(([severity, value]) => (_jsx(Chip, { label: `${severity}: ${value}` }, severity))) }), _jsxs(Stack, { spacing: 1.2, children: [vulnerabilities.map((item) => (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }, children: [_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", children: [_jsx(Typography, { children: item.title }), _jsx(Button, { size: "small", variant: "outlined", onClick: () => void loadVulnerabilityDetails(item.id), disabled: vulnBusy, children: "\u041E\u0442\u043A\u0440\u044B\u0442\u044C" })] }), _jsxs(Stack, { direction: "row", spacing: 1, mt: 1, flexWrap: "wrap", children: [_jsx(Chip, { label: item.severity, size: "small", sx: severityChipSx[item.severity] }), _jsx(Chip, { label: item.status, size: "small", sx: vulnerabilityStatusChipSx[item.status] })] })] }, item.id))), vulnerabilities.length === 0 && (_jsx(Typography, { color: "text.secondary", children: "\u0414\u043B\u044F \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E \u0445\u043E\u0441\u0442\u0430 \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438 \u043D\u0435 \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u044B." }))] })] }) }))] })] }), _jsxs(Dialog, { open: hostOpen, onClose: () => setHostOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0445\u043E\u0441\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "IP-\u0430\u0434\u0440\u0435\u0441", value: hostIp, onChange: (e) => setHostIp(e.target.value) }), _jsx(TextField, { label: "Hostname", value: hostName, onChange: (e) => setHostName(e.target.value) }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: hostStatus, onChange: (e) => setHostStatus(e.target.value), children: [_jsx(MenuItem, { value: "up", children: "up" }), _jsx(MenuItem, { value: "down", children: "down" }), _jsx(MenuItem, { value: "unknown", children: "unknown" })] }), _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", multiline: true, minRows: 3, value: hostNotes, onChange: (e) => setHostNotes(e.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setHostOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", disabled: !hostIp && !hostName, onClick: () => void submitHost(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: editHostOpen, onClose: () => setEditHostOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "IP-\u0430\u0434\u0440\u0435\u0441", value: hostIp, onChange: (e) => setHostIp(e.target.value) }), _jsx(TextField, { label: "Hostname", value: hostName, onChange: (e) => setHostName(e.target.value) }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: hostStatus, onChange: (e) => setHostStatus(e.target.value), children: [_jsx(MenuItem, { value: "up", children: "up" }), _jsx(MenuItem, { value: "down", children: "down" }), _jsx(MenuItem, { value: "unknown", children: "unknown" })] }), _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", multiline: true, minRows: 3, value: hostNotes, onChange: (e) => setHostNotes(e.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditHostOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", disabled: !hostIp && !hostName, onClick: () => void submitHostEdit(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: vulnDetailOpen, onClose: () => setVulnDetailOpen(false), fullWidth: true, maxWidth: "lg", children: [_jsx(DialogTitle, { children: "\u041A\u0430\u0440\u0442\u043E\u0447\u043A\u0430 \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438" }), _jsx(DialogContent, { children: !activeVuln ? (_jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u0430." })) : (_jsxs(Stack, { spacing: 2, sx: { mt: 0.5 }, children: [_jsxs(Grid, { container: true, spacing: 2, children: [_jsx(Grid, { size: { xs: 12, md: 8 }, children: _jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", fullWidth: true, value: activeVuln.title, onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, title: e.target.value } : prev)) }) }), _jsx(Grid, { size: { xs: 12, md: 2 }, children: _jsxs(TextField, { select: true, label: "\u041A\u0440\u0438\u0442\u0438\u0447\u043D\u043E\u0441\u0442\u044C", fullWidth: true, value: activeVuln.severity, onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, severity: e.target.value } : prev)), children: [_jsx(MenuItem, { value: "critical", children: "critical" }), _jsx(MenuItem, { value: "high", children: "high" }), _jsx(MenuItem, { value: "medium", children: "medium" }), _jsx(MenuItem, { value: "low", children: "low" }), _jsx(MenuItem, { value: "info", children: "info" })] }) }), _jsx(Grid, { size: { xs: 12, md: 2 }, children: _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", fullWidth: true, value: activeVuln.status, onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, status: e.target.value } : prev)), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "in_progress", children: "in_progress" }), _jsx(MenuItem, { value: "fixed", children: "fixed" }), _jsx(MenuItem, { value: "wont_fix", children: "wont_fix" }), _jsx(MenuItem, { value: "accepted_risk", children: "accepted_risk" })] }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", fullWidth: true, multiline: true, minRows: 3, value: activeVuln.description || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, description: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12, md: 3 }, children: _jsxs(TextField, { select: true, label: "CVSS \u0432\u0435\u0440\u0441\u0438\u044F", fullWidth: true, value: activeVuln.cvss_version || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_version: e.target.value || null } : prev)), children: [_jsx(MenuItem, { value: "", children: "-" }), _jsx(MenuItem, { value: "3.1", children: "3.1" }), _jsx(MenuItem, { value: "4.0", children: "4.0" })] }) }), _jsx(Grid, { size: { xs: 12, md: 3 }, children: _jsx(TextField, { label: "CVSS score", type: "number", fullWidth: true, value: activeVuln.cvss_score ?? "", onChange: (e) => {
+                        }, children: [_jsx(DownloadIcon, { fontSize: "small", sx: { mr: 1 } }), "\u042D\u043A\u0441\u043F\u043E\u0440\u0442"] }), _jsxs(MenuItem, { onClick: () => {
+                            closeActionsMenu();
+                            void openMembersDialog();
+                        }, children: [_jsx(GroupIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043F\u0440\u043E\u0435\u043A\u0442\u0430"] }), user?.role === "admin" && (_jsxs(MenuItem, { onClick: () => {
+                            closeActionsMenu();
+                            openExtendDialog();
+                        }, children: [_jsx(AccessTimeIcon, { fontSize: "small", sx: { mr: 1 } }), "\u041F\u0440\u043E\u0434\u043B\u0438\u0442\u044C \u043F\u0440\u043E\u0435\u043A\u0442"] }))] }), _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 2, children: [_jsx(ProjectTreeNav, { hosts: hosts, selectedHostId: selectedHostId, selectedSection: selectedSection, isCollapsed: isSidebarCollapsed, portsCount: ports.length, endpointsCount: endpoints.length, vulnerabilitiesCount: vulnerabilities.length, hostStatsById: hostStatsById, autoExpandSelectedHost: false, onToggleCollapsed: () => setSidebarCollapsed((v) => !v), onSelectSection: setSelectedSection, onSelectProjectOverview: () => setSelectedSection("overview"), onSelectHost: setSelectedHostId, onOpenHost: (hostId) => navigate(`/projects/${projectId}/hosts/${hostId}`) }), _jsxs(Stack, { flex: 1, spacing: 2, children: [selectedSection !== "overview" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.18)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsxs(Typography, { variant: "h6", fontWeight: 700, children: [selectedSection === "hosts" && `Хост: ${hostLabel}`, selectedSection === "ports" && `Порты хоста: ${hostLabel}`, selectedSection === "endpoints" && `Эндпоинты хоста: ${hostLabel}`, selectedSection === "vulns" && `Уязвимости хоста: ${hostLabel}`] }), _jsx(Typography, { variant: "body2", color: "text.secondary", children: "\u0421\u043B\u0435\u0432\u0430 \u2014 \u0434\u0440\u0435\u0432\u043E\u0432\u0438\u0434\u043D\u0430\u044F \u043D\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u044F \u043F\u043E \u043F\u0440\u043E\u0435\u043A\u0442\u0443, \u043A\u0430\u043A \u0432 wiki-\u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0430\u0445." })] }) })), selectedSection === "overview" && (_jsxs(Stack, { spacing: 2, children: [_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsx(Typography, { variant: "h6", fontWeight: 700, mb: 1, children: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(Typography, { color: "text.secondary", children: projectDescription || "Описание проекта не заполнено" }), _jsxs(Box, { sx: { mt: 2, p: 1.5, border: "1px solid rgba(126,224,255,0.16)" }, children: [_jsxs(Stack, { direction: { xs: "column", md: "row" }, justifyContent: "space-between", spacing: 1, alignItems: { md: "center" }, children: [_jsxs(Stack, { direction: "row", spacing: 1, alignItems: "center", flexWrap: "wrap", children: [_jsx(Typography, { variant: "subtitle2", fontWeight: 700, children: "\u0422\u0430\u0439\u043C\u043B\u0430\u0439\u043D \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(Chip, { size: "small", color: projectTimeMetrics.statusTone === "neutral" ? "default" : projectTimeMetrics.statusTone, label: projectTimeMetrics.statusLabel }), projectTimeMetrics.daysLeft !== null && (_jsx(Chip, { size: "small", variant: "outlined", label: projectTimeMetrics.daysLeft >= 0
+                                                                                ? `${projectTimeMetrics.daysLeft} дн. осталось`
+                                                                                : `${Math.abs(projectTimeMetrics.daysLeft)} дн. просрочки` }))] }), user?.role === "admin" && (_jsx(Button, { size: "small", variant: "outlined", startIcon: _jsx(AccessTimeIcon, {}), onClick: openExtendDialog, children: "\u041F\u0440\u043E\u0434\u043B\u0438\u0442\u044C" }))] }), _jsx(Box, { sx: { mt: 1.5 }, children: timelineBar.ready ? (_jsxs(_Fragment, { children: [_jsxs(Box, { sx: { position: "relative", height: 14, border: "1px solid rgba(126,224,255,0.24)", overflow: "hidden" }, children: [_jsx(Box, { sx: {
+                                                                                    position: "absolute",
+                                                                                    left: 0,
+                                                                                    top: 0,
+                                                                                    bottom: 0,
+                                                                                    width: `${timelineBar.normalZonePercent}%`,
+                                                                                    bgcolor: "rgba(76,175,80,0.26)",
+                                                                                } }), _jsx(Box, { sx: {
+                                                                                    position: "absolute",
+                                                                                    left: `${timelineBar.normalZonePercent}%`,
+                                                                                    top: 0,
+                                                                                    bottom: 0,
+                                                                                    width: `${timelineBar.warningZonePercent}%`,
+                                                                                    bgcolor: "rgba(255,152,0,0.3)",
+                                                                                } }), _jsx(Box, { sx: {
+                                                                                    position: "absolute",
+                                                                                    left: `${timelineBar.normalZonePercent + timelineBar.warningZonePercent}%`,
+                                                                                    top: 0,
+                                                                                    bottom: 0,
+                                                                                    width: `${timelineBar.criticalZonePercent}%`,
+                                                                                    bgcolor: "rgba(244,67,54,0.32)",
+                                                                                } }), _jsx(Box, { sx: {
+                                                                                    position: "absolute",
+                                                                                    left: `${timelineBar.todayPercent}%`,
+                                                                                    top: -3,
+                                                                                    bottom: -3,
+                                                                                    width: 2,
+                                                                                    bgcolor: "primary.main",
+                                                                                } })] }), _jsxs(Box, { sx: { position: "relative", mt: 0.8, minHeight: 18 }, children: [_jsx(Typography, { variant: "caption", color: "text.secondary", sx: { position: "absolute", left: 0 }, children: "Start" }), _jsx(Typography, { variant: "caption", color: "primary.main", sx: { position: "absolute", left: `${timelineBar.todayLabelPercent}%`, transform: "translateX(-50%)" }, children: "Today" }), _jsx(Typography, { variant: "caption", color: "text.secondary", sx: { position: "absolute", right: 0 }, children: "End" })] }), _jsxs(Stack, { direction: "row", justifyContent: "space-between", mt: 0.3, children: [_jsx(Typography, { variant: "caption", color: "text.secondary", children: timelineBar.startLabel }), _jsx(Typography, { variant: "caption", color: "text.secondary", children: timelineBar.todayLabel }), _jsx(Typography, { variant: "caption", color: "text.secondary", children: timelineBar.endLabel })] })] })) : (_jsx(Typography, { variant: "body2", color: "text.secondary", children: "\u0414\u043B\u044F \u0448\u043A\u0430\u043B\u044B \u0432\u0440\u0435\u043C\u0435\u043D\u0438 \u0443\u043A\u0430\u0436\u0438\u0442\u0435 \u0434\u0430\u0442\u0443 \u043D\u0430\u0447\u0430\u043B\u0430 \u0438 \u0434\u0430\u0442\u0443 \u043E\u043A\u043E\u043D\u0447\u0430\u043D\u0438\u044F \u043F\u0440\u043E\u0435\u043A\u0442\u0430." })) })] })] }) }), _jsxs(Grid, { container: true, spacing: 2, children: [_jsx(Grid, { size: { xs: 12, md: 6 }, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0, height: "100%" }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u0425\u043E\u0441\u0442\u043E\u0432" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: hosts.length })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 6 }, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0, height: "100%" }, children: _jsxs(CardContent, { sx: { height: "100%" }, children: [_jsx(Typography, { color: "text.secondary", mb: 1, children: "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(Stack, { spacing: 0.5, children: projectMembers.length > 0 ? (projectMembers.map((member) => (_jsxs(Typography, { variant: "body2", children: [member.username, " (", member.role, ")"] }, member.user_id)))) : (_jsx(Typography, { color: "text.secondary", children: "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B" })) })] }) }) })] })] })), selectedSection === "hosts" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsx(CardContent, { children: _jsx(Stack, { spacing: 1.2, children: hosts.map((host) => (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0, cursor: "pointer" }, onClick: () => navigate(`/projects/${projectId}/hosts/${host.id}`), children: [_jsx(Typography, { children: host.hostname || host.ip_address || "unknown-host" }), _jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["\u0421\u0442\u0430\u0442\u0443\u0441: ", host.status] })] }, host.id))) }) }) })), selectedSection === "ports" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsx(CardContent, { children: _jsxs(Stack, { spacing: 1.2, children: [ports.map((port) => (_jsx(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }, children: _jsxs(Stack, { direction: "row", spacing: 1, alignItems: "center", children: [_jsxs(Typography, { fontWeight: 600, children: [port.port_number, "/", port.protocol] }), _jsx(Chip, { size: "small", label: port.state })] }) }, port.id))), ports.length === 0 && (_jsx(Typography, { color: "text.secondary", children: "\u041F\u043E\u0440\u0442\u044B \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B. \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0445\u043E\u0441\u0442 \u0438 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043F\u0435\u0440\u0432\u044B\u0439 \u043F\u043E\u0440\u0442." }))] }) }) })), selectedSection === "endpoints" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsx(CardContent, { children: _jsxs(Stack, { spacing: 1.2, children: [endpoints.map((endpoint) => (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }, children: [_jsxs(Stack, { direction: "row", spacing: 1, alignItems: "center", children: [_jsx(Chip, { size: "small", label: endpoint.method || "ANY" }), _jsx(Typography, { fontWeight: 600, children: endpoint.path })] }), _jsx(Typography, { variant: "body2", color: "text.secondary", mt: 0.8, children: endpoint.description || "Описание не указано" })] }, endpoint.id))), endpoints.length === 0 && (_jsx(Typography, { color: "text.secondary", children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u044B \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B. \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0445\u043E\u0441\u0442 \u0438 \u0434\u043E\u0431\u0430\u0432\u044C\u0442\u0435 \u043F\u0435\u0440\u0432\u044B\u0439 \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442." }))] }) }) })), selectedSection === "vulns" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }, children: _jsxs(CardContent, { children: [_jsx(Stack, { direction: "row", spacing: 1, mb: 2, flexWrap: "wrap", children: Object.entries(severityStats).map(([severity, value]) => (_jsx(Chip, { label: `${severity}: ${value}` }, severity))) }), _jsxs(Stack, { spacing: 1.2, children: [vulnerabilities.map((item) => (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }, children: [_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", children: [_jsx(Typography, { children: item.title }), _jsx(Button, { size: "small", variant: "outlined", onClick: () => void loadVulnerabilityDetails(item.id), disabled: vulnBusy, children: "\u041E\u0442\u043A\u0440\u044B\u0442\u044C" })] }), _jsxs(Stack, { direction: "row", spacing: 1, mt: 1, flexWrap: "wrap", children: [_jsx(Chip, { label: item.severity, size: "small", sx: severityChipSx[item.severity] }), _jsx(Chip, { label: item.status, size: "small", sx: vulnerabilityStatusChipSx[item.status] })] })] }, item.id))), vulnerabilities.length === 0 && (_jsx(Typography, { color: "text.secondary", children: "\u0414\u043B\u044F \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E \u0445\u043E\u0441\u0442\u0430 \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438 \u043D\u0435 \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u044B." }))] })] }) }))] })] }), _jsxs(Dialog, { open: hostOpen, onClose: () => setHostOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0445\u043E\u0441\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "IP-\u0430\u0434\u0440\u0435\u0441", value: hostIp, onChange: (e) => setHostIp(e.target.value) }), _jsx(TextField, { label: "Hostname", value: hostName, onChange: (e) => setHostName(e.target.value) }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: hostStatus, onChange: (e) => setHostStatus(e.target.value), children: [_jsx(MenuItem, { value: "up", children: "up" }), _jsx(MenuItem, { value: "down", children: "down" }), _jsx(MenuItem, { value: "unknown", children: "unknown" })] }), _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", multiline: true, minRows: 3, value: hostNotes, onChange: (e) => setHostNotes(e.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setHostOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", disabled: !hostIp && !hostName, onClick: () => void submitHost(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: extendDialogOpen, onClose: () => setExtendDialogOpen(false), fullWidth: true, maxWidth: "xs", children: [_jsx(DialogTitle, { children: "\u041F\u0440\u043E\u0434\u043B\u0438\u0442\u044C \u043F\u0440\u043E\u0435\u043A\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 1.5, sx: { mt: 1 }, children: [_jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["\u0422\u0435\u043A\u0443\u0449\u0430\u044F \u0434\u0430\u0442\u0430 \u043E\u043A\u043E\u043D\u0447\u0430\u043D\u0438\u044F: ", projectEndDate || "не задана"] }), _jsx(TextField, { label: "\u041D\u043E\u0432\u0430\u044F \u0434\u0430\u0442\u0430 \u043E\u043A\u043E\u043D\u0447\u0430\u043D\u0438\u044F", type: "date", value: extendEndDate, onChange: (event) => setExtendEndDate(event.target.value), InputLabelProps: { shrink: true } }), _jsxs(Stack, { direction: "row", spacing: 1, children: [_jsx(Button, { size: "small", variant: "text", onClick: () => applyQuickExtension(7), children: "+7 \u0434\u043D\u0435\u0439" }), _jsx(Button, { size: "small", variant: "text", onClick: () => applyQuickExtension(14), children: "+14 \u0434\u043D\u0435\u0439" }), _jsx(Button, { size: "small", variant: "text", onClick: () => applyQuickExtension(30), children: "+30 \u0434\u043D\u0435\u0439" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setExtendDialogOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", disabled: !extendEndDate || extendingProject, onClick: () => void submitProjectExtension(), children: "\u041F\u0440\u043E\u0434\u043B\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: editHostOpen, onClose: () => setEditHostOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "IP-\u0430\u0434\u0440\u0435\u0441", value: hostIp, onChange: (e) => setHostIp(e.target.value) }), _jsx(TextField, { label: "Hostname", value: hostName, onChange: (e) => setHostName(e.target.value) }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: hostStatus, onChange: (e) => setHostStatus(e.target.value), children: [_jsx(MenuItem, { value: "up", children: "up" }), _jsx(MenuItem, { value: "down", children: "down" }), _jsx(MenuItem, { value: "unknown", children: "unknown" })] }), _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", multiline: true, minRows: 3, value: hostNotes, onChange: (e) => setHostNotes(e.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditHostOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", disabled: !hostIp && !hostName, onClick: () => void submitHostEdit(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: vulnDetailOpen, onClose: () => setVulnDetailOpen(false), fullWidth: true, maxWidth: "lg", children: [_jsx(DialogTitle, { children: "\u041A\u0430\u0440\u0442\u043E\u0447\u043A\u0430 \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438" }), _jsx(DialogContent, { children: !activeVuln ? (_jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u0430." })) : (_jsxs(Stack, { spacing: 2, sx: { mt: 0.5 }, children: [_jsxs(Grid, { container: true, spacing: 2, children: [_jsx(Grid, { size: { xs: 12, md: 8 }, children: _jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", fullWidth: true, value: activeVuln.title, onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, title: e.target.value } : prev)) }) }), _jsx(Grid, { size: { xs: 12, md: 2 }, children: _jsxs(TextField, { select: true, label: "\u041A\u0440\u0438\u0442\u0438\u0447\u043D\u043E\u0441\u0442\u044C", fullWidth: true, value: activeVuln.severity, onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, severity: e.target.value } : prev)), children: [_jsx(MenuItem, { value: "critical", children: "critical" }), _jsx(MenuItem, { value: "high", children: "high" }), _jsx(MenuItem, { value: "medium", children: "medium" }), _jsx(MenuItem, { value: "low", children: "low" }), _jsx(MenuItem, { value: "info", children: "info" })] }) }), _jsx(Grid, { size: { xs: 12, md: 2 }, children: _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", fullWidth: true, value: activeVuln.status, onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, status: e.target.value } : prev)), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "in_progress", children: "in_progress" }), _jsx(MenuItem, { value: "fixed", children: "fixed" }), _jsx(MenuItem, { value: "wont_fix", children: "wont_fix" }), _jsx(MenuItem, { value: "accepted_risk", children: "accepted_risk" })] }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", fullWidth: true, multiline: true, minRows: 3, value: activeVuln.description || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, description: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12, md: 3 }, children: _jsxs(TextField, { select: true, label: "CVSS \u0432\u0435\u0440\u0441\u0438\u044F", fullWidth: true, value: activeVuln.cvss_version || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_version: e.target.value || null } : prev)), children: [_jsx(MenuItem, { value: "", children: "-" }), _jsx(MenuItem, { value: "3.1", children: "3.1" }), _jsx(MenuItem, { value: "4.0", children: "4.0" })] }) }), _jsx(Grid, { size: { xs: 12, md: 3 }, children: _jsx(TextField, { label: "CVSS score", type: "number", fullWidth: true, value: activeVuln.cvss_score ?? "", onChange: (e) => {
                                                     const value = e.target.value;
                                                     setActiveVuln((prev) => (prev ? { ...prev, cvss_score: value === "" ? null : Number(value) } : prev));
-                                                } }) }), _jsx(Grid, { size: { xs: 12, md: 6 }, children: _jsx(TextField, { label: "CVSS vector", fullWidth: true, value: activeVuln.cvss_vector || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_vector: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "CWE ID", fullWidth: true, value: activeVuln.cwe_id || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, cwe_id: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0428\u0430\u0433\u0438 \u0432\u043E\u0441\u043F\u0440\u043E\u0438\u0437\u0432\u0435\u0434\u0435\u043D\u0438\u044F", fullWidth: true, multiline: true, minRows: 2, value: activeVuln.steps_to_reproduce || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, steps_to_reproduce: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0412\u043B\u0438\u044F\u043D\u0438\u0435", fullWidth: true, multiline: true, minRows: 2, value: activeVuln.impact || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, impact: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0420\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0430\u0446\u0438\u0438", fullWidth: true, multiline: true, minRows: 2, value: activeVuln.recommendations || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: e.target.value || null } : prev)) }) })] }), _jsx(Divider, {}), _jsxs(Stack, { spacing: 1, children: [_jsxs(Typography, { variant: "subtitle1", fontWeight: 700, children: ["\u0424\u0430\u0439\u043B\u044B (", vulnFiles.length, ")"] }), _jsxs(Button, { component: "label", variant: "outlined", startIcon: _jsx(AttachFileIcon, {}), children: ["\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0444\u0430\u0439\u043B", _jsx("input", { hidden: true, type: "file", onChange: (e) => void uploadFileToActiveVuln(e.target.files?.[0] ?? null) })] }), _jsxs(List, { dense: true, disablePadding: true, children: [vulnFiles.map((file) => (_jsx(ListItem, { secondaryAction: _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(IconButton, { size: "small", component: "a", href: `/api/v1/files/${file.id}/download`, target: "_blank", rel: "noreferrer", children: _jsx(OpenInNewIcon, { fontSize: "small" }) }), _jsx(IconButton, { size: "small", onClick: () => void removeVulnerabilityFile(file.id), children: _jsx(DeleteOutlineIcon, { fontSize: "small" }) })] }), children: _jsx(ListItemText, { primary: file.original_name, secondary: `${file.content_type} • ${Math.round(file.size_bytes / 1024)} KB` }) }, file.id))), vulnFiles.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u0424\u0430\u0439\u043B\u044B \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u044B." })] })] }), _jsx(Divider, {}), _jsxs(Stack, { spacing: 1, children: [_jsxs(Typography, { variant: "subtitle1", fontWeight: 700, children: ["\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0438 (", vulnComments.length, ")"] }), _jsx(TextField, { label: "\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 (\u043F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0430 @username)", multiline: true, minRows: 2, value: newComment, onChange: (e) => setNewComment(e.target.value) }), _jsx(Button, { variant: "contained", disabled: !newComment.trim(), onClick: () => void addCommentToActiveVuln(), children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439" }), _jsxs(List, { dense: true, disablePadding: true, children: [vulnComments.map((comment) => (_jsx(ListItem, { alignItems: "flex-start", secondaryAction: (user?.role === "admin" || user?.id === comment.user_id) && (_jsx(IconButton, { size: "small", onClick: () => void removeCommentFromActiveVuln(comment.id), children: _jsx(DeleteOutlineIcon, { fontSize: "small" }) })), children: _jsx(ListItemText, { primary: `${comment.username} • ${new Date(comment.created_at).toLocaleString()}`, secondary: comment.content }) }, comment.id))), vulnComments.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0435\u0432 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442." })] })] })] })) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setVulnDetailOpen(false), children: "\u0417\u0430\u043A\u0440\u044B\u0442\u044C" }), _jsx(Button, { color: "error", variant: "outlined", onClick: () => void removeActiveVulnerability(), disabled: !activeVuln || vulnBusy, children: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C" }), _jsx(Button, { variant: "contained", onClick: () => void saveActiveVulnerability(), disabled: !activeVuln || vulnBusy, children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: exportOpen, onClose: () => setExportOpen(false), fullWidth: true, maxWidth: "xs", children: [_jsx(DialogTitle, { children: "\u042D\u043A\u0441\u043F\u043E\u0440\u0442 \u043E\u0442\u0447\u0451\u0442\u0430" }), _jsx(DialogContent, { children: _jsx(Stack, { spacing: 2, sx: { mt: 1 }, children: _jsxs(TextField, { select: true, label: "\u0424\u043E\u0440\u043C\u0430\u0442", value: exportFormat, onChange: (e) => setExportFormat(e.target.value), children: [_jsx(MenuItem, { value: "md", children: "Markdown (.md)" }), _jsx(MenuItem, { value: "pdf", children: "PDF (.pdf)" }), _jsx(MenuItem, { value: "docx", children: "DOCX (.docx)" })] }) }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setExportOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", startIcon: _jsx(DownloadIcon, {}), disabled: reportLoadingFormat !== null, onClick: () => void downloadReport(exportFormat), children: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: importOpen, onClose: () => setImportOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0418\u043C\u043F\u043E\u0440\u0442 \u0441\u0442\u0440\u0443\u043A\u0442\u0443\u0440\u044B \u043F\u0440\u043E\u0435\u043A\u0442\u0430 (JSON)" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsxs(Button, { component: "label", variant: "outlined", startIcon: _jsx(UploadFileIcon, {}), children: [importFile ? `Файл: ${importFile.name}` : "Выбрать JSON-файл", _jsx("input", { hidden: true, type: "file", accept: "application/json,.json", onChange: (event) => {
+                                                } }) }), _jsx(Grid, { size: { xs: 12, md: 6 }, children: _jsx(TextField, { label: "CVSS vector", fullWidth: true, value: activeVuln.cvss_vector || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_vector: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "CWE ID", fullWidth: true, value: activeVuln.cwe_id || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, cwe_id: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0428\u0430\u0433\u0438 \u0432\u043E\u0441\u043F\u0440\u043E\u0438\u0437\u0432\u0435\u0434\u0435\u043D\u0438\u044F", fullWidth: true, multiline: true, minRows: 2, value: activeVuln.steps_to_reproduce || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, steps_to_reproduce: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0412\u043B\u0438\u044F\u043D\u0438\u0435", fullWidth: true, multiline: true, minRows: 2, value: activeVuln.impact || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, impact: e.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0420\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0430\u0446\u0438\u0438", fullWidth: true, multiline: true, minRows: 2, value: activeVuln.recommendations || "", onChange: (e) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: e.target.value || null } : prev)) }) })] }), _jsx(Divider, {}), _jsxs(Stack, { spacing: 1, children: [_jsxs(Typography, { variant: "subtitle1", fontWeight: 700, children: ["\u0424\u0430\u0439\u043B\u044B (", vulnFiles.length, ")"] }), _jsxs(Button, { component: "label", variant: "outlined", startIcon: _jsx(AttachFileIcon, {}), children: ["\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0444\u0430\u0439\u043B", _jsx("input", { hidden: true, type: "file", onChange: (e) => void uploadFileToActiveVuln(e.target.files?.[0] ?? null) })] }), _jsxs(List, { dense: true, disablePadding: true, children: [vulnFiles.map((file) => (_jsx(ListItem, { secondaryAction: _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(IconButton, { size: "small", component: "a", href: `/api/v1/files/${file.id}/download`, target: "_blank", rel: "noreferrer", children: _jsx(OpenInNewIcon, { fontSize: "small" }) }), _jsx(IconButton, { size: "small", onClick: () => void removeVulnerabilityFile(file.id), children: _jsx(DeleteOutlineIcon, { fontSize: "small" }) })] }), children: _jsx(ListItemText, { primary: file.original_name, secondary: `${file.content_type} • ${Math.round(file.size_bytes / 1024)} KB` }) }, file.id))), vulnFiles.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u0424\u0430\u0439\u043B\u044B \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u044B." })] })] }), _jsx(Divider, {}), _jsxs(Stack, { spacing: 1, children: [_jsxs(Typography, { variant: "subtitle1", fontWeight: 700, children: ["\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0438 (", vulnComments.length, ")"] }), _jsx(TextField, { label: "\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 (\u043F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0430 @username)", multiline: true, minRows: 2, value: newComment, onChange: (e) => setNewComment(e.target.value) }), _jsx(Button, { variant: "contained", disabled: !newComment.trim(), onClick: () => void addCommentToActiveVuln(), children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439" }), _jsxs(List, { dense: true, disablePadding: true, children: [vulnComments.map((comment) => (_jsx(ListItem, { alignItems: "flex-start", secondaryAction: (user?.role === "admin" || user?.id === comment.user_id) ? (_jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(IconButton, { size: "small", onClick: () => openCommentEdit(comment), children: _jsx(EditIcon, { fontSize: "small" }) }), _jsx(IconButton, { size: "small", onClick: () => void removeCommentFromActiveVuln(comment.id), children: _jsx(DeleteOutlineIcon, { fontSize: "small" }) })] })) : null, children: _jsx(ListItemText, { primary: `${comment.username} • ${new Date(comment.created_at).toLocaleString()}`, secondary: comment.content }) }, comment.id))), vulnComments.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0435\u0432 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442." })] })] })] })) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setVulnDetailOpen(false), children: "\u0417\u0430\u043A\u0440\u044B\u0442\u044C" }), _jsx(Button, { color: "error", variant: "outlined", onClick: () => void removeActiveVulnerability(), disabled: !activeVuln || vulnBusy, children: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C" }), _jsx(Button, { variant: "contained", onClick: () => void saveActiveVulnerability(), disabled: !activeVuln || vulnBusy, children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: editCommentOpen, onClose: () => setEditCommentOpen(false), fullWidth: true, maxWidth: "sm", children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439" }), _jsx(DialogContent, { children: _jsx(TextField, { fullWidth: true, multiline: true, minRows: 4, sx: { mt: 1 }, label: "\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439", value: editingCommentContent, onChange: (event) => setEditingCommentContent(event.target.value) }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditCommentOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", disabled: !editingCommentContent.trim() || vulnBusy, onClick: () => void saveCommentEdit(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: exportOpen, onClose: () => setExportOpen(false), fullWidth: true, maxWidth: "xs", children: [_jsx(DialogTitle, { children: "\u042D\u043A\u0441\u043F\u043E\u0440\u0442 \u043E\u0442\u0447\u0451\u0442\u0430" }), _jsx(DialogContent, { children: _jsx(Stack, { spacing: 2, sx: { mt: 1 }, children: _jsxs(TextField, { select: true, label: "\u0424\u043E\u0440\u043C\u0430\u0442", value: exportFormat, onChange: (e) => setExportFormat(e.target.value), children: [_jsx(MenuItem, { value: "md", children: "Markdown (.md)" }), _jsx(MenuItem, { value: "pdf", children: "PDF (.pdf)" }), _jsx(MenuItem, { value: "docx", children: "DOCX (.docx)" })] }) }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setExportOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", startIcon: _jsx(DownloadIcon, {}), disabled: reportLoadingFormat !== null, onClick: () => void downloadReport(exportFormat), children: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: importOpen, onClose: () => setImportOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0418\u043C\u043F\u043E\u0440\u0442 \u0441\u0442\u0440\u0443\u043A\u0442\u0443\u0440\u044B \u043F\u0440\u043E\u0435\u043A\u0442\u0430 (JSON)" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsxs(Button, { component: "label", variant: "outlined", startIcon: _jsx(UploadFileIcon, {}), children: [importFile ? `Файл: ${importFile.name}` : "Выбрать JSON-файл", _jsx("input", { hidden: true, type: "file", accept: "application/json,.json", onChange: (event) => {
                                                 const selected = event.target.files?.[0] ?? null;
                                                 setImportFile(selected);
-                                            } })] }), importSummary && (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5 }, children: [_jsx(Typography, { variant: "subtitle2", fontWeight: 700, mb: 0.5, children: "\u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0438\u043C\u043F\u043E\u0440\u0442\u0430" }), _jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["hosts: ", importSummary.hosts_created, ", ports: ", importSummary.ports_created, ", services: ", importSummary.services_created, ", endpoints: ", importSummary.endpoints_created] }), importSummary.errors.length > 0 && (_jsxs(Typography, { variant: "body2", color: "warning.main", mt: 0.5, children: ["\u041E\u0448\u0438\u0431\u043A\u0438: ", importSummary.errors.join("; ")] }))] }))] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setImportOpen(false), children: "\u0417\u0430\u043A\u0440\u044B\u0442\u044C" }), _jsx(Button, { variant: "contained", disabled: !importFile || importing, onClick: () => void submitImport(), children: "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C" })] })] })] }));
+                                            } })] }), importSummary && (_jsxs(Box, { sx: { border: "1px solid rgba(126,224,255,0.16)", p: 1.5 }, children: [_jsx(Typography, { variant: "subtitle2", fontWeight: 700, mb: 0.5, children: "\u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0438\u043C\u043F\u043E\u0440\u0442\u0430" }), _jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["hosts: ", importSummary.hosts_created, ", ports: ", importSummary.ports_created, ", services: ", importSummary.services_created, ", endpoints: ", importSummary.endpoints_created] }), importSummary.errors.length > 0 && (_jsxs(Typography, { variant: "body2", color: "warning.main", mt: 0.5, children: ["\u041E\u0448\u0438\u0431\u043A\u0438: ", importSummary.errors.join("; ")] }))] }))] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setImportOpen(false), children: "\u0417\u0430\u043A\u0440\u044B\u0442\u044C" }), _jsx(Button, { variant: "contained", disabled: !importFile || importing, onClick: () => void submitImport(), children: "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: membersDialogOpen, onClose: () => setMembersDialogOpen(false), fullWidth: true, maxWidth: "md", children: [_jsx(DialogTitle, { children: "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [user?.role === "admin" && (_jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 1, children: [_jsx(TextField, { select: true, fullWidth: true, label: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F", value: selectedMemberUserId, onChange: (event) => setSelectedMemberUserId(event.target.value), children: availableUsers.map((candidate) => (_jsxs(MenuItem, { value: candidate.id, children: [candidate.username, " (", candidate.role, ")"] }, candidate.id))) }), _jsx(Button, { variant: "contained", startIcon: _jsx(PersonAddAlt1Icon, {}), disabled: !selectedMemberUserId || membersBusy, onClick: () => void addMemberToProject(), children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C" })] })), _jsxs(List, { dense: true, disablePadding: true, children: [projectMembers.map((member) => (_jsx(ListItem, { secondaryAction: user?.role === "admin" ? (_jsx(IconButton, { size: "small", onClick: () => void removeMemberFromProject(member.user_id), disabled: membersBusy, children: _jsx(DeleteOutlineIcon, { fontSize: "small" }) })) : null, children: _jsx(ListItemText, { primary: `${member.username} (${member.role})`, secondary: member.email }) }, member.user_id))), projectMembers.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u0423\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u043F\u043E\u043A\u0430 \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B." })] })] }) }), _jsx(DialogActions, { children: _jsx(Button, { onClick: () => setMembersDialogOpen(false), children: "\u0417\u0430\u043A\u0440\u044B\u0442\u044C" }) })] })] }));
 }

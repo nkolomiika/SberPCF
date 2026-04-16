@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models  # noqa: F401
@@ -83,6 +84,8 @@ def _register_error_handlers() -> None:
 async def startup() -> None:
     """Инициализирует БД, MinIO и стартового администратора."""
     async with engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            await conn.execute(text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'developer'"))
         await conn.run_sync(Base.metadata.create_all)
     MinioStorage().ensure_bucket()
     async with SessionLocal() as db:
