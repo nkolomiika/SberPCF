@@ -1,6 +1,9 @@
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import AddIcon from "@mui/icons-material/Add";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import MoreVertIcon from "@mui/icons-material/MoreVert";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 import {
   Alert,
   Box,
@@ -8,6 +11,7 @@ import {
   Card,
   CardContent,
   Chip,
+  Collapse,
   CircularProgress,
   Dialog,
   DialogActions,
@@ -15,6 +19,7 @@ import {
   DialogTitle,
   Grid2 as Grid,
   IconButton,
+  Menu,
   MenuItem,
   Stack,
   TextField,
@@ -22,6 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useCallback, useEffect, useState } from "react";
+import { load as parseYaml } from "js-yaml";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
 import {
@@ -52,12 +58,10 @@ export function HostDetailPage() {
   const [hosts, setHosts] = useState<Host[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
   const [selectedSection, setSelectedSection] = useState<DetailSection>("overview");
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [isEditDescriptionOpen, setEditDescriptionOpen] = useState(false);
-  const [editedDescription, setEditedDescription] = useState("");
-  const [isSavingDescription, setSavingDescription] = useState(false);
   const [hostStatsById, setHostStatsById] = useState<Record<string, HostTreeStats>>({});
   const [isEditPortOpen, setEditPortOpen] = useState(false);
   const [editingPortId, setEditingPortId] = useState<string | null>(null);
@@ -69,6 +73,7 @@ export function HostDetailPage() {
   const [editingEndpointPath, setEditingEndpointPath] = useState("");
   const [editingEndpointMethod, setEditingEndpointMethod] = useState<Exclude<Endpoint["method"], null>>("GET");
   const [editingEndpointDescription, setEditingEndpointDescription] = useState("");
+  const [editingEndpointRequestRaw, setEditingEndpointRequestRaw] = useState("");
   const [isEditVulnerabilityOpen, setEditVulnerabilityOpen] = useState(false);
   const [editingVulnerabilityId, setEditingVulnerabilityId] = useState<string | null>(null);
   const [editingVulnerabilityTitle, setEditingVulnerabilityTitle] = useState("");
@@ -83,11 +88,28 @@ export function HostDetailPage() {
   const [creatingEndpointPath, setCreatingEndpointPath] = useState("");
   const [creatingEndpointMethod, setCreatingEndpointMethod] = useState<Exclude<Endpoint["method"], null>>("GET");
   const [creatingEndpointDescription, setCreatingEndpointDescription] = useState("");
+  const [creatingEndpointRequestRaw, setCreatingEndpointRequestRaw] = useState("");
+  const [swaggerImporting, setSwaggerImporting] = useState(false);
   const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
   const [creatingVulnerabilityTitle, setCreatingVulnerabilityTitle] = useState("");
   const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
   const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
   const [creatingVulnerabilityStatus, setCreatingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
+  const [hostActionsAnchorEl, setHostActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [isEditHostOpen, setEditHostOpen] = useState(false);
+  const [editingHostIp, setEditingHostIp] = useState("");
+  const [editingHostName, setEditingHostName] = useState("");
+  const [editingHostStatus, setEditingHostStatus] = useState<Host["status"]>("unknown");
+  const [editingHostNotes, setEditingHostNotes] = useState("");
+  const [portActionsAnchorEl, setPortActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [activePort, setActivePort] = useState<Port | null>(null);
+  const [endpointActionsAnchorEl, setEndpointActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [activeEndpoint, setActiveEndpoint] = useState<Endpoint | null>(null);
+  const [vulnerabilityActionsAnchorEl, setVulnerabilityActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [activeVulnerability, setActiveVulnerability] = useState<Vulnerability | null>(null);
+  const [expandedPortIds, setExpandedPortIds] = useState<string[]>([]);
+  const [expandedEndpointIds, setExpandedEndpointIds] = useState<string[]>([]);
+  const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<string[]>([]);
 
   const loadHost = useCallback(async () => {
     if (!projectId || !hostId) {
@@ -104,7 +126,6 @@ export function HostDetailPage() {
       setHost(hostResponse);
       setHosts(hostsResponse.items);
       setVulnerabilities(hostVulnsResponse.items);
-      setEditedDescription(hostResponse.notes ?? "");
       const statsEntries = await Promise.allSettled(
         hostsResponse.items.map(async (listedHost) => {
           if (listedHost.id === hostId) {
@@ -150,20 +171,68 @@ export function HostDetailPage() {
     void loadHost();
   }, [loadHost]);
 
-  const saveHostDescription = async () => {
+  const hostActionsOpen = Boolean(hostActionsAnchorEl);
+  const portActionsOpen = Boolean(portActionsAnchorEl);
+  const endpointActionsOpen = Boolean(endpointActionsAnchorEl);
+  const vulnerabilityActionsOpen = Boolean(vulnerabilityActionsAnchorEl);
+
+  const openHostActionsMenu = (event: React.MouseEvent<HTMLElement>) => {
+    setHostActionsAnchorEl(event.currentTarget);
+  };
+
+  const closeHostActionsMenu = () => {
+    setHostActionsAnchorEl(null);
+  };
+
+  const openPortActions = (event: React.MouseEvent<HTMLElement>, port: Port) => {
+    event.stopPropagation();
+    setPortActionsAnchorEl(event.currentTarget);
+    setActivePort(port);
+  };
+
+  const closePortActions = () => {
+    setPortActionsAnchorEl(null);
+    setActivePort(null);
+  };
+
+  const openHostEdit = () => {
+    if (!host) {
+      return;
+    }
+    setEditingHostIp(host.ip_address ?? "");
+    setEditingHostName(host.hostname ?? "");
+    setEditingHostStatus(host.status);
+    setEditingHostNotes(host.notes ?? "");
+    closeHostActionsMenu();
+    setEditHostOpen(true);
+  };
+
+  const saveHostInfo = async () => {
     if (!projectId || !hostId) {
       return;
     }
-    setSavingDescription(true);
     setError(null);
     try {
-      const updatedHost = await updateHost(projectId, hostId, { notes: editedDescription.trim() || undefined });
-      setHost((previous) => (previous ? { ...previous, notes: updatedHost.notes } : previous));
-      setEditDescriptionOpen(false);
+      const updatedHost = await updateHost(projectId, hostId, {
+        ip_address: editingHostIp.trim() || undefined,
+        hostname: editingHostName.trim() || undefined,
+        status: editingHostStatus,
+        notes: editingHostNotes.trim() || undefined,
+      });
+      setHost((prev) =>
+        prev
+          ? {
+              ...prev,
+              ip_address: updatedHost.ip_address,
+              hostname: updatedHost.hostname,
+              status: updatedHost.status,
+              notes: updatedHost.notes,
+            }
+          : prev
+      );
+      setEditHostOpen(false);
     } catch {
-      setError("Не удалось обновить описание хоста.");
-    } finally {
-      setSavingDescription(false);
+      setError("Не удалось обновить информацию о хосте.");
     }
   };
 
@@ -176,6 +245,53 @@ export function HostDetailPage() {
     }
     await deleteHost(projectId, hostId);
     navigate(`/projects/${projectId}`);
+  };
+
+  const openEndpointActions = (event: React.MouseEvent<HTMLElement>, endpoint: Endpoint) => {
+    event.stopPropagation();
+    setEndpointActionsAnchorEl(event.currentTarget);
+    setActiveEndpoint(endpoint);
+  };
+
+  const closeEndpointActions = () => {
+    setEndpointActionsAnchorEl(null);
+    setActiveEndpoint(null);
+  };
+
+  const openVulnerabilityActions = (event: React.MouseEvent<HTMLElement>, vulnerability: Vulnerability) => {
+    event.stopPropagation();
+    setVulnerabilityActionsAnchorEl(event.currentTarget);
+    setActiveVulnerability(vulnerability);
+  };
+
+  const closeVulnerabilityActions = () => {
+    setVulnerabilityActionsAnchorEl(null);
+    setActiveVulnerability(null);
+  };
+
+  const toggleExpandedId = (id: string, setExpanded: React.Dispatch<React.SetStateAction<string[]>>) => {
+    setExpanded((current) => (current.includes(id) ? current.filter((itemId) => itemId !== id) : [...current, id]));
+  };
+
+  const buildEndpointRawRequest = (endpoint: Endpoint) => {
+    const method = endpoint.method ?? "GET";
+    const hostHeader = host?.hostname || host?.ip_address || "example.local";
+    return `${method} ${endpoint.path} HTTP/1.1\nHost: ${hostHeader}\n\n`;
+  };
+
+  const buildEndpointCurl = (endpoint: Endpoint) => {
+    const method = endpoint.method ?? "GET";
+    const hostTarget = host?.hostname || host?.ip_address || "example.local";
+    return `curl -X ${method} "http://${hostTarget}${endpoint.path}"`;
+  };
+
+  const copyEndpointRequest = async (format: "curl" | "raw") => {
+    if (!activeEndpoint) {
+      return;
+    }
+    const text = format === "curl" ? buildEndpointCurl(activeEndpoint) : buildEndpointRawRequest(activeEndpoint);
+    await navigator.clipboard.writeText(text);
+    closeEndpointActions();
   };
 
   const openPortEdit = (port: Port) => {
@@ -226,11 +342,47 @@ export function HostDetailPage() {
     await loadHost();
   };
 
+  const parseRawHttpRequest = (rawRequest: string): { method: Exclude<Endpoint["method"], null>; path: string } | null => {
+    const firstLine = rawRequest.replace("\r", "").split("\n").map((line) => line.trim()).find(Boolean);
+    if (!firstLine) {
+      return null;
+    }
+    const requestLineMatch = firstLine.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)\s+HTTP\/\d(?:\.\d)?$/i);
+    if (!requestLineMatch) {
+      return null;
+    }
+    return {
+      method: requestLineMatch[1].toUpperCase() as Exclude<Endpoint["method"], null>,
+      path: requestLineMatch[2],
+    };
+  };
+
+  const applyParsedRequestToCreateEndpoint = (rawRequest: string) => {
+    setCreatingEndpointRequestRaw(rawRequest);
+    const parsed = parseRawHttpRequest(rawRequest);
+    if (!parsed) {
+      return;
+    }
+    setCreatingEndpointMethod(parsed.method);
+    setCreatingEndpointPath(parsed.path);
+  };
+
+  const applyParsedRequestToEditEndpoint = (rawRequest: string) => {
+    setEditingEndpointRequestRaw(rawRequest);
+    const parsed = parseRawHttpRequest(rawRequest);
+    if (!parsed) {
+      return;
+    }
+    setEditingEndpointMethod(parsed.method);
+    setEditingEndpointPath(parsed.path);
+  };
+
   const openEndpointEdit = (endpoint: Endpoint) => {
     setEditingEndpointId(endpoint.id);
     setEditingEndpointPath(endpoint.path);
     setEditingEndpointMethod(endpoint.method || "GET");
     setEditingEndpointDescription(endpoint.description || "");
+    setEditingEndpointRequestRaw("");
     setEditEndpointOpen(true);
   };
 
@@ -242,8 +394,10 @@ export function HostDetailPage() {
       path: editingEndpointPath,
       method: editingEndpointMethod,
       description: editingEndpointDescription || undefined,
+      request_raw: editingEndpointRequestRaw.trim() || undefined,
     });
     setEditEndpointOpen(false);
+    setEditingEndpointRequestRaw("");
     await loadHost();
   };
 
@@ -263,15 +417,99 @@ export function HostDetailPage() {
       return;
     }
     await createEndpoint(projectId, hostId, {
-      path: creatingEndpointPath.trim(),
+      path: creatingEndpointPath.trim() || undefined,
       method: creatingEndpointMethod,
       description: creatingEndpointDescription.trim() || undefined,
+      request_raw: creatingEndpointRequestRaw.trim() || undefined,
     });
     setCreateEndpointOpen(false);
     setCreatingEndpointPath("");
     setCreatingEndpointMethod("GET");
     setCreatingEndpointDescription("");
+    setCreatingEndpointRequestRaw("");
     await loadHost();
+  };
+
+  const importEndpointsFromSwaggerFile = async (file: File | null) => {
+    if (!file || !projectId || !hostId) {
+      return;
+    }
+    setSwaggerImporting(true);
+    setError(null);
+    setInfoMessage(null);
+    try {
+      const rawText = await file.text();
+      let parsedSpec: unknown;
+      const lowerCaseName = file.name.toLowerCase();
+      const looksLikeYaml = lowerCaseName.endsWith(".yaml") || lowerCaseName.endsWith(".yml");
+      try {
+        parsedSpec = looksLikeYaml ? parseYaml(rawText) : JSON.parse(rawText);
+      } catch {
+        if (!looksLikeYaml) {
+          try {
+            parsedSpec = parseYaml(rawText);
+          } catch {
+            throw new Error("Swagger/OpenAPI файл должен быть валидным JSON или YAML.");
+          }
+        } else {
+          throw new Error("Swagger/OpenAPI YAML файл невалиден.");
+        }
+      }
+      if (!parsedSpec || typeof parsedSpec !== "object") {
+        throw new Error("Некорректный Swagger/OpenAPI документ.");
+      }
+      const paths = (parsedSpec as { paths?: Record<string, Record<string, Record<string, unknown>>> }).paths;
+      if (!paths || typeof paths !== "object") {
+        throw new Error("В Swagger/OpenAPI документе отсутствует объект paths.");
+      }
+      const methodOrder = ["get", "post", "put", "patch", "delete", "head", "options"] as const;
+      const operations: Array<{ method: Exclude<Endpoint["method"], null>; path: string; description?: string }> = [];
+      Object.entries(paths).forEach(([pathValue, pathItem]) => {
+        if (!pathItem || typeof pathItem !== "object") {
+          return;
+        }
+        methodOrder.forEach((methodName) => {
+          const operation = pathItem[methodName];
+          if (!operation || typeof operation !== "object") {
+            return;
+          }
+          const opInfo = operation as { summary?: string; description?: string };
+          const combinedDescription = [opInfo.summary, opInfo.description].filter(Boolean).join("\n\n");
+          operations.push({
+            method: methodName.toUpperCase() as Exclude<Endpoint["method"], null>,
+            path: pathValue,
+            description: combinedDescription || undefined,
+          });
+        });
+      });
+      if (!operations.length) {
+        throw new Error("В Swagger/OpenAPI документе не найдено методов для импорта.");
+      }
+      const existingKeys = new Set((host?.endpoints ?? []).map((item) => `${item.method ?? "ANY"}:${item.path}`));
+      let created = 0;
+      let skipped = 0;
+      let failed = 0;
+      for (const operation of operations) {
+        const key = `${operation.method}:${operation.path}`;
+        if (existingKeys.has(key)) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          await createEndpoint(projectId, hostId, operation);
+          existingKeys.add(key);
+          created += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      await loadHost();
+      setInfoMessage(`Swagger импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}.`);
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "Не удалось импортировать Swagger/OpenAPI.");
+    } finally {
+      setSwaggerImporting(false);
+    }
   };
 
   const openVulnerabilityEdit = (vulnerability: Vulnerability) => {
@@ -360,18 +598,40 @@ export function HostDetailPage() {
   return (
     <Stack spacing={2.5}>
       {error && <Alert severity="error">{error}</Alert>}
+      {infoMessage && <Alert severity="success">{infoMessage}</Alert>}
 
       <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
-        <Stack spacing={0.4}>
+        <Stack spacing={0.2}>
           <Typography variant="h4" fontWeight={700}>
             Хост: {hostTitle}
           </Typography>
-          <Typography color="text.secondary">Навигация по разделам хоста через интерактивные карточки.</Typography>
         </Stack>
-        <Button color="error" variant="outlined" startIcon={<DeleteIcon />} onClick={() => void removeHost()}>
-          Удалить хост
-        </Button>
+        <IconButton onClick={openHostActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", borderRadius: 2 }}>
+          <MoreVertIcon />
+        </IconButton>
       </Stack>
+
+      <Menu
+        anchorEl={hostActionsAnchorEl}
+        open={hostActionsOpen}
+        onClose={closeHostActionsMenu}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem onClick={openHostEdit}>
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Редактировать хост
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            closeHostActionsMenu();
+            void removeHost();
+          }}
+        >
+          <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
+          Удалить хост
+        </MenuItem>
+      </Menu>
 
       <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
         <ProjectTreeNav
@@ -449,22 +709,9 @@ export function HostDetailPage() {
             <Stack spacing={2}>
               <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
                 <CardContent>
-                  <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1}>
-                    <Typography variant="h6" fontWeight={700}>
-                      Описание хоста
-                    </Typography>
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      startIcon={<EditIcon fontSize="small" />}
-                      onClick={() => {
-                        setEditedDescription(host?.notes ?? "");
-                        setEditDescriptionOpen(true);
-                      }}
-                    >
-                      Редактировать описание
-                    </Button>
-                  </Stack>
+                  <Typography variant="h6" fontWeight={700} mb={1}>
+                    Описание хоста
+                  </Typography>
                   <Box sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0 }}>
                     <ReactMarkdown>{host?.notes || "_Описание хоста не заполнено_"}</ReactMarkdown>
                   </Box>
@@ -490,33 +737,77 @@ export function HostDetailPage() {
                   {host?.ports.map((port) => (
                     <Stack
                       key={port.id}
-                      direction="row"
-                      justifyContent="space-between"
-                      alignItems="center"
-                      sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, borderRadius: 0 }}
+                      onClick={() => toggleExpandedId(port.id, setExpandedPortIds)}
+                      sx={{
+                        border: "1px solid rgba(126,224,255,0.12)",
+                        p: 1.2,
+                        borderRadius: 0,
+                        cursor: "pointer",
+                        "& .port-actions": {
+                          opacity: 0,
+                          pointerEvents: "none",
+                          transition: "opacity 0.15s ease-in-out",
+                        },
+                        "&:hover .port-actions": {
+                          opacity: 1,
+                          pointerEvents: "auto",
+                        },
+                      }}
                     >
-                      <Stack direction="row" spacing={1} alignItems="center">
-                        <Typography fontWeight={600}>
-                          {port.port_number}/{port.protocol}
+                      <Stack direction="row" justifyContent="space-between" alignItems="center">
+                        <Stack direction="row" spacing={1} alignItems="center">
+                          <Typography fontWeight={600}>
+                            {port.port_number}/{port.protocol}
+                          </Typography>
+                          <Chip label={port.state} size="small" />
+                        </Stack>
+                        <Stack direction="row" spacing={0.4} className="port-actions">
+                          <Tooltip title="Действия">
+                            <IconButton size="small" onClick={(event) => openPortActions(event, port)}>
+                              <MoreVertIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </Stack>
+                      </Stack>
+                      <Collapse in={expandedPortIds.includes(port.id)} timeout="auto" unmountOnExit>
+                        <Typography mt={0.8} color="text.secondary" variant="body2">
+                          Порт {port.port_number}/{port.protocol} сейчас в состоянии {port.state}.
                         </Typography>
-                        <Chip label={port.state} size="small" />
-                      </Stack>
-                      <Stack direction="row" spacing={0.4}>
-                        <Tooltip title="Редактировать">
-                          <IconButton size="small" onClick={() => openPortEdit(port)}>
-                            <EditIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-                        <Tooltip title="Удалить">
-                          <IconButton size="small" color="error" onClick={() => void removePort(port.id)}>
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-                      </Stack>
+                      </Collapse>
                     </Stack>
                   ))}
                   {!host?.ports.length && <Typography color="text.secondary">Порты для этого хоста пока не добавлены.</Typography>}
                 </Stack>
+                <Menu
+                  anchorEl={portActionsAnchorEl}
+                  open={portActionsOpen}
+                  onClose={closePortActions}
+                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                  transformOrigin={{ vertical: "top", horizontal: "right" }}
+                >
+                  <MenuItem
+                    onClick={() => {
+                      if (activePort) {
+                        openPortEdit(activePort);
+                      }
+                      closePortActions();
+                    }}
+                  >
+                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
+                    Редактировать
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      if (activePort) {
+                        void removePort(activePort.id);
+                      }
+                      closePortActions();
+                    }}
+                  >
+                    <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
+                    Удалить
+                  </MenuItem>
+                </Menu>
               </CardContent>
             </Card>
           )}
@@ -528,40 +819,110 @@ export function HostDetailPage() {
                   <Typography variant="h6" fontWeight={700}>
                     Эндпоинты
                   </Typography>
-                  <Tooltip title="Добавить эндпоинт">
-                    <IconButton size="small" onClick={() => setCreateEndpointOpen(true)}>
-                      <AddIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
+                  <Stack direction="row" spacing={0.5}>
+                    <Tooltip title="Импортировать из Swagger/OpenAPI (JSON/YAML)">
+                      <IconButton size="small" component="label" disabled={swaggerImporting}>
+                        <UploadFileIcon fontSize="small" />
+                        <input
+                          hidden
+                          type="file"
+                          accept="application/json,.json,.yaml,.yml,text/yaml,application/yaml"
+                          onChange={(event) => {
+                            const selectedFile = event.target.files?.[0] ?? null;
+                            void importEndpointsFromSwaggerFile(selectedFile);
+                            event.target.value = "";
+                          }}
+                        />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Добавить эндпоинт">
+                      <IconButton size="small" onClick={() => setCreateEndpointOpen(true)}>
+                        <AddIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
                 </Stack>
                 <Stack spacing={1}>
                   {host?.endpoints.map((endpoint) => (
-                    <Box key={endpoint.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, borderRadius: 0 }}>
+                    <Box
+                      key={endpoint.id}
+                      onClick={() => toggleExpandedId(endpoint.id, setExpandedEndpointIds)}
+                      sx={{
+                        border: "1px solid rgba(126,224,255,0.12)",
+                        p: 1.2,
+                        borderRadius: 0,
+                        cursor: "pointer",
+                        "& .endpoint-actions": {
+                          opacity: 0,
+                          pointerEvents: "none",
+                          transition: "opacity 0.15s ease-in-out",
+                        },
+                        "&:hover .endpoint-actions": {
+                          opacity: 1,
+                          pointerEvents: "auto",
+                        },
+                      }}
+                    >
                       <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
                         <Stack direction="row" spacing={1} alignItems="center">
                           <Chip size="small" label={endpoint.method || "ANY"} />
                           <Typography fontWeight={600}>{endpoint.path}</Typography>
                         </Stack>
-                        <Stack direction="row" spacing={0.4}>
-                          <Tooltip title="Редактировать">
-                            <IconButton size="small" onClick={() => openEndpointEdit(endpoint)}>
-                              <EditIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                          <Tooltip title="Удалить">
-                            <IconButton size="small" color="error" onClick={() => void removeEndpoint(endpoint.id)}>
-                              <DeleteIcon fontSize="small" />
+                        <Stack direction="row" spacing={0.4} className="endpoint-actions">
+                          <Tooltip title="Действия">
+                            <IconButton size="small" onClick={(event) => openEndpointActions(event, endpoint)}>
+                              <MoreVertIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>
                         </Stack>
                       </Stack>
-                      <Typography mt={0.8} color="text.secondary" variant="body2">
-                        {endpoint.description || "Описание не указано"}
-                      </Typography>
+                      <Collapse in={expandedEndpointIds.includes(endpoint.id)} timeout="auto" unmountOnExit>
+                        <Typography mt={0.8} color="text.secondary" variant="body2">
+                          {endpoint.description || "Описание не указано"}
+                        </Typography>
+                      </Collapse>
                     </Box>
                   ))}
                   {!host?.endpoints.length && <Typography color="text.secondary">Эндпоинты для этого хоста пока не добавлены.</Typography>}
                 </Stack>
+                <Menu
+                  anchorEl={endpointActionsAnchorEl}
+                  open={endpointActionsOpen}
+                  onClose={closeEndpointActions}
+                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                  transformOrigin={{ vertical: "top", horizontal: "right" }}
+                >
+                  <MenuItem
+                    onClick={() => {
+                      if (activeEndpoint) {
+                        openEndpointEdit(activeEndpoint);
+                      }
+                      closeEndpointActions();
+                    }}
+                  >
+                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
+                    Редактировать
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      if (activeEndpoint) {
+                        void removeEndpoint(activeEndpoint.id);
+                      }
+                      closeEndpointActions();
+                    }}
+                  >
+                    <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
+                    Удалить
+                  </MenuItem>
+                  <MenuItem onClick={() => void copyEndpointRequest("curl")}>
+                    <ContentCopyIcon fontSize="small" sx={{ mr: 1 }} />
+                    Скопировать как cURL
+                  </MenuItem>
+                  <MenuItem onClick={() => void copyEndpointRequest("raw")}>
+                    <ContentCopyIcon fontSize="small" sx={{ mr: 1 }} />
+                    Скопировать как Raw
+                  </MenuItem>
+                </Menu>
               </CardContent>
             </Card>
           )}
@@ -581,7 +942,25 @@ export function HostDetailPage() {
                 </Stack>
                 <Stack spacing={1}>
                   {vulnerabilities.map((item) => (
-                    <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, borderRadius: 0 }}>
+                    <Box
+                      key={item.id}
+                      onClick={() => toggleExpandedId(item.id, setExpandedVulnerabilityIds)}
+                      sx={{
+                        border: "1px solid rgba(126,224,255,0.12)",
+                        p: 1.2,
+                        borderRadius: 0,
+                        cursor: "pointer",
+                        "& .vuln-actions": {
+                          opacity: 0,
+                          pointerEvents: "none",
+                          transition: "opacity 0.15s ease-in-out",
+                        },
+                        "&:hover .vuln-actions": {
+                          opacity: 1,
+                          pointerEvents: "auto",
+                        },
+                      }}
+                    >
                       <Stack direction="row" justifyContent="space-between" alignItems="center">
                         <Stack spacing={0.8}>
                           <Typography fontWeight={600}>{item.title}</Typography>
@@ -590,47 +969,82 @@ export function HostDetailPage() {
                             <Chip size="small" label={item.status} sx={vulnerabilityStatusChipSx[item.status]} />
                           </Stack>
                         </Stack>
-                        <Stack direction="row" spacing={0.4} alignItems="center">
-                          <Tooltip title="Редактировать">
-                            <IconButton size="small" onClick={() => openVulnerabilityEdit(item)}>
-                              <EditIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                          <Tooltip title="Удалить">
-                            <IconButton size="small" color="error" onClick={() => void removeVulnerability(item.id)}>
-                              <DeleteIcon fontSize="small" />
+                        <Stack direction="row" spacing={0.4} alignItems="center" className="vuln-actions">
+                          <Tooltip title="Действия">
+                            <IconButton size="small" onClick={(event) => openVulnerabilityActions(event, item)}>
+                              <MoreVertIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>
                         </Stack>
                       </Stack>
+                      <Collapse in={expandedVulnerabilityIds.includes(item.id)} timeout="auto" unmountOnExit>
+                        <Typography mt={0.8} color="text.secondary" variant="body2">
+                          {item.description || "Описание не указано"}
+                        </Typography>
+                      </Collapse>
                     </Box>
                   ))}
                   {!vulnerabilities.length && <Typography color="text.secondary">Уязвимости, привязанные к этому хосту, пока не добавлены.</Typography>}
                 </Stack>
+                <Menu
+                  anchorEl={vulnerabilityActionsAnchorEl}
+                  open={vulnerabilityActionsOpen}
+                  onClose={closeVulnerabilityActions}
+                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                  transformOrigin={{ vertical: "top", horizontal: "right" }}
+                >
+                  <MenuItem
+                    onClick={() => {
+                      if (activeVulnerability) {
+                        openVulnerabilityEdit(activeVulnerability);
+                      }
+                      closeVulnerabilityActions();
+                    }}
+                  >
+                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
+                    Редактировать
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      if (activeVulnerability) {
+                        void removeVulnerability(activeVulnerability.id);
+                      }
+                      closeVulnerabilityActions();
+                    }}
+                  >
+                    <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
+                    Удалить
+                  </MenuItem>
+                </Menu>
               </CardContent>
             </Card>
           )}
         </Stack>
       </Stack>
 
-      <Dialog open={isEditDescriptionOpen} onClose={() => setEditDescriptionOpen(false)} fullWidth maxWidth="md">
-        <DialogTitle>Редактирование описания хоста</DialogTitle>
+      <Dialog open={isEditHostOpen} onClose={() => setEditHostOpen(false)} fullWidth>
+        <DialogTitle>Редактировать хост</DialogTitle>
         <DialogContent>
-          <TextField
-            multiline
-            minRows={6}
-            fullWidth
-            label="Описание"
-            value={editedDescription}
-            onChange={(event) => setEditedDescription(event.target.value)}
-            sx={{ mt: 1 }}
-          />
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="IP-адрес" value={editingHostIp} onChange={(event) => setEditingHostIp(event.target.value)} />
+            <TextField label="Hostname" value={editingHostName} onChange={(event) => setEditingHostName(event.target.value)} />
+            <TextField select label="Статус" value={editingHostStatus} onChange={(event) => setEditingHostStatus(event.target.value as Host["status"])}>
+              <MenuItem value="up">up</MenuItem>
+              <MenuItem value="down">down</MenuItem>
+              <MenuItem value="unknown">unknown</MenuItem>
+            </TextField>
+            <TextField
+              multiline
+              minRows={4}
+              label="Описание"
+              value={editingHostNotes}
+              onChange={(event) => setEditingHostNotes(event.target.value)}
+            />
+          </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setEditDescriptionOpen(false)} disabled={isSavingDescription}>
-            Отмена
-          </Button>
-          <Button variant="contained" onClick={() => void saveHostDescription()} disabled={isSavingDescription}>
+          <Button onClick={() => setEditHostOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void saveHostInfo()} disabled={!editingHostIp.trim() && !editingHostName.trim()}>
             Сохранить
           </Button>
         </DialogActions>
@@ -700,6 +1114,14 @@ export function HostDetailPage() {
         <DialogTitle>Редактировать эндпоинт</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              multiline
+              minRows={6}
+              label="Raw HTTP request (опционально)"
+              placeholder={"POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}"}
+              value={editingEndpointRequestRaw}
+              onChange={(event) => applyParsedRequestToEditEndpoint(event.target.value)}
+            />
             <TextField label="Путь" value={editingEndpointPath} onChange={(event) => setEditingEndpointPath(event.target.value)} />
             <TextField
               select
@@ -734,6 +1156,14 @@ export function HostDetailPage() {
         <DialogTitle>Добавить эндпоинт</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              multiline
+              minRows={6}
+              label="Raw HTTP request (опционально)"
+              placeholder={"POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}"}
+              value={creatingEndpointRequestRaw}
+              onChange={(event) => applyParsedRequestToCreateEndpoint(event.target.value)}
+            />
             <TextField label="Путь" value={creatingEndpointPath} onChange={(event) => setCreatingEndpointPath(event.target.value)} />
             <TextField
               select
@@ -758,7 +1188,11 @@ export function HostDetailPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreateEndpointOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={() => void createHostEndpoint()} disabled={!creatingEndpointPath.trim()}>
+          <Button
+            variant="contained"
+            onClick={() => void createHostEndpoint()}
+            disabled={!creatingEndpointPath.trim() && !creatingEndpointRequestRaw.trim()}
+          >
             Создать
           </Button>
         </DialogActions>

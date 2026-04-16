@@ -180,15 +180,23 @@ class ServiceOut(ORMBase):
 
 
 class EndpointCreate(BaseModel):
-    path: str = Field(min_length=1)
+    path: str | None = Field(default=None, min_length=1)
     method: HttpMethod | None = None
     description: str | None = None
+    request_raw: str | None = None
+
+    @model_validator(mode="after")
+    def validate_endpoint_target_defined(self) -> "EndpointCreate":
+        if not self.path and not self.request_raw:
+            raise ValueError("Нужно указать path или request_raw")
+        return self
 
 
 class EndpointUpdate(BaseModel):
     path: str | None = Field(default=None, min_length=1)
     method: HttpMethod | None = None
     description: str | None = None
+    request_raw: str | None = None
 
 
 class EndpointOut(ORMBase):

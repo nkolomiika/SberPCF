@@ -382,6 +382,30 @@ class AssetService:
         self.db = db
         self.audit = AuditService(db)
 
+    @staticmethod
+    def _apply_raw_request_payload(payload: dict) -> dict:
+        request_raw = payload.get("request_raw")
+        if not request_raw:
+            return payload
+        lines = [line.strip() for line in str(request_raw).replace("\r", "").split("\n") if line.strip()]
+        if not lines:
+            raise ValidationError("request_raw пустой")
+        request_line = lines[0].split()
+        if len(request_line) < 3:
+            raise ValidationError("request_raw должен содержать request line вида 'METHOD /path HTTP/1.1'")
+        method, path_value, http_part = request_line[0].upper(), request_line[1], request_line[2].upper()
+        allowed_methods = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+        if method not in allowed_methods:
+            raise ValidationError("request_raw содержит неподдерживаемый HTTP-метод")
+        if not http_part.startswith("HTTP/"):
+            raise ValidationError("request_raw должен содержать HTTP-версию в request line")
+        payload["method"] = method
+        payload["path"] = path_value
+        if not payload.get("description"):
+            payload["description"] = str(request_raw).strip()
+        payload.pop("request_raw", None)
+        return payload
+
     async def _get_host(self, project_id: UUID, host_id: UUID) -> Host:
         host = await self.db.scalar(select(Host).where(and_(Host.id == host_id, Host.project_id == project_id)))
         if not host:
@@ -572,6 +596,7 @@ class AssetService:
 
     async def create_endpoint(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Endpoint:
         await self._get_host(project_id, host_id)
+        payload = self._apply_raw_request_payload(dict(payload))
         endpoint = Endpoint(host_id=host_id, **payload)
         self.db.add(endpoint)
         await self.db.commit()
@@ -582,6 +607,7 @@ class AssetService:
 
     async def update_endpoint(self, project_id: UUID, host_id: UUID, endpoint_id: UUID, payload: dict, actor_id: UUID) -> Endpoint:
         await self._get_host(project_id, host_id)
+        payload = self._apply_raw_request_payload(dict(payload))
         endpoint = await self.db.scalar(select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id)))
         if not endpoint:
             raise NotFoundError("Endpoint не найден")
@@ -1098,12 +1124,21 @@ class ImportService:
                         result.services_created += 1
 
                 for endpoint_data in host_data.get("endpoints", []):
+                    endpoint_payload = {
+                        "path": endpoint_data.get("path"),
+                        "method": endpoint_data.get("method"),
+                        "description": endpoint_data.get("description"),
+                        "request_raw": endpoint_data.get("request_raw") or endpoint_data.get("raw_request") or endpoint_data.get("request"),
+                    }
+                    endpoint_payload = AssetService._apply_raw_request_payload(endpoint_payload)
+                    if not endpoint_payload.get("path"):
+                        raise ValidationError("Каждый endpoint должен содержать path или request_raw")
                     self.db.add(
                         Endpoint(
                             host_id=host.id,
-                            path=endpoint_data["path"],
-                            method=endpoint_data.get("method"),
-                            description=endpoint_data.get("description"),
+                            path=endpoint_payload["path"],
+                            method=endpoint_payload.get("method"),
+                            description=endpoint_payload.get("description"),
                         )
                     )
                     result.endpoints_created += 1

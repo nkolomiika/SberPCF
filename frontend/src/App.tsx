@@ -25,6 +25,9 @@ import HomeIcon from "@mui/icons-material/Home";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
 import NotificationsIcon from "@mui/icons-material/Notifications";
+import DarkModeIcon from "@mui/icons-material/DarkMode";
+import LightModeIcon from "@mui/icons-material/LightMode";
+import type { PaletteMode } from "@mui/material";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { listNotifications, unreadCount } from "./api";
 import type { Notification } from "./types";
@@ -34,7 +37,12 @@ import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 
-function PrivateLayout() {
+type PrivateLayoutProps = {
+  themeMode: PaletteMode;
+  onToggleTheme: () => void;
+};
+
+function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
@@ -82,19 +90,31 @@ function PrivateLayout() {
     return <Navigate to="/login" replace />;
   }
 
+  const isDark = themeMode === "dark";
+  const appBarBorder = isDark ? "1px solid rgba(126,224,255,0.18)" : "1px solid rgba(148,163,184,0.28)";
+  const controlBorder = isDark ? "1px solid rgba(126,224,255,0.28)" : "1px solid rgba(148,163,184,0.42)";
+  const controlBackground = isDark ? "rgba(22,36,58,0.55)" : "rgba(255,255,255,0.9)";
+  const controlHover = isDark ? "rgba(28,46,72,0.7)" : "rgba(241,245,249,0.98)";
+
   return (
     <Box
       sx={{
         minHeight: "100vh",
         background:
-          "radial-gradient(130% 80% at 0% 0%, rgba(110,168,254,0.18) 0%, rgba(11,18,32,1) 55%), radial-gradient(120% 80% at 100% 0%, rgba(126,224,255,0.14) 0%, rgba(11,18,32,0.98) 45%)",
+          isDark
+            ? "radial-gradient(130% 80% at 0% 0%, rgba(110,168,254,0.18) 0%, rgba(11,18,32,1) 55%), radial-gradient(120% 80% at 100% 0%, rgba(126,224,255,0.14) 0%, rgba(11,18,32,0.98) 45%)"
+            : "radial-gradient(130% 80% at 0% 0%, rgba(59,130,246,0.14) 0%, rgba(243,246,251,1) 65%), radial-gradient(120% 80% at 100% 0%, rgba(34,197,94,0.08) 0%, rgba(241,245,249,1) 55%)",
       }}
     >
       <AppBar
         position="sticky"
         elevation={0}
         color="transparent"
-        sx={{ borderBottom: "1px solid rgba(126,224,255,0.18)", backdropFilter: "blur(10px)" }}
+        sx={{
+          borderBottom: appBarBorder,
+          backdropFilter: "blur(10px)",
+          backgroundColor: isDark ? "rgba(11,18,32,0.55)" : "rgba(255,255,255,0.72)",
+        }}
       >
         <Toolbar sx={{ py: 1 }}>
           <Container
@@ -107,26 +127,39 @@ function PrivateLayout() {
               maxWidth: "min(1800px, 100vw)",
             }}
           >
-            <Stack spacing={0.2}>
+            <Stack spacing={0}>
               <Typography variant="h5" fontWeight={700} letterSpacing={0.2}>
                 Pentest Collaboration Framework
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Управление проектами и результатами пентеста
               </Typography>
             </Stack>
             <Stack direction="row" spacing={1.5} alignItems="center">
               <IconButton
                 color="inherit"
-                onClick={openNotifications}
+                onClick={onToggleTheme}
                 sx={{
-                  border: "1px solid rgba(126,224,255,0.28)",
+                  border: controlBorder,
                   borderRadius: 2,
                   width: 44,
                   height: 44,
-                  backgroundColor: "rgba(22,36,58,0.55)",
+                  backgroundColor: controlBackground,
                   "&:hover": {
-                    backgroundColor: "rgba(28,46,72,0.7)",
+                    backgroundColor: controlHover,
+                  },
+                }}
+              >
+                {themeMode === "dark" ? <LightModeIcon /> : <DarkModeIcon />}
+              </IconButton>
+              <IconButton
+                color="inherit"
+                onClick={openNotifications}
+                sx={{
+                  border: controlBorder,
+                  borderRadius: 2,
+                  width: 44,
+                  height: 44,
+                  backgroundColor: controlBackground,
+                  "&:hover": {
+                    backgroundColor: controlHover,
                   },
                 }}
               >
@@ -138,7 +171,7 @@ function PrivateLayout() {
                 color="inherit"
                 onClick={openProfileMenu}
                 sx={{
-                  border: "1px solid rgba(126,224,255,0.28)",
+                  border: controlBorder,
                   borderRadius: 2,
                   textTransform: "none",
                   px: 1.4,
@@ -147,9 +180,9 @@ function PrivateLayout() {
                   minHeight: 44,
                   minWidth: 220,
                   justifyContent: "flex-end",
-                  backgroundColor: "rgba(22,36,58,0.55)",
+                  backgroundColor: controlBackground,
                   "&:hover": {
-                    backgroundColor: "rgba(28,46,72,0.7)",
+                    backgroundColor: controlHover,
                   },
                 }}
               >
@@ -266,7 +299,14 @@ function PrivateLayout() {
           <Route
             path="/"
             element={
-              <Paper sx={{ p: { xs: 2, md: 3 }, borderRadius: 0, backgroundColor: "rgba(18,29,49,0.68)" }}>
+              <Paper
+                sx={{
+                  p: { xs: 2, md: 3 },
+                  borderRadius: 0,
+                  backgroundColor: themeMode === "dark" ? "rgba(18,29,49,0.68)" : "rgba(255,255,255,0.8)",
+                  boxShadow: themeMode === "dark" ? undefined : "0 8px 30px rgba(15, 23, 42, 0.08)",
+                }}
+              >
                 <ProjectsPage />
               </Paper>
             }
@@ -280,7 +320,12 @@ function PrivateLayout() {
   );
 }
 
-export default function App() {
+type AppProps = {
+  themeMode: PaletteMode;
+  onToggleTheme: () => void;
+};
+
+export default function App({ themeMode, onToggleTheme }: AppProps) {
   const initialize = useAuthStore((s) => s.initialize);
   const isInitialized = useAuthStore((s) => s.isInitialized);
   const user = useAuthStore((s) => s.user);
@@ -300,7 +345,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
-      <Route path="/*" element={<PrivateLayout />} />
+      <Route path="/*" element={<PrivateLayout themeMode={themeMode} onToggleTheme={onToggleTheme} />} />
     </Routes>
   );
 }

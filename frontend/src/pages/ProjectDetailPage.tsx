@@ -1,5 +1,13 @@
 import AddIcon from "@mui/icons-material/Add";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
+import MoreVertIcon from "@mui/icons-material/MoreVert";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
+import GroupIcon from "@mui/icons-material/Group";
+import PersonAddAlt1Icon from "@mui/icons-material/PersonAddAlt1";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 import {
   Alert,
   Box,
@@ -11,7 +19,13 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
   Grid2 as Grid,
+  IconButton,
+  List,
+  ListItem,
+  ListItemText,
+  Menu,
   MenuItem,
   Stack,
   TextField,
@@ -19,13 +33,38 @@ import {
 } from "@mui/material";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { createHost, getEndpoints, getHostVulnerabilities, getHosts, getPorts, getProjectMembers, getProjects, updateHost } from "../api";
+import {
+  createHost,
+  createVulnerabilityComment,
+  addProjectMember,
+  deleteVulnerability,
+  deleteVulnerabilityComment,
+  deleteVulnerabilityFile,
+  generateProjectReport,
+  getEndpoints,
+  getHostVulnerabilities,
+  getHosts,
+  getPorts,
+  getProjectMembers,
+  getUsers,
+  getProjects,
+  getVulnerability,
+  importProjectData,
+  listVulnerabilityComments,
+  listVulnerabilityFiles,
+  removeProjectMember,
+  updateHost,
+  updateVulnerability,
+  uploadVulnerabilityFile,
+} from "../api";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
-import type { Endpoint, Host, HostTreeStats, Port, ProjectMember, Vulnerability } from "../types";
+import { useAuthStore } from "../store";
+import type { Endpoint, Host, HostTreeStats, ImportResult, Port, ProjectMember, User, Vulnerability, VulnerabilityComment, VulnerabilityDetails, VulnerabilityFile } from "../types";
 
 export function ProjectDetailPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [ports, setPorts] = useState<Port[]>([]);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
@@ -37,7 +76,19 @@ export function ProjectDetailPage() {
   const [projectName, setProjectName] = useState<string>("");
   const [projectDescription, setProjectDescription] = useState<string>("");
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
+  const [usersCatalog, setUsersCatalog] = useState<User[]>([]);
+  const [membersDialogOpen, setMembersDialogOpen] = useState(false);
+  const [selectedMemberUserId, setSelectedMemberUserId] = useState("");
+  const [membersBusy, setMembersBusy] = useState(false);
   const [hostStatsById, setHostStatsById] = useState<Record<string, HostTreeStats>>({});
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importSummary, setImportSummary] = useState<ImportResult | null>(null);
+  const [reportLoadingFormat, setReportLoadingFormat] = useState<"md" | "pdf" | "docx" | null>(null);
+  const [actionsAnchorEl, setActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<"md" | "pdf" | "docx">("pdf");
 
   const [hostOpen, setHostOpen] = useState(false);
   const [hostIp, setHostIp] = useState("");
@@ -45,6 +96,17 @@ export function ProjectDetailPage() {
   const [hostStatus, setHostStatus] = useState<Host["status"]>("unknown");
   const [hostNotes, setHostNotes] = useState("");
   const [editHostOpen, setEditHostOpen] = useState(false);
+  const [vulnDetailOpen, setVulnDetailOpen] = useState(false);
+  const [activeVuln, setActiveVuln] = useState<VulnerabilityDetails | null>(null);
+  const [vulnFiles, setVulnFiles] = useState<VulnerabilityFile[]>([]);
+  const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
+  const [newComment, setNewComment] = useState("");
+  const [vulnBusy, setVulnBusy] = useState(false);
+
+  const availableUsers = useMemo(
+    () => usersCatalog.filter((candidate) => !projectMembers.some((member) => member.user_id === candidate.id)),
+    [projectMembers, usersCatalog]
+  );
 
   const loadProjectData = useCallback(async () => {
     if (!projectId) {
@@ -236,6 +298,242 @@ export function ProjectDetailPage() {
     await loadHostAssets();
   };
 
+  const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
+    if (!projectId) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      const [vulnDetail, files, commentsPage] = await Promise.all([
+        getVulnerability(projectId, vulnerabilityId),
+        listVulnerabilityFiles(projectId, vulnerabilityId),
+        listVulnerabilityComments(projectId, vulnerabilityId),
+      ]);
+      setActiveVuln(vulnDetail);
+      setVulnFiles(files);
+      setVulnComments(commentsPage.items);
+      setVulnDetailOpen(true);
+    } catch {
+      setError("Не удалось загрузить карточку уязвимости");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const saveActiveVulnerability = async () => {
+    if (!projectId || !activeVuln) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      const updated = await updateVulnerability(projectId, activeVuln.id, {
+        title: activeVuln.title,
+        description: activeVuln.description || undefined,
+        severity: activeVuln.severity,
+        status: activeVuln.status,
+        cvss_version: activeVuln.cvss_version || undefined,
+        cvss_score: activeVuln.cvss_score ?? undefined,
+        cvss_vector: activeVuln.cvss_vector || undefined,
+        cwe_id: activeVuln.cwe_id || undefined,
+        steps_to_reproduce: activeVuln.steps_to_reproduce || undefined,
+        impact: activeVuln.impact || undefined,
+        recommendations: activeVuln.recommendations || undefined,
+      });
+      setActiveVuln((prev) => (prev ? { ...prev, ...updated } : prev));
+      await loadHostAssets();
+    } catch {
+      setError("Не удалось сохранить уязвимость");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeActiveVulnerability = async () => {
+    if (!projectId || !activeVuln) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      await deleteVulnerability(projectId, activeVuln.id);
+      setVulnDetailOpen(false);
+      setActiveVuln(null);
+      await loadHostAssets();
+    } catch {
+      setError("Не удалось удалить уязвимость");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const uploadFileToActiveVuln = async (file: File | null) => {
+    if (!projectId || !activeVuln || !file) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await uploadVulnerabilityFile(projectId, activeVuln.id, file);
+      const files = await listVulnerabilityFiles(projectId, activeVuln.id);
+      setVulnFiles(files);
+    } catch {
+      setError("Не удалось загрузить файл");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeVulnerabilityFile = async (fileId: string) => {
+    if (!projectId || !activeVuln) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await deleteVulnerabilityFile(projectId, activeVuln.id, fileId);
+      const files = await listVulnerabilityFiles(projectId, activeVuln.id);
+      setVulnFiles(files);
+    } catch {
+      setError("Не удалось удалить файл");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const addCommentToActiveVuln = async () => {
+    if (!projectId || !activeVuln || !newComment.trim()) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await createVulnerabilityComment(projectId, activeVuln.id, newComment.trim());
+      const commentsPage = await listVulnerabilityComments(projectId, activeVuln.id);
+      setVulnComments(commentsPage.items);
+      setNewComment("");
+    } catch {
+      setError("Не удалось добавить комментарий");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeCommentFromActiveVuln = async (commentId: string) => {
+    if (!projectId || !activeVuln) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await deleteVulnerabilityComment(projectId, activeVuln.id, commentId);
+      const commentsPage = await listVulnerabilityComments(projectId, activeVuln.id);
+      setVulnComments(commentsPage.items);
+    } catch {
+      setError("Не удалось удалить комментарий");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const submitImport = async () => {
+    if (!projectId || !importFile) {
+      return;
+    }
+    setImporting(true);
+    setError(null);
+    try {
+      const result = await importProjectData(projectId, importFile);
+      setImportSummary(result);
+      await loadProjectData();
+      await loadHostAssets();
+    } catch {
+      setError("Не удалось импортировать JSON-данные проекта");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const downloadReport = async (format: "md" | "pdf" | "docx") => {
+    if (!projectId) {
+      return;
+    }
+    setReportLoadingFormat(format);
+    setError(null);
+    try {
+      const blob = await generateProjectReport(projectId, format);
+      const fileNameBase = (projectName || "project-report").replace(/[^\w.-]+/g, "_");
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `${fileNameBase}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      setError("Не удалось сформировать отчёт");
+    } finally {
+      setReportLoadingFormat(null);
+    }
+  };
+  const actionsMenuOpen = Boolean(actionsAnchorEl);
+
+  const openActionsMenu = (event: React.MouseEvent<HTMLElement>) => {
+    setActionsAnchorEl(event.currentTarget);
+  };
+
+  const closeActionsMenu = () => {
+    setActionsAnchorEl(null);
+  };
+
+  const openMembersDialog = async () => {
+    if (!projectId) {
+      return;
+    }
+    setError(null);
+    setMembersDialogOpen(true);
+    if (user?.role !== "admin") {
+      return;
+    }
+    try {
+      const usersResponse = await getUsers(1, 300);
+      setUsersCatalog(usersResponse.items);
+    } catch {
+      setError("Не удалось загрузить список пользователей для управления участниками.");
+    }
+  };
+
+  const addMemberToProject = async () => {
+    if (!projectId || !selectedMemberUserId) {
+      return;
+    }
+    setMembersBusy(true);
+    setError(null);
+    try {
+      await addProjectMember(projectId, selectedMemberUserId);
+      setSelectedMemberUserId("");
+      await loadProjectData();
+    } catch {
+      setError("Не удалось добавить участника в проект.");
+    } finally {
+      setMembersBusy(false);
+    }
+  };
+
+  const removeMemberFromProject = async (memberUserId: string) => {
+    if (!projectId) {
+      return;
+    }
+    setMembersBusy(true);
+    setError(null);
+    try {
+      await removeProjectMember(projectId, memberUserId);
+      await loadProjectData();
+    } catch {
+      setError("Не удалось удалить участника из проекта.");
+    } finally {
+      setMembersBusy(false);
+    }
+  };
+
   return (
     <Stack spacing={2.5}>
       {error && <Alert severity="error">{error}</Alert>}
@@ -244,19 +542,66 @@ export function ProjectDetailPage() {
           <Typography variant="h4" fontWeight={700}>
             {projectName ? `Проект: ${projectName}` : "Проект"}
           </Typography>
-          <Typography color="text.secondary">
-            Матрешка навигации: проекты, хосты, порты, эндпоинты и уязвимости хоста
-          </Typography>
         </Box>
-        <Stack direction="row" spacing={1}>
-          <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setHostOpen(true)}>
-            Добавить хост
-          </Button>
-          <Button variant="contained" startIcon={<EditIcon />} onClick={openEditHost} disabled={!selectedHost}>
-            Редактировать
-          </Button>
-        </Stack>
+        <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", borderRadius: 2 }}>
+          <MoreVertIcon />
+        </IconButton>
       </Stack>
+
+      <Menu
+        anchorEl={actionsAnchorEl}
+        open={actionsMenuOpen}
+        onClose={closeActionsMenu}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            closeActionsMenu();
+            setHostOpen(true);
+          }}
+        >
+          <AddIcon fontSize="small" sx={{ mr: 1 }} />
+          Добавить хост
+        </MenuItem>
+        <MenuItem
+          disabled={!selectedHost}
+          onClick={() => {
+            closeActionsMenu();
+            openEditHost();
+          }}
+        >
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Редактировать хост
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            closeActionsMenu();
+            setImportOpen(true);
+          }}
+        >
+          <UploadFileIcon fontSize="small" sx={{ mr: 1 }} />
+          Импорт JSON
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            closeActionsMenu();
+            setExportOpen(true);
+          }}
+        >
+          <DownloadIcon fontSize="small" sx={{ mr: 1 }} />
+          Экспорт
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            closeActionsMenu();
+            void openMembersDialog();
+          }}
+        >
+          <GroupIcon fontSize="small" sx={{ mr: 1 }} />
+          Участники проекта
+        </MenuItem>
+      </Menu>
 
       <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
         <ProjectTreeNav
@@ -415,8 +760,13 @@ export function ProjectDetailPage() {
                 <Stack spacing={1.2}>
                   {vulnerabilities.map((item) => (
                     <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }}>
-                      <Typography>{item.title}</Typography>
-                      <Stack direction="row" spacing={1} mt={1}>
+                      <Stack direction="row" justifyContent="space-between" alignItems="center">
+                        <Typography>{item.title}</Typography>
+                        <Button size="small" variant="outlined" onClick={() => void loadVulnerabilityDetails(item.id)} disabled={vulnBusy}>
+                          Открыть
+                        </Button>
+                      </Stack>
+                      <Stack direction="row" spacing={1} mt={1} flexWrap="wrap">
                         <Chip label={item.severity} size="small" sx={severityChipSx[item.severity]} />
                         <Chip label={item.status} size="small" sx={vulnerabilityStatusChipSx[item.status]} />
                       </Stack>
@@ -473,6 +823,342 @@ export function ProjectDetailPage() {
           <Button variant="contained" disabled={!hostIp && !hostName} onClick={() => void submitHostEdit()}>
             Сохранить
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={vulnDetailOpen} onClose={() => setVulnDetailOpen(false)} fullWidth maxWidth="lg">
+        <DialogTitle>Карточка уязвимости</DialogTitle>
+        <DialogContent>
+          {!activeVuln ? (
+            <Typography color="text.secondary">Уязвимость не выбрана.</Typography>
+          ) : (
+            <Stack spacing={2} sx={{ mt: 0.5 }}>
+              <Grid container spacing={2}>
+                <Grid size={{ xs: 12, md: 8 }}>
+                  <TextField
+                    label="Название"
+                    fullWidth
+                    value={activeVuln.title}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, title: e.target.value } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12, md: 2 }}>
+                  <TextField
+                    select
+                    label="Критичность"
+                    fullWidth
+                    value={activeVuln.severity}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, severity: e.target.value as Vulnerability["severity"] } : prev))}
+                  >
+                    <MenuItem value="critical">critical</MenuItem>
+                    <MenuItem value="high">high</MenuItem>
+                    <MenuItem value="medium">medium</MenuItem>
+                    <MenuItem value="low">low</MenuItem>
+                    <MenuItem value="info">info</MenuItem>
+                  </TextField>
+                </Grid>
+                <Grid size={{ xs: 12, md: 2 }}>
+                  <TextField
+                    select
+                    label="Статус"
+                    fullWidth
+                    value={activeVuln.status}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, status: e.target.value as Vulnerability["status"] } : prev))}
+                  >
+                    <MenuItem value="open">open</MenuItem>
+                    <MenuItem value="in_progress">in_progress</MenuItem>
+                    <MenuItem value="fixed">fixed</MenuItem>
+                    <MenuItem value="wont_fix">wont_fix</MenuItem>
+                    <MenuItem value="accepted_risk">accepted_risk</MenuItem>
+                  </TextField>
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Описание"
+                    fullWidth
+                    multiline
+                    minRows={3}
+                    value={activeVuln.description || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, description: e.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12, md: 3 }}>
+                  <TextField
+                    select
+                    label="CVSS версия"
+                    fullWidth
+                    value={activeVuln.cvss_version || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_version: (e.target.value as "3.1" | "4.0" | "") || null } : prev))}
+                  >
+                    <MenuItem value="">-</MenuItem>
+                    <MenuItem value="3.1">3.1</MenuItem>
+                    <MenuItem value="4.0">4.0</MenuItem>
+                  </TextField>
+                </Grid>
+                <Grid size={{ xs: 12, md: 3 }}>
+                  <TextField
+                    label="CVSS score"
+                    type="number"
+                    fullWidth
+                    value={activeVuln.cvss_score ?? ""}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setActiveVuln((prev) => (prev ? { ...prev, cvss_score: value === "" ? null : Number(value) } : prev));
+                    }}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12, md: 6 }}>
+                  <TextField
+                    label="CVSS vector"
+                    fullWidth
+                    value={activeVuln.cvss_vector || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_vector: e.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="CWE ID"
+                    fullWidth
+                    value={activeVuln.cwe_id || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, cwe_id: e.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Шаги воспроизведения"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    value={activeVuln.steps_to_reproduce || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, steps_to_reproduce: e.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Влияние"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    value={activeVuln.impact || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, impact: e.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Рекомендации"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    value={activeVuln.recommendations || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: e.target.value || null } : prev))}
+                  />
+                </Grid>
+              </Grid>
+
+              <Divider />
+              <Stack spacing={1}>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Файлы ({vulnFiles.length})
+                </Typography>
+                <Button component="label" variant="outlined" startIcon={<AttachFileIcon />}>
+                  Загрузить файл
+                  <input hidden type="file" onChange={(e) => void uploadFileToActiveVuln(e.target.files?.[0] ?? null)} />
+                </Button>
+                <List dense disablePadding>
+                  {vulnFiles.map((file) => (
+                    <ListItem
+                      key={file.id}
+                      secondaryAction={
+                        <Stack direction="row" spacing={0.5}>
+                          <IconButton size="small" component="a" href={`/api/v1/files/${file.id}/download`} target="_blank" rel="noreferrer">
+                            <OpenInNewIcon fontSize="small" />
+                          </IconButton>
+                          <IconButton size="small" onClick={() => void removeVulnerabilityFile(file.id)}>
+                            <DeleteOutlineIcon fontSize="small" />
+                          </IconButton>
+                        </Stack>
+                      }
+                    >
+                      <ListItemText primary={file.original_name} secondary={`${file.content_type} • ${Math.round(file.size_bytes / 1024)} KB`} />
+                    </ListItem>
+                  ))}
+                  {vulnFiles.length === 0 && <Typography color="text.secondary">Файлы не загружены.</Typography>}
+                </List>
+              </Stack>
+
+              <Divider />
+              <Stack spacing={1}>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Комментарии ({vulnComments.length})
+                </Typography>
+                <TextField
+                  label="Новый комментарий (поддержка @username)"
+                  multiline
+                  minRows={2}
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.target.value)}
+                />
+                <Button variant="contained" disabled={!newComment.trim()} onClick={() => void addCommentToActiveVuln()}>
+                  Добавить комментарий
+                </Button>
+                <List dense disablePadding>
+                  {vulnComments.map((comment) => (
+                    <ListItem
+                      key={comment.id}
+                      alignItems="flex-start"
+                      secondaryAction={
+                        (user?.role === "admin" || user?.id === comment.user_id) && (
+                          <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
+                            <DeleteOutlineIcon fontSize="small" />
+                          </IconButton>
+                        )
+                      }
+                    >
+                      <ListItemText
+                        primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`}
+                        secondary={comment.content}
+                      />
+                    </ListItem>
+                  ))}
+                  {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
+                </List>
+              </Stack>
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setVulnDetailOpen(false)}>Закрыть</Button>
+          <Button color="error" variant="outlined" onClick={() => void removeActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
+            Удалить
+          </Button>
+          <Button variant="contained" onClick={() => void saveActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
+            Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={exportOpen} onClose={() => setExportOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Экспорт отчёта</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              select
+              label="Формат"
+              value={exportFormat}
+              onChange={(e) => setExportFormat(e.target.value as "md" | "pdf" | "docx")}
+            >
+              <MenuItem value="md">Markdown (.md)</MenuItem>
+              <MenuItem value="pdf">PDF (.pdf)</MenuItem>
+              <MenuItem value="docx">DOCX (.docx)</MenuItem>
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setExportOpen(false)}>Отмена</Button>
+          <Button
+            variant="contained"
+            startIcon={<DownloadIcon />}
+            disabled={reportLoadingFormat !== null}
+            onClick={() => void downloadReport(exportFormat)}
+          >
+            Скачать
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={importOpen} onClose={() => setImportOpen(false)} fullWidth>
+        <DialogTitle>Импорт структуры проекта (JSON)</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Button component="label" variant="outlined" startIcon={<UploadFileIcon />}>
+              {importFile ? `Файл: ${importFile.name}` : "Выбрать JSON-файл"}
+              <input
+                hidden
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => {
+                  const selected = event.target.files?.[0] ?? null;
+                  setImportFile(selected);
+                }}
+              />
+            </Button>
+            {importSummary && (
+              <Box sx={{ border: "1px solid rgba(126,224,255,0.16)", p: 1.5 }}>
+                <Typography variant="subtitle2" fontWeight={700} mb={0.5}>
+                  Результат последнего импорта
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  hosts: {importSummary.hosts_created}, ports: {importSummary.ports_created}, services: {importSummary.services_created},
+                  endpoints: {importSummary.endpoints_created}
+                </Typography>
+                {importSummary.errors.length > 0 && (
+                  <Typography variant="body2" color="warning.main" mt={0.5}>
+                    Ошибки: {importSummary.errors.join("; ")}
+                  </Typography>
+                )}
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setImportOpen(false)}>Закрыть</Button>
+          <Button variant="contained" disabled={!importFile || importing} onClick={() => void submitImport()}>
+            Импортировать
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={membersDialogOpen} onClose={() => setMembersDialogOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>Участники проекта</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            {user?.role === "admin" && (
+              <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+                <TextField
+                  select
+                  fullWidth
+                  label="Добавить пользователя"
+                  value={selectedMemberUserId}
+                  onChange={(event) => setSelectedMemberUserId(event.target.value)}
+                >
+                  {availableUsers.map((candidate) => (
+                    <MenuItem key={candidate.id} value={candidate.id}>
+                      {candidate.username} ({candidate.role})
+                    </MenuItem>
+                  ))}
+                </TextField>
+                <Button
+                  variant="contained"
+                  startIcon={<PersonAddAlt1Icon />}
+                  disabled={!selectedMemberUserId || membersBusy}
+                  onClick={() => void addMemberToProject()}
+                >
+                  Добавить
+                </Button>
+              </Stack>
+            )}
+
+            <List dense disablePadding>
+              {projectMembers.map((member) => (
+                <ListItem
+                  key={member.user_id}
+                  secondaryAction={
+                    user?.role === "admin" ? (
+                      <IconButton size="small" onClick={() => void removeMemberFromProject(member.user_id)} disabled={membersBusy}>
+                        <DeleteOutlineIcon fontSize="small" />
+                      </IconButton>
+                    ) : null
+                  }
+                >
+                  <ListItemText primary={`${member.username} (${member.role})`} secondary={member.email} />
+                </ListItem>
+              ))}
+              {projectMembers.length === 0 && <Typography color="text.secondary">Участники пока не добавлены.</Typography>}
+            </List>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setMembersDialogOpen(false)}>Закрыть</Button>
         </DialogActions>
       </Dialog>
     </Stack>

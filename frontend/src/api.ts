@@ -1,5 +1,21 @@
 import axios from "axios";
-import type { Endpoint, Host, HostDetails, Notification, PaginatedResponse, Port, Project, ProjectMember, User, Vulnerability, VulnerabilityAsset } from "./types";
+import type {
+  VulnerabilityComment,
+  VulnerabilityDetails,
+  VulnerabilityFile,
+  Endpoint,
+  Host,
+  HostDetails,
+  ImportResult,
+  Notification,
+  PaginatedResponse,
+  Port,
+  Project,
+  ProjectMember,
+  User,
+  Vulnerability,
+  VulnerabilityAsset,
+} from "./types";
 
 const api = axios.create({
   baseURL: "/api/v1",
@@ -51,6 +67,11 @@ export async function getMe(): Promise<User> {
   return data;
 }
 
+export async function getUsers(page = 1, size = 200): Promise<PaginatedResponse<User>> {
+  const { data } = await api.get<PaginatedResponse<User>>("/users", { params: { page, size } });
+  return data;
+}
+
 export async function getProjects(page = 1, size = 20, status?: Project["status"]): Promise<PaginatedResponse<Project>> {
   const { data } = await api.get<PaginatedResponse<Project>>("/projects", { params: { page, size, status } });
   return data;
@@ -69,6 +90,14 @@ export async function createProject(payload: {
 export async function getProjectMembers(projectId: string): Promise<ProjectMember[]> {
   const { data } = await api.get<ProjectMember[]>(`/projects/${projectId}/members`);
   return data;
+}
+
+export async function addProjectMember(projectId: string, userId: string): Promise<void> {
+  await api.post(`/projects/${projectId}/members`, { user_id: userId });
+}
+
+export async function removeProjectMember(projectId: string, userId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/members/${userId}`);
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
@@ -163,9 +192,10 @@ export async function createEndpoint(
   projectId: string,
   hostId: string,
   payload: {
-    path: string;
+    path?: string;
     method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
     description?: string;
+    request_raw?: string;
   }
 ): Promise<Endpoint> {
   const { data } = await api.post<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
@@ -180,6 +210,7 @@ export async function updateEndpoint(
     path?: string;
     method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
     description?: string;
+    request_raw?: string;
   }
 ): Promise<Endpoint> {
   const { data } = await api.put<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`, payload);
@@ -203,7 +234,14 @@ export async function createVulnerability(
     title: string;
     description?: string;
     severity: "critical" | "high" | "medium" | "low" | "info";
+    cvss_version?: "3.1" | "4.0";
+    cvss_score?: number;
+    cvss_vector?: string;
+    cwe_id?: string;
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
+    steps_to_reproduce?: string;
+    impact?: string;
+    recommendations?: string;
   }
 ): Promise<Vulnerability> {
   const { data } = await api.post<Vulnerability>(`/projects/${projectId}/vulnerabilities`, payload);
@@ -217,7 +255,14 @@ export async function updateVulnerability(
     title?: string;
     description?: string;
     severity?: "critical" | "high" | "medium" | "low" | "info";
+    cvss_version?: "3.1" | "4.0";
+    cvss_score?: number;
+    cvss_vector?: string;
+    cwe_id?: string;
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
+    steps_to_reproduce?: string;
+    impact?: string;
+    recommendations?: string;
   }
 ): Promise<Vulnerability> {
   const { data } = await api.put<Vulnerability>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`, payload);
@@ -226,6 +271,11 @@ export async function updateVulnerability(
 
 export async function deleteVulnerability(projectId: string, vulnerabilityId: string): Promise<void> {
   await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
+}
+
+export async function getVulnerability(projectId: string, vulnerabilityId: string): Promise<VulnerabilityDetails> {
+  const { data } = await api.get<VulnerabilityDetails>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
+  return data;
 }
 
 export async function getHostVulnerabilities(projectId: string, hostId: string): Promise<PaginatedResponse<Vulnerability>> {
@@ -245,6 +295,57 @@ export async function addVulnerabilityAsset(
 ): Promise<VulnerabilityAsset> {
   const { data } = await api.post<VulnerabilityAsset>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets`, payload);
   return data;
+}
+
+export async function listVulnerabilityFiles(projectId: string, vulnerabilityId: string): Promise<VulnerabilityFile[]> {
+  const { data } = await api.get<VulnerabilityFile[]>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`);
+  return data;
+}
+
+export async function uploadVulnerabilityFile(projectId: string, vulnerabilityId: string, file: File): Promise<VulnerabilityFile> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const { data } = await api.post<VulnerabilityFile>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
+}
+
+export async function deleteVulnerabilityFile(projectId: string, vulnerabilityId: string, fileId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files/${fileId}`);
+}
+
+export async function listVulnerabilityComments(projectId: string, vulnerabilityId: string): Promise<PaginatedResponse<VulnerabilityComment>> {
+  const { data } = await api.get<PaginatedResponse<VulnerabilityComment>>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, {
+    params: { page: 1, size: 100 },
+  });
+  return data;
+}
+
+export async function createVulnerabilityComment(projectId: string, vulnerabilityId: string, content: string): Promise<VulnerabilityComment> {
+  const { data } = await api.post<VulnerabilityComment>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, { content });
+  return data;
+}
+
+export async function deleteVulnerabilityComment(projectId: string, vulnerabilityId: string, commentId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`);
+}
+
+export async function importProjectData(projectId: string, file: File): Promise<ImportResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const { data } = await api.post<ImportResult>(`/projects/${projectId}/import`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
+}
+
+export async function generateProjectReport(projectId: string, format: "md" | "pdf" | "docx"): Promise<Blob> {
+  const { data } = await api.post(`/projects/${projectId}/reports/generate`, null, {
+    params: { format },
+    responseType: "blob",
+  });
+  return data as Blob;
 }
 
 export async function listNotifications(): Promise<PaginatedResponse<Notification>> {
