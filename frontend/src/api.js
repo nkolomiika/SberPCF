@@ -42,13 +42,20 @@ export async function getMe() {
     const { data } = await api.get("/users/me");
     return data;
 }
-export async function getProjects(page = 1, size = 20) {
-    const { data } = await api.get("/projects", { params: { page, size } });
+export async function getProjects(page = 1, size = 20, status) {
+    const { data } = await api.get("/projects", { params: { page, size, status } });
     return data;
 }
 export async function createProject(payload) {
     const { data } = await api.post("/projects", payload);
     return data;
+}
+export async function getProjectMembers(projectId) {
+    const { data } = await api.get(`/projects/${projectId}/members`);
+    return data;
+}
+export async function deleteProject(projectId) {
+    await api.delete(`/projects/${projectId}`);
 }
 export async function getHosts(projectId) {
     const { data } = await api.get(`/projects/${projectId}/hosts`, {
@@ -60,6 +67,17 @@ export async function createHost(projectId, payload) {
     const { data } = await api.post(`/projects/${projectId}/hosts`, payload);
     return data;
 }
+export async function getHost(projectId, hostId) {
+    const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}`);
+    return data;
+}
+export async function updateHost(projectId, hostId, payload) {
+    const { data } = await api.put(`/projects/${projectId}/hosts/${hostId}`, payload);
+    return data;
+}
+export async function deleteHost(projectId, hostId) {
+    await api.delete(`/projects/${projectId}/hosts/${hostId}`);
+}
 export async function getPorts(projectId, hostId) {
     const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/ports`);
     return data;
@@ -67,6 +85,13 @@ export async function getPorts(projectId, hostId) {
 export async function createPort(projectId, hostId, payload) {
     const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/ports`, payload);
     return data;
+}
+export async function updatePort(projectId, hostId, portId, payload) {
+    const { data } = await api.put(`/projects/${projectId}/hosts/${hostId}/ports/${portId}`, payload);
+    return data;
+}
+export async function deletePort(projectId, hostId, portId) {
+    await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}`);
 }
 export async function getEndpoints(projectId, hostId) {
     const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/endpoints`);
@@ -76,6 +101,13 @@ export async function createEndpoint(projectId, hostId, payload) {
     const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
     return data;
 }
+export async function updateEndpoint(projectId, hostId, endpointId, payload) {
+    const { data } = await api.put(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`, payload);
+    return data;
+}
+export async function deleteEndpoint(projectId, hostId, endpointId) {
+    await api.delete(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`);
+}
 export async function getVulnerabilities(projectId) {
     const { data } = await api.get(`/projects/${projectId}/vulnerabilities`, {
         params: { page: 1, size: 100 },
@@ -84,6 +116,70 @@ export async function getVulnerabilities(projectId) {
 }
 export async function createVulnerability(projectId, payload) {
     const { data } = await api.post(`/projects/${projectId}/vulnerabilities`, payload);
+    return data;
+}
+export async function updateVulnerability(projectId, vulnerabilityId, payload) {
+    const { data } = await api.put(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`, payload);
+    return data;
+}
+export async function deleteVulnerability(projectId, vulnerabilityId) {
+    await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
+}
+export async function getVulnerability(projectId, vulnerabilityId) {
+    const { data } = await api.get(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
+    return data;
+}
+export async function getHostVulnerabilities(projectId, hostId) {
+    const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/vulnerabilities`, {
+        params: { page: 1, size: 100 },
+    });
+    return data;
+}
+export async function addVulnerabilityAsset(projectId, vulnerabilityId, payload) {
+    const { data } = await api.post(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets`, payload);
+    return data;
+}
+export async function listVulnerabilityFiles(projectId, vulnerabilityId) {
+    const { data } = await api.get(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`);
+    return data;
+}
+export async function uploadVulnerabilityFile(projectId, vulnerabilityId, file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const { data } = await api.post(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+    });
+    return data;
+}
+export async function deleteVulnerabilityFile(projectId, vulnerabilityId, fileId) {
+    await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files/${fileId}`);
+}
+export async function listVulnerabilityComments(projectId, vulnerabilityId) {
+    const { data } = await api.get(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, {
+        params: { page: 1, size: 100 },
+    });
+    return data;
+}
+export async function createVulnerabilityComment(projectId, vulnerabilityId, content) {
+    const { data } = await api.post(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, { content });
+    return data;
+}
+export async function deleteVulnerabilityComment(projectId, vulnerabilityId, commentId) {
+    await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`);
+}
+export async function importProjectData(projectId, file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const { data } = await api.post(`/projects/${projectId}/import`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+    });
+    return data;
+}
+export async function generateProjectReport(projectId, format) {
+    const { data } = await api.post(`/projects/${projectId}/reports/generate`, null, {
+        params: { format },
+        responseType: "blob",
+    });
     return data;
 }
 export async function listNotifications() {
