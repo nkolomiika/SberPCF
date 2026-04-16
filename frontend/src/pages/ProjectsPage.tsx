@@ -4,13 +4,15 @@ import {
   Alert,
   Box,
   Button,
-  Card,
-  CardContent,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  Grid2 as Grid,
+  Divider,
+  List,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
   Stack,
   TextField,
   Typography,
@@ -72,29 +74,31 @@ export function ProjectsPage() {
 
       {error && <Alert severity="error">{error}</Alert>}
 
-      <Grid container spacing={2}>
-        {projects.map((project) => (
-          <Grid size={{ xs: 12, md: 6, lg: 4 }} key={project.id}>
-            <Card
-              sx={{ cursor: "pointer", border: "1px solid #2a3c5f", height: "100%" }}
-              onClick={() => navigate(`/projects/${project.id}`)}
-            >
-              <CardContent>
-                <Stack spacing={1}>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <FolderOpenIcon color="primary" />
-                    <Typography variant="h6">{project.name}</Typography>
+      <List disablePadding sx={{ border: "1px solid rgba(126,224,255,0.18)" }}>
+        {projects.map((project, index) => (
+          <Box key={project.id}>
+            <ListItemButton sx={{ py: 1.5 }} onClick={() => navigate(`/projects/${project.id}`)}>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <FolderOpenIcon color="primary" />
+              </ListItemIcon>
+              <ListItemText
+                primary={project.name}
+                secondary={
+                  <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 0.5, md: 2 }} alignItems={{ md: "center" }}>
+                    <Typography variant="body2" color="text.secondary">
+                      {project.description || "Без описания"}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Статус: {project.status}
+                    </Typography>
                   </Stack>
-                  <Typography color="text.secondary">{project.description || "Без описания"}</Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Статус: {project.status}
-                  </Typography>
-                </Stack>
-              </CardContent>
-            </Card>
-          </Grid>
+                }
+              />
+            </ListItemButton>
+            {index < projects.length - 1 && <Divider />}
+          </Box>
         ))}
-      </Grid>
+      </List>
 
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)} fullWidth>
         <DialogTitle>Создать проект</DialogTitle>

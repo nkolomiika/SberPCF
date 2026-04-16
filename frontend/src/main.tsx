@@ -12,7 +12,7 @@ const theme = createTheme({
     background: { default: "#0B1220", paper: "#121D31" },
   },
   shape: {
-    borderRadius: 14,
+    borderRadius: 0,
   },
   typography: {
     fontFamily: '"Inter", "SF Pro Text", "Segoe UI", "Roboto", sans-serif',

@@ -35,6 +35,22 @@ async def list_vulnerabilities(
     return to_paginated_response([VulnerabilityOut.model_validate(it) for it in items], total, PageParams(page=page, size=size)).model_dump()
 
 
+@router.get("/projects/{project_id}/hosts/{host_id}/vulnerabilities", response_model=dict)
+async def list_host_vulnerabilities(
+    project_id: UUID,
+    host_id: UUID,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=200),
+    severity: str | None = None,
+    status_filter: str | None = Query(None, alias="status"),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Возвращает список уязвимостей, привязанных к конкретному хосту."""
+    items, total = await VulnerabilityService(db).list_for_host(project_id, host_id, page, size, severity, status_filter)
+    return to_paginated_response([VulnerabilityOut.model_validate(it) for it in items], total, PageParams(page=page, size=size)).model_dump()
+
+
 @router.post("/projects/{project_id}/vulnerabilities", response_model=VulnerabilityOut, status_code=status.HTTP_201_CREATED)
 async def create_vulnerability(
     project_id: UUID,
