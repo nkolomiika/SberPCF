@@ -5,6 +5,7 @@ import HomeIcon from "@mui/icons-material/Home";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
 import NotificationsIcon from "@mui/icons-material/Notifications";
+import HistoryIcon from "@mui/icons-material/History";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
@@ -14,6 +15,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { AuditLogsPage } from "./pages/AuditLogsPage";
 function PrivateLayout({ themeMode, onToggleTheme }) {
     const navigate = useNavigate();
     const user = useAuthStore((s) => s.user);
@@ -55,34 +57,47 @@ function PrivateLayout({ themeMode, onToggleTheme }) {
     if (!user) {
         return _jsx(Navigate, { to: "/login", replace: true });
     }
+    const isDark = themeMode === "dark";
+    const appBarBorder = isDark ? "1px solid rgba(126,224,255,0.18)" : "1px solid rgba(148,163,184,0.28)";
+    const controlBorder = isDark ? "1px solid rgba(126,224,255,0.28)" : "1px solid rgba(148,163,184,0.42)";
+    const controlBackground = isDark ? "rgba(22,36,58,0.55)" : "rgba(255,255,255,0.9)";
+    const controlHover = isDark ? "rgba(28,46,72,0.7)" : "rgba(241,245,249,0.98)";
+    const roleLabel = user.role === "admin" ? "Администратор" : user.role === "developer" ? "Разработчик" : "Пентестер";
     return (_jsxs(Box, { sx: {
             minHeight: "100vh",
-            background: themeMode === "dark"
+            background: isDark
                 ? "radial-gradient(130% 80% at 0% 0%, rgba(110,168,254,0.18) 0%, rgba(11,18,32,1) 55%), radial-gradient(120% 80% at 100% 0%, rgba(126,224,255,0.14) 0%, rgba(11,18,32,0.98) 45%)"
-                : "radial-gradient(130% 80% at 0% 0%, rgba(110,168,254,0.2) 0%, rgba(244,248,255,1) 65%), radial-gradient(120% 80% at 100% 0%, rgba(126,224,255,0.18) 0%, rgba(239,246,255,1) 55%)",
-        }, children: [_jsx(AppBar, { position: "sticky", elevation: 0, color: "transparent", sx: { borderBottom: "1px solid rgba(126,224,255,0.18)", backdropFilter: "blur(10px)" }, children: _jsx(Toolbar, { sx: { py: 1 }, children: _jsxs(Container, { maxWidth: false, sx: {
+                : "radial-gradient(130% 80% at 0% 0%, rgba(59,130,246,0.14) 0%, rgba(243,246,251,1) 65%), radial-gradient(120% 80% at 100% 0%, rgba(34,197,94,0.08) 0%, rgba(241,245,249,1) 55%)",
+        }, children: [_jsx(AppBar, { position: "sticky", elevation: 0, color: "transparent", sx: {
+                    borderBottom: appBarBorder,
+                    backdropFilter: "blur(10px)",
+                    backgroundColor: isDark ? "rgba(11,18,32,0.55)" : "rgba(255,255,255,0.72)",
+                }, children: _jsx(Toolbar, { sx: { py: 1 }, children: _jsxs(Container, { maxWidth: false, sx: {
                             display: "flex",
                             justifyContent: "space-between",
                             alignItems: "center",
                             px: { xs: 2, md: 3 },
                             maxWidth: "min(1800px, 100vw)",
                         }, children: [_jsx(Stack, { spacing: 0, children: _jsx(Typography, { variant: "h5", fontWeight: 700, letterSpacing: 0.2, children: "Pentest Collaboration Framework" }) }), _jsxs(Stack, { direction: "row", spacing: 1.5, alignItems: "center", children: [_jsx(IconButton, { color: "inherit", onClick: onToggleTheme, sx: {
-                                            border: "1px solid rgba(126,224,255,0.28)",
+                                            border: controlBorder,
                                             borderRadius: 2,
                                             width: 44,
                                             height: 44,
-                                            backgroundColor: "rgba(22,36,58,0.12)",
-                                        }, children: themeMode === "dark" ? _jsx(LightModeIcon, {}) : _jsx(DarkModeIcon, {}) }), _jsx(IconButton, { color: "inherit", onClick: openNotifications, sx: {
-                                            border: "1px solid rgba(126,224,255,0.28)",
-                                            borderRadius: 2,
-                                            width: 44,
-                                            height: 44,
-                                            backgroundColor: "rgba(22,36,58,0.55)",
+                                            backgroundColor: controlBackground,
                                             "&:hover": {
-                                                backgroundColor: "rgba(28,46,72,0.7)",
+                                                backgroundColor: controlHover,
+                                            },
+                                        }, children: themeMode === "dark" ? _jsx(LightModeIcon, {}) : _jsx(DarkModeIcon, {}) }), _jsx(IconButton, { color: "inherit", onClick: openNotifications, sx: {
+                                            border: controlBorder,
+                                            borderRadius: 2,
+                                            width: 44,
+                                            height: 44,
+                                            backgroundColor: controlBackground,
+                                            "&:hover": {
+                                                backgroundColor: controlHover,
                                             },
                                         }, children: _jsx(Badge, { color: "error", badgeContent: count, children: _jsx(NotificationsIcon, {}) }) }), _jsx(Button, { color: "inherit", onClick: openProfileMenu, sx: {
-                                            border: "1px solid rgba(126,224,255,0.28)",
+                                            border: controlBorder,
                                             borderRadius: 2,
                                             textTransform: "none",
                                             px: 1.4,
@@ -91,11 +106,11 @@ function PrivateLayout({ themeMode, onToggleTheme }) {
                                             minHeight: 44,
                                             minWidth: 220,
                                             justifyContent: "flex-end",
-                                            backgroundColor: "rgba(22,36,58,0.55)",
+                                            backgroundColor: controlBackground,
                                             "&:hover": {
-                                                backgroundColor: "rgba(28,46,72,0.7)",
+                                                backgroundColor: controlHover,
                                             },
-                                        }, children: _jsxs(Stack, { direction: "row", spacing: 1.2, alignItems: "center", justifyContent: "flex-end", sx: { width: "100%" }, children: [_jsx(Avatar, { sx: { width: 30, height: 30, bgcolor: "primary.main" }, children: user.username[0]?.toUpperCase() }), _jsxs(Stack, { spacing: 0, sx: { flex: 1, minWidth: 0 }, children: [_jsx(Typography, { color: "text.primary", textAlign: "right", noWrap: true, children: user.username }), _jsx(Typography, { variant: "caption", color: "text.secondary", textAlign: "right", noWrap: true, children: user.role === "admin" ? "Администратор" : "Пентестер" })] }), _jsx(KeyboardArrowDownIcon, { fontSize: "small", sx: { color: "text.secondary" } })] }) })] })] }) }) }), _jsxs(Menu, { anchorEl: profileAnchorEl, open: profileMenuOpen, onClose: closeProfileMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, slotProps: {
+                                        }, children: _jsxs(Stack, { direction: "row", spacing: 1.2, alignItems: "center", justifyContent: "flex-end", sx: { width: "100%" }, children: [_jsx(Avatar, { sx: { width: 30, height: 30, bgcolor: "primary.main" }, children: user.username[0]?.toUpperCase() }), _jsxs(Stack, { spacing: 0, sx: { flex: 1, minWidth: 0 }, children: [_jsx(Typography, { color: "text.primary", textAlign: "right", noWrap: true, children: user.username }), _jsx(Typography, { variant: "caption", color: "text.secondary", textAlign: "right", noWrap: true, children: roleLabel })] }), _jsx(KeyboardArrowDownIcon, { fontSize: "small", sx: { color: "text.secondary" } })] }) })] })] }) }) }), _jsxs(Menu, { anchorEl: profileAnchorEl, open: profileMenuOpen, onClose: closeProfileMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, slotProps: {
                     paper: {
                         sx: {
                             width: 220,
@@ -104,7 +119,10 @@ function PrivateLayout({ themeMode, onToggleTheme }) {
                 }, children: [_jsxs(MenuItem, { onClick: () => {
                             navigate("/");
                             closeProfileMenu();
-                        }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(HomeIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0414\u043E\u043C\u043E\u0439" })] }), _jsxs(MenuItem, { onClick: () => {
+                        }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(HomeIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0414\u043E\u043C\u043E\u0439" })] }), user.role === "admin" && (_jsxs(MenuItem, { onClick: () => {
+                            navigate("/audit-logs");
+                            closeProfileMenu();
+                        }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(HistoryIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0416\u0443\u0440\u043D\u0430\u043B \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439" })] })), _jsxs(MenuItem, { onClick: () => {
                             closeProfileMenu();
                             void signOut();
                         }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(LogoutIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0412\u044B\u0439\u0442\u0438" })] })] }), _jsx(Popover, { open: notificationsOpen, anchorEl: notificationsAnchorEl, onClose: closeNotifications, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: _jsxs(Box, { sx: { width: 360, maxWidth: "90vw" }, children: [_jsxs(Box, { sx: { px: 2, py: 1.5 }, children: [_jsx(Typography, { variant: "subtitle1", fontWeight: 700, children: "\u0423\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u044F" }), _jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["\u041D\u0435\u043F\u0440\u043E\u0447\u0438\u0442\u0430\u043D\u043D\u044B\u0445: ", count] })] }), _jsx(Divider, {}), notificationsLoading ? (_jsx(Box, { sx: { p: 2, display: "flex", justifyContent: "center" }, children: _jsx(CircularProgress, { size: 20 }) })) : notifications.length === 0 ? (_jsx(Box, { sx: { p: 2 }, children: _jsx(Typography, { variant: "body2", color: "text.secondary", children: "\u041D\u043E\u0432\u044B\u0445 \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u0439 \u043D\u0435\u0442." }) })) : (_jsx(List, { dense: true, disablePadding: true, children: notifications.map((notification) => (_jsx(ListItemButton, { onClick: closeNotifications, children: _jsx(ListItemText, { primary: notification.context?.vulnerability_title ?? "Уведомление", secondary: notification.context?.commenter_username
@@ -117,7 +135,8 @@ function PrivateLayout({ themeMode, onToggleTheme }) {
                                     p: { xs: 2, md: 3 },
                                     borderRadius: 0,
                                     backgroundColor: themeMode === "dark" ? "rgba(18,29,49,0.68)" : "rgba(255,255,255,0.8)",
-                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
+                                    boxShadow: themeMode === "dark" ? undefined : "0 8px 30px rgba(15, 23, 42, 0.08)",
+                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/audit-logs", element: user.role === "admin" ? _jsx(AuditLogsPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
 }
 export default function App({ themeMode, onToggleTheme }) {
     const initialize = useAuthStore((s) => s.initialize);
