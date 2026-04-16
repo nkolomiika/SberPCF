@@ -20,10 +20,31 @@ export interface PaginatedResponse<T> {
 export interface Project {
   id: string;
   name: string;
+  folder: string;
   description: string | null;
   start_date: string | null;
   end_date: string | null;
   status: "active" | "completed" | "archived";
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  path: string;
+  parent_id: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  path: string;
+  parent_id: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -171,6 +192,7 @@ export interface Notification {
 export interface AuditLog {
   id: string;
   user_id: string | null;
+  username: string | null;
   action: string;
   entity_type: string | null;
   entity_id: string | null;

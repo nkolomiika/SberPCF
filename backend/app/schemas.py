@@ -67,6 +67,7 @@ class UserOut(ORMBase):
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    folder: str = Field(default="Без папки", min_length=1, max_length=255)
     description: str | None = None
     start_date: date | None = None
     end_date: date | None = None
@@ -80,6 +81,7 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    folder: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     start_date: date | None = None
     end_date: date | None = None
@@ -95,10 +97,30 @@ class ProjectUpdate(BaseModel):
 class ProjectOut(ORMBase):
     id: UUID
     name: str
+    folder: str
     description: str | None
     start_date: date | None
     end_date: date | None
     status: ProjectStatus
+    created_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectFolderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    parent_id: UUID | None = None
+
+
+class ProjectFolderMove(BaseModel):
+    parent_id: UUID | None = None
+
+
+class ProjectFolderOut(ORMBase):
+    id: UUID
+    name: str
+    path: str
+    parent_id: UUID | None
     created_by: UUID
     created_at: datetime
     updated_at: datetime
@@ -348,6 +370,7 @@ class ImportResult(BaseModel):
 class AuditLogOut(ORMBase):
     id: UUID
     user_id: UUID | None
+    username: str | None = None
     action: str
     entity_type: str | None
     entity_id: UUID | None

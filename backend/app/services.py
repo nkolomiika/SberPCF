@@ -28,6 +28,7 @@ from app.models import (
     Notification,
     Port,
     Project,
+    ProjectFolder,
     ProjectMember,
     RefreshToken,
     Service,
@@ -273,6 +274,20 @@ class ProjectService:
         if start_date and end_date and end_date < start_date:
             raise ValidationError("Дата окончания проекта не может быть раньше даты начала")
 
+    @staticmethod
+    def _normalize_project_folder(folder: str | None) -> str:
+        normalized = (folder or "").strip()
+        return normalized or "Без папки"
+
+    @staticmethod
+    def _normalize_folder_segment(name: str) -> str:
+        normalized = name.strip().strip("/")
+        if not normalized:
+            raise ValidationError("Название папки не может быть пустым")
+        if "/" in normalized:
+            raise ValidationError("Название папки не должно содержать '/'")
+        return normalized
+
     async def list_projects(self, current_user: User, page: int, size: int, status: str | None = None) -> tuple[list[Project], int]:
         """Возвращает список проектов с учётом доступа."""
         query: Select = select(Project)
@@ -295,6 +310,7 @@ class ProjectService:
     async def create_project(self, payload: dict, actor_id: UUID, ip_address: str | None = None) -> Project:
         """Создаёт новый проект."""
         self._validate_project_dates(payload.get("start_date"), payload.get("end_date"))
+        payload["folder"] = self._normalize_project_folder(payload.get("folder"))
         project = Project(**payload, created_by=actor_id)
         self.db.add(project)
         await self.db.commit()
@@ -305,6 +321,8 @@ class ProjectService:
     async def update_project(self, project_id: UUID, payload: dict, actor_id: UUID, ip_address: str | None = None) -> Project:
         """Обновляет проект."""
         project = await self.get_project(project_id)
+        if "folder" in payload:
+            payload["folder"] = self._normalize_project_folder(payload.get("folder"))
         next_start_date = payload.get("start_date", project.start_date)
         next_end_date = payload.get("end_date", project.end_date)
         self._validate_project_dates(next_start_date, next_end_date)
@@ -382,6 +400,96 @@ class ProjectService:
         await self.db.delete(member)
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="project_member", entity_id=member.id, ip_address=ip_address)
+
+    async def list_folders(self) -> list[ProjectFolder]:
+        """Возвращает список папок проектов."""
+        rows = await self.db.scalars(select(ProjectFolder).order_by(ProjectFolder.path.asc()))
+        return list(rows.all())
+
+    async def create_folder(self, name: str, parent_id: UUID | None, actor_id: UUID, ip_address: str | None = None) -> ProjectFolder:
+        """Создаёт новую папку проекта (в т.ч. вложенную)."""
+        segment = self._normalize_folder_segment(name)
+        parent: ProjectFolder | None = None
+        if parent_id:
+            parent = await self.db.scalar(select(ProjectFolder).where(ProjectFolder.id == parent_id))
+            if not parent:
+                raise NotFoundError("Родительская папка не найдена")
+        path = f"{parent.path}/{segment}" if parent else segment
+        duplicate = await self.db.scalar(select(ProjectFolder).where(ProjectFolder.path == path))
+        if duplicate:
+            raise ConflictError("Папка с таким путём уже существует")
+        folder = ProjectFolder(name=segment, path=path, parent_id=parent_id, created_by=actor_id)
+        self.db.add(folder)
+        await self.db.commit()
+        await self.db.refresh(folder)
+        await self.audit.log("CREATE", user_id=actor_id, entity_type="project_folder", entity_id=folder.id, ip_address=ip_address)
+        return folder
+
+    async def move_folder(
+        self, folder_id: UUID, new_parent_id: UUID | None, actor_id: UUID, ip_address: str | None = None
+    ) -> ProjectFolder:
+        """Перемещает папку и пересчитывает пути дочерних папок и проектов."""
+        folder = await self.db.scalar(select(ProjectFolder).where(ProjectFolder.id == folder_id))
+        if not folder:
+            raise NotFoundError("Папка не найдена")
+        if new_parent_id == folder.id:
+            raise ValidationError("Нельзя переместить папку в саму себя")
+
+        new_parent: ProjectFolder | None = None
+        if new_parent_id:
+            new_parent = await self.db.scalar(select(ProjectFolder).where(ProjectFolder.id == new_parent_id))
+            if not new_parent:
+                raise NotFoundError("Родительская папка не найдена")
+            if new_parent.path == folder.path or new_parent.path.startswith(f"{folder.path}/"):
+                raise ValidationError("Нельзя переместить папку в её дочернюю папку")
+
+        duplicate = await self.db.scalar(
+            select(ProjectFolder).where(
+                and_(
+                    ProjectFolder.id != folder.id,
+                    ProjectFolder.parent_id == new_parent_id,
+                    ProjectFolder.name == folder.name,
+                )
+            )
+        )
+        if duplicate:
+            raise ConflictError("В целевой папке уже есть папка с таким именем")
+
+        old_path = folder.path
+        new_path = f"{new_parent.path}/{folder.name}" if new_parent else folder.name
+        if new_path == old_path and folder.parent_id == new_parent_id:
+            return folder
+
+        subtree_folders = (
+            await self.db.scalars(
+                select(ProjectFolder).where(or_(ProjectFolder.path == old_path, ProjectFolder.path.like(f"{old_path}/%")))
+            )
+        ).all()
+        subtree_projects = (
+            await self.db.scalars(select(Project).where(or_(Project.folder == old_path, Project.folder.like(f"{old_path}/%"))))
+        ).all()
+
+        for subtree_folder in subtree_folders:
+            suffix = subtree_folder.path[len(old_path) :]
+            subtree_folder.path = f"{new_path}{suffix}"
+            if subtree_folder.id == folder.id:
+                subtree_folder.parent_id = new_parent_id
+
+        for project in subtree_projects:
+            suffix = project.folder[len(old_path) :]
+            project.folder = f"{new_path}{suffix}"
+
+        await self.db.commit()
+        await self.db.refresh(folder)
+        await self.audit.log(
+            "UPDATE",
+            user_id=actor_id,
+            entity_type="project_folder",
+            entity_id=folder.id,
+            details={"from": old_path, "to": new_path},
+            ip_address=ip_address,
+        )
+        return folder
 
 
 class AssetService:

@@ -86,6 +86,12 @@ async def startup() -> None:
     async with engine.begin() as conn:
         if conn.dialect.name == "postgresql":
             await conn.execute(text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'developer'"))
+            await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder VARCHAR(255) NOT NULL DEFAULT 'Без папки'"))
+        elif conn.dialect.name == "sqlite":
+            columns = (await conn.execute(text("PRAGMA table_info(projects)"))).fetchall()
+            has_folder = any(row[1] == "folder" for row in columns)
+            if not has_folder:
+                await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT 'Без папки'"))
         await conn.run_sync(Base.metadata.create_all)
     MinioStorage().ensure_bucket()
     async with SessionLocal() as db:

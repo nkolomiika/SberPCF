@@ -26,8 +26,6 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import HistoryIcon from "@mui/icons-material/History";
-import DarkModeIcon from "@mui/icons-material/DarkMode";
-import LightModeIcon from "@mui/icons-material/LightMode";
 import type { PaletteMode } from "@mui/material";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { listNotifications, unreadCount } from "./api";
@@ -41,10 +39,9 @@ import { AuditLogsPage } from "./pages/AuditLogsPage";
 
 type PrivateLayoutProps = {
   themeMode: PaletteMode;
-  onToggleTheme: () => void;
 };
 
-function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
+function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
@@ -136,22 +133,6 @@ function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
               </Typography>
             </Stack>
             <Stack direction="row" spacing={1.5} alignItems="center">
-              <IconButton
-                color="inherit"
-                onClick={onToggleTheme}
-                sx={{
-                  border: controlBorder,
-                  borderRadius: 2,
-                  width: 44,
-                  height: 44,
-                  backgroundColor: controlBackground,
-                  "&:hover": {
-                    backgroundColor: controlHover,
-                  },
-                }}
-              >
-                {themeMode === "dark" ? <LightModeIcon /> : <DarkModeIcon />}
-              </IconButton>
               <IconButton
                 color="inherit"
                 onClick={openNotifications}
@@ -340,10 +321,9 @@ function PrivateLayout({ themeMode, onToggleTheme }: PrivateLayoutProps) {
 
 type AppProps = {
   themeMode: PaletteMode;
-  onToggleTheme: () => void;
 };
 
-export default function App({ themeMode, onToggleTheme }: AppProps) {
+export default function App({ themeMode }: AppProps) {
   const initialize = useAuthStore((s) => s.initialize);
   const isInitialized = useAuthStore((s) => s.isInitialized);
   const user = useAuthStore((s) => s.user);
@@ -363,7 +343,7 @@ export default function App({ themeMode, onToggleTheme }: AppProps) {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
-      <Route path="/*" element={<PrivateLayout themeMode={themeMode} onToggleTheme={onToggleTheme} />} />
+      <Route path="/*" element={<PrivateLayout themeMode={themeMode} />} />
     </Routes>
   );
 }

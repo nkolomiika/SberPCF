@@ -24,7 +24,7 @@ async def list_audit_logs(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Возвращает журнал действий с фильтрацией."""
-    query = select(AuditLog)
+    query = select(AuditLog, User.username).outerjoin(User, User.id == AuditLog.user_id)
     conditions = []
     if user_id:
         conditions.append(AuditLog.user_id == user_id)
@@ -35,8 +35,24 @@ async def list_audit_logs(
     if conditions:
         query = query.where(and_(*conditions))
     total = await db.scalar(select(func.count()).select_from(query.subquery()))
-    items = (
-        await db.scalars(query.order_by(AuditLog.created_at.desc()).offset((page - 1) * size).limit(size))
+    rows = (
+        await db.execute(query.order_by(AuditLog.created_at.desc()).offset((page - 1) * size).limit(size))
     ).all()
     total_count = total if isinstance(total, int) else 0
-    return to_paginated_response([AuditLogOut.model_validate(item) for item in items], total_count, PageParams(page=page, size=size)).model_dump()
+    payload = [
+        AuditLogOut.model_validate(
+            {
+                "id": item.id,
+                "user_id": item.user_id,
+                "username": username,
+                "action": item.action,
+                "entity_type": item.entity_type,
+                "entity_id": item.entity_id,
+                "details": item.details,
+                "ip_address": item.ip_address,
+                "created_at": item.created_at,
+            }
+        )
+        for item, username in rows
+    ]
+    return to_paginated_response(payload, total_count, PageParams(page=page, size=size)).model_dump()

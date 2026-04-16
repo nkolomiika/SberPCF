@@ -80,11 +80,32 @@ class Project(Base, TimestampMixin):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    folder: Mapped[str] = mapped_column(String(255), nullable=False, default="Без папки", server_default="Без папки")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[ProjectStatus] = mapped_column(
         Enum(ProjectStatus, name="project_status"), nullable=False, default=ProjectStatus.ACTIVE
+    )
+    created_by: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+
+class ProjectFolder(Base, TimestampMixin):
+    """Папка проектов с поддержкой иерархии."""
+
+    __tablename__ = "project_folders"
+    __table_args__ = (
+        UniqueConstraint("parent_id", "name", name="uq_project_folder_parent_name"),
+        UniqueConstraint("path", name="uq_project_folder_path"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    parent_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("project_folders.id", ondelete="CASCADE"),
+        nullable=True,
     )
     created_by: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 

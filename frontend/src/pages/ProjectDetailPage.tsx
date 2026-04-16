@@ -55,7 +55,6 @@ import {
   listVulnerabilityFiles,
   removeProjectMember,
   updateProject,
-  updateHost,
   updateVulnerabilityComment,
   updateVulnerability,
   uploadVulnerabilityFile,
@@ -80,8 +79,6 @@ const parseIsoDateOnly = (value: string | null) => {
   const parsed = new Date(`${value}T00:00:00`);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
-
-const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
 
 export function ProjectDetailPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -122,7 +119,6 @@ export function ProjectDetailPage() {
   const [hostName, setHostName] = useState("");
   const [hostStatus, setHostStatus] = useState<Host["status"]>("unknown");
   const [hostNotes, setHostNotes] = useState("");
-  const [editHostOpen, setEditHostOpen] = useState(false);
   const [vulnDetailOpen, setVulnDetailOpen] = useState(false);
   const [activeVuln, setActiveVuln] = useState<VulnerabilityDetails | null>(null);
   const [vulnFiles, setVulnFiles] = useState<VulnerabilityFile[]>([]);
@@ -283,72 +279,52 @@ export function ProjectDetailPage() {
   const projectTimeMetrics = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const start = parseIsoDateOnly(projectStartDate);
-    const end = parseIsoDateOnly(projectEndDate);
-    const startLabel = start ? start.toLocaleDateString("ru-RU") : "не задано";
-    const endLabel = end ? end.toLocaleDateString("ru-RU") : "не задано";
-
-    if (!end) {
+    const startRaw = parseIsoDateOnly(projectStartDate);
+    const endRaw = parseIsoDateOnly(projectEndDate);
+    const start = startRaw ?? (endRaw ? new Date(endRaw.getTime() - 14 * DAY_IN_MS) : null);
+    const end = endRaw ?? (startRaw ? new Date(startRaw.getTime() + 14 * DAY_IN_MS) : null);
+    if (!start || !end || end.getTime() <= start.getTime()) {
       return {
-        startLabel,
-        endLabel,
+        startLabel: start ? start.toLocaleDateString("ru-RU") : "не задано",
+        endLabel: end ? end.toLocaleDateString("ru-RU") : "не задано",
         daysLeft: null as number | null,
-        progressPercent: null as number | null,
         statusTone: "neutral" as "neutral" | "success" | "warning" | "error",
-        statusLabel: "Без дедлайна",
+        statusLabel: "Стандартный срок: 14 дней",
       };
     }
 
     const daysLeft = Math.ceil((end.getTime() - today.getTime()) / DAY_IN_MS);
-    let progressPercent: number | null = null;
-    if (start && end.getTime() > start.getTime()) {
-      const total = Math.ceil((end.getTime() - start.getTime()) / DAY_IN_MS);
-      const passed = Math.ceil((today.getTime() - start.getTime()) / DAY_IN_MS);
-      progressPercent = Math.max(0, Math.min(100, Math.round((passed / total) * 100)));
-    }
-
     if (daysLeft < 0) {
       return {
-        startLabel,
-        endLabel,
+        startLabel: start.toLocaleDateString("ru-RU"),
+        endLabel: end.toLocaleDateString("ru-RU"),
         daysLeft,
-        progressPercent,
         statusTone: "error" as const,
         statusLabel: "Просрочен",
       };
     }
-    if (daysLeft <= 3) {
+    if (daysLeft <= 2) {
       return {
-        startLabel,
-        endLabel,
+        startLabel: start.toLocaleDateString("ru-RU"),
+        endLabel: end.toLocaleDateString("ru-RU"),
         daysLeft,
-        progressPercent,
-        statusTone: "error" as const,
-        statusLabel: "Критичный срок",
-      };
-    }
-    if (daysLeft <= 14) {
-      return {
-        startLabel,
-        endLabel,
-        daysLeft,
-        progressPercent,
         statusTone: "warning" as const,
-        statusLabel: "Риск срыва",
+        statusLabel: "Отчёт: последние 2 дня",
       };
     }
     return {
-      startLabel,
-      endLabel,
+      startLabel: start.toLocaleDateString("ru-RU"),
+      endLabel: end.toLocaleDateString("ru-RU"),
       daysLeft,
-      progressPercent,
       statusTone: "success" as const,
       statusLabel: "В графике",
     };
   }, [projectStartDate, projectEndDate]);
   const timelineBar = useMemo(() => {
-    const start = parseIsoDateOnly(projectStartDate);
-    const end = parseIsoDateOnly(projectEndDate);
+    const startRaw = parseIsoDateOnly(projectStartDate);
+    const endRaw = parseIsoDateOnly(projectEndDate);
+    const start = startRaw ?? (endRaw ? new Date(endRaw.getTime() - 14 * DAY_IN_MS) : null);
+    const end = endRaw ?? (startRaw ? new Date(startRaw.getTime() + 14 * DAY_IN_MS) : null);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -358,27 +334,29 @@ export function ProjectDetailPage() {
       };
     }
 
-    const totalMs = end.getTime() - start.getTime();
-    const toPercent = (date: Date) => clampPercent(((date.getTime() - start.getTime()) / totalMs) * 100);
-
-    const warningStart = new Date(end.getTime() - 14 * DAY_IN_MS);
-    const criticalStart = new Date(end.getTime() - 3 * DAY_IN_MS);
-
-    const normalZonePercent = toPercent(warningStart);
-    const warningZonePercent = Math.max(0, toPercent(criticalStart) - normalZonePercent);
-    const criticalZonePercent = Math.max(0, 100 - normalZonePercent - warningZonePercent);
-    const todayPercent = toPercent(today);
-    const todayLabelPercent = Math.max(8, Math.min(92, todayPercent));
+    const totalDays = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / DAY_IN_MS));
+    const elapsedInclusive = Math.floor((today.getTime() - start.getTime()) / DAY_IN_MS) + 1;
+    const passedDays = Math.max(0, Math.min(totalDays, elapsedInclusive));
+    const reportStartIndex = Math.max(0, totalDays - 2);
+    const cells = Array.from({ length: totalDays }, (_, index) => {
+      const isElapsed = index < passedDays;
+      const isReportWindow = index >= reportStartIndex;
+      let bgColor = "rgba(148,163,184,0.14)";
+      if (isElapsed && isReportWindow) {
+        bgColor = "rgba(255,152,0,0.5)";
+      } else if (isElapsed) {
+        bgColor = "rgba(76,175,80,0.5)";
+      } else if (isReportWindow) {
+        bgColor = "rgba(255,152,0,0.2)";
+      }
+      return { bgColor };
+    });
 
     return {
       ready: true as const,
-      normalZonePercent,
-      warningZonePercent,
-      criticalZonePercent,
-      todayPercent,
-      todayLabelPercent,
+      totalDays,
+      cells,
       startLabel: start.toLocaleDateString("ru-RU"),
-      todayLabel: today.toLocaleDateString("ru-RU"),
       endLabel: end.toLocaleDateString("ru-RU"),
     };
   }, [projectStartDate, projectEndDate]);
@@ -403,33 +381,6 @@ export function ProjectDetailPage() {
 
   const selectedHost = hosts.find((host) => host.id === selectedHostId) ?? null;
   const hostLabel = selectedHost ? selectedHost.hostname || selectedHost.ip_address || "unknown-host" : "Хост не выбран";
-
-  const openEditHost = () => {
-    if (!selectedHost) {
-      setError("Сначала выберите хост в структуре проекта");
-      return;
-    }
-    setHostIp(selectedHost.ip_address || "");
-    setHostName(selectedHost.hostname || "");
-    setHostStatus(selectedHost.status);
-    setHostNotes(selectedHost.notes || "");
-    setEditHostOpen(true);
-  };
-
-  const submitHostEdit = async () => {
-    if (!projectId || !selectedHost) {
-      return;
-    }
-    await updateHost(projectId, selectedHost.id, {
-      ip_address: hostIp || undefined,
-      hostname: hostName || undefined,
-      status: hostStatus,
-      notes: hostNotes || undefined,
-    });
-    setEditHostOpen(false);
-    await loadProjectData();
-    await loadHostAssets();
-  };
 
   const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
     if (!projectId) {
@@ -689,21 +640,6 @@ export function ProjectDetailPage() {
       return;
     }
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "users-422-post-fix",
-          hypothesisId: "H13",
-          location: "ProjectDetailPage.tsx:openMembersDialog:beforeGetUsers",
-          message: "Opening members dialog and requesting user catalog",
-          data: { requestedSize: 200, projectId, userRole: user?.role ?? null },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       const usersResponse = await getUsers(1, 200);
       setUsersCatalog(usersResponse.items);
     } catch {
@@ -773,16 +709,6 @@ export function ProjectDetailPage() {
         >
           <AddIcon fontSize="small" sx={{ mr: 1 }} />
           Добавить хост
-        </MenuItem>
-        <MenuItem
-          disabled={!selectedHost}
-          onClick={() => {
-            closeActionsMenu();
-            openEditHost();
-          }}
-        >
-          <EditIcon fontSize="small" sx={{ mr: 1 }} />
-          Редактировать хост
         </MenuItem>
         <MenuItem
           onClick={() => {
@@ -863,120 +789,69 @@ export function ProjectDetailPage() {
             <Stack spacing={2}>
               <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
                 <CardContent>
-                  <Typography variant="h6" fontWeight={700} mb={1}>
-                    Описание проекта
-                  </Typography>
-                  <Typography color="text.secondary">{projectDescription || "Описание проекта не заполнено"}</Typography>
-                  <Box sx={{ mt: 2, p: 1.5, border: "1px solid rgba(126,224,255,0.16)" }}>
-                    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1} alignItems={{ md: "center" }}>
-                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                        <Typography variant="subtitle2" fontWeight={700}>
-                          Таймлайн проекта
-                        </Typography>
+                  <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1} alignItems={{ md: "center" }}>
+                    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                      <Typography variant="h6" fontWeight={700}>
+                        Таймлайн проекта
+                      </Typography>
+                      <Chip
+                        size="small"
+                        color={projectTimeMetrics.statusTone === "neutral" ? "default" : projectTimeMetrics.statusTone}
+                        label={projectTimeMetrics.statusLabel}
+                      />
+                      {projectTimeMetrics.daysLeft !== null && (
                         <Chip
                           size="small"
-                          color={projectTimeMetrics.statusTone === "neutral" ? "default" : projectTimeMetrics.statusTone}
-                          label={projectTimeMetrics.statusLabel}
+                          variant="outlined"
+                          label={
+                            projectTimeMetrics.daysLeft >= 0
+                              ? `${projectTimeMetrics.daysLeft} дн. осталось`
+                              : `${Math.abs(projectTimeMetrics.daysLeft)} дн. просрочки`
+                          }
                         />
-                        {projectTimeMetrics.daysLeft !== null && (
-                          <Chip
-                            size="small"
-                            variant="outlined"
-                            label={
-                              projectTimeMetrics.daysLeft >= 0
-                                ? `${projectTimeMetrics.daysLeft} дн. осталось`
-                                : `${Math.abs(projectTimeMetrics.daysLeft)} дн. просрочки`
-                            }
-                          />
-                        )}
-                      </Stack>
-                      {user?.role === "admin" && (
-                        <Button size="small" variant="outlined" startIcon={<AccessTimeIcon />} onClick={openExtendDialog}>
-                          Продлить
-                        </Button>
                       )}
                     </Stack>
-
-                    <Box sx={{ mt: 1.5 }}>
-                      {timelineBar.ready ? (
-                        <>
-                          <Box sx={{ position: "relative", height: 14, border: "1px solid rgba(126,224,255,0.24)", overflow: "hidden" }}>
+                    {user?.role === "admin" && (
+                      <Button size="small" variant="outlined" startIcon={<AccessTimeIcon />} onClick={openExtendDialog}>
+                        Продлить
+                      </Button>
+                    )}
+                  </Stack>
+                  <Box sx={{ mt: 1.5 }}>
+                    {timelineBar.ready ? (
+                      <>
+                        <Box
+                          sx={{
+                            display: "grid",
+                            gridTemplateColumns: `repeat(${timelineBar.totalDays}, minmax(12px, 1fr))`,
+                            gap: 0.5,
+                          }}
+                        >
+                          {timelineBar.cells.map((cell, index) => (
                             <Box
+                              key={`timeline-day-${index}`}
                               sx={{
-                                position: "absolute",
-                                left: 0,
-                                top: 0,
-                                bottom: 0,
-                                width: `${timelineBar.normalZonePercent}%`,
-                                bgcolor: "rgba(76,175,80,0.26)",
+                                height: 16,
+                                border: "1px solid rgba(126,224,255,0.16)",
+                                backgroundColor: cell.bgColor,
                               }}
                             />
-                            <Box
-                              sx={{
-                                position: "absolute",
-                                left: `${timelineBar.normalZonePercent}%`,
-                                top: 0,
-                                bottom: 0,
-                                width: `${timelineBar.warningZonePercent}%`,
-                                bgcolor: "rgba(255,152,0,0.3)",
-                              }}
-                            />
-                            <Box
-                              sx={{
-                                position: "absolute",
-                                left: `${timelineBar.normalZonePercent + timelineBar.warningZonePercent}%`,
-                                top: 0,
-                                bottom: 0,
-                                width: `${timelineBar.criticalZonePercent}%`,
-                                bgcolor: "rgba(244,67,54,0.32)",
-                              }}
-                            />
-                            <Box
-                              sx={{
-                                position: "absolute",
-                                left: `${timelineBar.todayPercent}%`,
-                                top: -3,
-                                bottom: -3,
-                                width: 2,
-                                bgcolor: "primary.main",
-                              }}
-                            />
-                          </Box>
-
-                          <Box sx={{ position: "relative", mt: 0.8, minHeight: 18 }}>
-                            <Typography variant="caption" color="text.secondary" sx={{ position: "absolute", left: 0 }}>
-                              Start
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              color="primary.main"
-                              sx={{ position: "absolute", left: `${timelineBar.todayLabelPercent}%`, transform: "translateX(-50%)" }}
-                            >
-                              Today
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary" sx={{ position: "absolute", right: 0 }}>
-                              End
-                            </Typography>
-                          </Box>
-
-                          <Stack direction="row" justifyContent="space-between" mt={0.3}>
-                            <Typography variant="caption" color="text.secondary">
-                              {timelineBar.startLabel}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {timelineBar.todayLabel}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {timelineBar.endLabel}
-                            </Typography>
-                          </Stack>
-                        </>
-                      ) : (
-                        <Typography variant="body2" color="text.secondary">
-                          Для шкалы времени укажите дату начала и дату окончания проекта.
-                        </Typography>
-                      )}
-                    </Box>
+                          ))}
+                        </Box>
+                        <Stack direction="row" justifyContent="space-between" mt={1}>
+                          <Typography variant="caption" color="text.secondary">
+                            Start: {timelineBar.startLabel}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            End: {timelineBar.endLabel}
+                          </Typography>
+                        </Stack>
+                      </>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">
+                        Стандартный срок проекта: 14 дней. Укажите дату начала и окончания, чтобы отобразить шкалу по дням.
+                      </Typography>
+                    )}
                   </Box>
                 </CardContent>
               </Card>
@@ -984,10 +859,23 @@ export function ProjectDetailPage() {
                 <Grid size={{ xs: 12, md: 6 }}>
                   <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0, height: "100%" }}>
                     <CardContent>
-                      <Typography color="text.secondary">Хостов</Typography>
+                      <Typography color="text.secondary" mb={1}>
+                        Хосты проекта
+                      </Typography>
                       <Typography variant="h4" fontWeight={700}>
                         {hosts.length}
                       </Typography>
+                      <Stack spacing={0.6} mt={1} sx={{ maxHeight: 130, overflowY: "auto", pr: 0.5 }}>
+                        {hosts.length > 0 ? (
+                          hosts.map((host) => (
+                            <Typography key={host.id} variant="body2" color="text.secondary">
+                              {host.hostname || host.ip_address || "unknown-host"}
+                            </Typography>
+                          ))
+                        ) : (
+                          <Typography color="text.secondary">Хосты не добавлены</Typography>
+                        )}
+                      </Stack>
                     </CardContent>
                   </Card>
                 </Grid>
@@ -997,10 +885,13 @@ export function ProjectDetailPage() {
                       <Typography color="text.secondary" mb={1}>
                         Участники проекта
                       </Typography>
-                      <Stack spacing={0.5}>
+                      <Typography variant="h4" fontWeight={700} mb={1}>
+                        {projectMembers.length}
+                      </Typography>
+                      <Stack spacing={0.6} sx={{ maxHeight: 130, overflowY: "auto", pr: 0.5 }}>
                         {projectMembers.length > 0 ? (
                           projectMembers.map((member) => (
-                            <Typography key={member.user_id} variant="body2">
+                            <Typography key={member.user_id} variant="body2" color="text.secondary">
                               {member.username} ({member.role})
                             </Typography>
                           ))
@@ -1012,6 +903,16 @@ export function ProjectDetailPage() {
                   </Card>
                 </Grid>
               </Grid>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+                <CardContent>
+                  <Typography variant="h6" fontWeight={700} mb={1}>
+                    Описание проекта
+                  </Typography>
+                  <Typography color="text.secondary" whiteSpace="pre-wrap">
+                    {projectDescription || "Описание проекта не заполнено"}
+                  </Typography>
+                </CardContent>
+              </Card>
             </Stack>
           )}
 
@@ -1167,28 +1068,6 @@ export function ProjectDetailPage() {
           <Button onClick={() => setExtendDialogOpen(false)}>Отмена</Button>
           <Button variant="contained" disabled={!extendEndDate || extendingProject} onClick={() => void submitProjectExtension()}>
             Продлить
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={editHostOpen} onClose={() => setEditHostOpen(false)} fullWidth>
-        <DialogTitle>Редактировать хост</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField label="IP-адрес" value={hostIp} onChange={(e) => setHostIp(e.target.value)} />
-            <TextField label="Hostname" value={hostName} onChange={(e) => setHostName(e.target.value)} />
-            <TextField select label="Статус" value={hostStatus} onChange={(e) => setHostStatus(e.target.value as Host["status"])}>
-              <MenuItem value="up">up</MenuItem>
-              <MenuItem value="down">down</MenuItem>
-              <MenuItem value="unknown">unknown</MenuItem>
-            </TextField>
-            <TextField label="Описание" multiline minRows={3} value={hostNotes} onChange={(e) => setHostNotes(e.target.value)} />
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEditHostOpen(false)}>Отмена</Button>
-          <Button variant="contained" disabled={!hostIp && !hostName} onClick={() => void submitHostEdit()}>
-            Сохранить
           </Button>
         </DialogActions>
       </Dialog>

@@ -32,6 +32,7 @@ import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   addVulnerabilityAsset,
+  createHost,
   createEndpoint,
   createPort,
   createService,
@@ -106,6 +107,7 @@ export function HostDetailPage() {
   const [creatingEndpointDescription, setCreatingEndpointDescription] = useState("");
   const [creatingEndpointRequestRaw, setCreatingEndpointRequestRaw] = useState("");
   const [swaggerImporting, setSwaggerImporting] = useState(false);
+  const [nmapImporting, setNmapImporting] = useState(false);
   const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
   const [creatingVulnerabilityTitle, setCreatingVulnerabilityTitle] = useState("");
   const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
@@ -382,6 +384,123 @@ export function HostDetailPage() {
     await loadHost();
   };
 
+  const normalizeImportedPortState = (value: string): Port["state"] => {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "open") {
+      return "open";
+    }
+    if (normalized === "closed") {
+      return "closed";
+    }
+    if (normalized === "filtered") {
+      return "filtered";
+    }
+    if (normalized.includes("open")) {
+      return "open";
+    }
+    if (normalized.includes("closed")) {
+      return "closed";
+    }
+    return "filtered";
+  };
+
+  const parseNmapPortsFromText = (rawText: string): Array<{ port_number: number; protocol: Port["protocol"]; state: Port["state"] }> => {
+    const entries = new Map<string, { port_number: number; protocol: Port["protocol"]; state: Port["state"] }>();
+    const lines = rawText.replace(/\r/g, "").split("\n");
+
+    const addEntry = (portNumber: number, protocol: Port["protocol"], stateRaw: string) => {
+      if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+        return;
+      }
+      const key = `${portNumber}/${protocol}`;
+      entries.set(key, {
+        port_number: portNumber,
+        protocol,
+        state: normalizeImportedPortState(stateRaw),
+      });
+    };
+
+    // Regular Nmap output lines: "22/tcp open ssh"
+    lines.forEach((line) => {
+      const match = line.match(/^\s*(\d{1,5})\/(tcp|udp)\s+([a-zA-Z|_-]+)\b/i);
+      if (!match) {
+        return;
+      }
+      addEntry(Number(match[1]), match[2].toLowerCase() as Port["protocol"], match[3]);
+    });
+
+    // Grepable output fragments: "Ports: 22/open/tcp//ssh///, 53/open/udp//domain///"
+    lines.forEach((line) => {
+      const portsMatch = line.match(/Ports:\s*(.+)$/i);
+      if (!portsMatch) {
+        return;
+      }
+      const fragments = portsMatch[1].split(",").map((item) => item.trim());
+      fragments.forEach((fragment) => {
+        const parts = fragment.split("/");
+        if (parts.length < 3) {
+          return;
+        }
+        const portNumber = Number(parts[0]);
+        const stateRaw = parts[1] || "";
+        const protocol = (parts[2] || "").toLowerCase();
+        if (protocol !== "tcp" && protocol !== "udp") {
+          return;
+        }
+        addEntry(portNumber, protocol, stateRaw);
+      });
+    });
+
+    // XML output fragments: <port protocol="tcp" portid="443"> ... <state state="open"/>
+    const xmlPortRegex = /<port[^>]*protocol="(tcp|udp)"[^>]*portid="(\d{1,5})"[\s\S]*?<state[^>]*state="([^"]+)"/gi;
+    let xmlMatch: RegExpExecArray | null;
+    while ((xmlMatch = xmlPortRegex.exec(rawText)) !== null) {
+      addEntry(Number(xmlMatch[2]), xmlMatch[1].toLowerCase() as Port["protocol"], xmlMatch[3]);
+    }
+
+    return Array.from(entries.values()).sort((left, right) => left.port_number - right.port_number);
+  };
+
+  const importPortsFromNmapFile = async (file: File | null) => {
+    if (!file || !projectId || !hostId) {
+      return;
+    }
+    setNmapImporting(true);
+    setError(null);
+    setInfoMessage(null);
+    try {
+      const rawText = await file.text();
+      const parsedPorts = parseNmapPortsFromText(rawText);
+      if (!parsedPorts.length) {
+        throw new Error("В Nmap файле не найдено портов для импорта.");
+      }
+      const existingKeys = new Set((host?.ports ?? []).map((item) => `${item.port_number}/${item.protocol}`));
+      let created = 0;
+      let skipped = 0;
+      let failed = 0;
+      for (const entry of parsedPorts) {
+        const key = `${entry.port_number}/${entry.protocol}`;
+        if (existingKeys.has(key)) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          await createPort(projectId, hostId, entry);
+          existingKeys.add(key);
+          created += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      await loadHost();
+      setInfoMessage(`Nmap импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}.`);
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "Не удалось импортировать порты из Nmap.");
+    } finally {
+      setNmapImporting(false);
+    }
+  };
+
   const openCreateServiceDialog = (portId: string) => {
     setCreateServicePortId(portId);
     setCreatingServiceName("");
@@ -532,7 +651,7 @@ export function HostDetailPage() {
     setError(null);
     setInfoMessage(null);
     try {
-      const rawText = await file.text();
+      const rawText = (await file.text()).replace(/^\uFEFF/, "");
       let parsedSpec: unknown;
       const lowerCaseName = file.name.toLowerCase();
       const looksLikeYaml = lowerCaseName.endsWith(".yaml") || lowerCaseName.endsWith(".yml");
@@ -543,6 +662,10 @@ export function HostDetailPage() {
           try {
             parsedSpec = parseYaml(rawText);
           } catch {
+            const looksLikeBrokenPseudoJson = /(^|\n)\s*swagger\s+2\.0\s*,?/i.test(rawText) && !/"swagger"\s*:\s*"2\.0"/i.test(rawText);
+            if (looksLikeBrokenPseudoJson) {
+              throw new Error("Swagger файл повреждён: отсутствуют JSON-кавычки/двоеточия. Сохрани файл как валидный JSON или YAML.");
+            }
             throw new Error("Swagger/OpenAPI файл должен быть валидным JSON или YAML.");
           }
         } else {
@@ -552,26 +675,83 @@ export function HostDetailPage() {
       if (!parsedSpec || typeof parsedSpec !== "object") {
         throw new Error("Некорректный Swagger/OpenAPI документ.");
       }
-      const paths = (parsedSpec as { paths?: Record<string, Record<string, Record<string, unknown>>> }).paths;
+      const specObject = parsedSpec as { paths?: Record<string, unknown>; basePath?: string };
+      const paths = specObject.paths;
       if (!paths || typeof paths !== "object") {
         throw new Error("В Swagger/OpenAPI документе отсутствует объект paths.");
       }
+      const basePath = (typeof specObject.basePath === "string" ? specObject.basePath : "").trim();
+
+      const extractHostFromSpec = () => {
+        const swaggerHost = typeof (specObject as { host?: unknown }).host === "string" ? String((specObject as { host?: string }).host).trim() : "";
+        if (swaggerHost) {
+          return swaggerHost.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+        }
+        const servers = (specObject as { servers?: Array<{ url?: unknown }> }).servers;
+        if (Array.isArray(servers)) {
+          for (const server of servers) {
+            if (!server || typeof server.url !== "string") {
+              continue;
+            }
+            try {
+              const parsed = new URL(server.url);
+              if (parsed.hostname) {
+                return parsed.hostname;
+              }
+            } catch {
+              // ignore invalid URL entries and continue
+            }
+          }
+        }
+        return "";
+      };
+
+      let targetHostId = hostId;
+      const specHost = extractHostFromSpec();
+      const currentHostTarget = (host?.hostname || host?.ip_address || "").toLowerCase();
+      const normalizedSpecHost = specHost.toLowerCase();
+      const shouldOfferCreateHost = Boolean(projectId && normalizedSpecHost && normalizedSpecHost !== currentHostTarget);
+      if (shouldOfferCreateHost && projectId) {
+        const shouldCreateHost = window.confirm(
+          `В Swagger найден хост "${specHost}". Создать новый хост и импортировать эндпоинты туда?\n\nНажми "Отмена", чтобы импортировать в текущий хост.`
+        );
+        if (shouldCreateHost) {
+          const isIpAddress = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(specHost);
+          const createdHost = await createHost(projectId, {
+            ip_address: isIpAddress ? specHost : undefined,
+            hostname: isIpAddress ? undefined : specHost,
+            notes: "Создано автоматически из Swagger/OpenAPI импорта",
+            status: "unknown",
+          });
+          targetHostId = createdHost.id;
+        }
+      }
+
+      if (!targetHostId) {
+        throw new Error("Не удалось определить хост для импорта.");
+      }
+
       const methodOrder = ["get", "post", "put", "patch", "delete", "head", "options"] as const;
+      const methodSet = new Set(methodOrder);
       const operations: Array<{ method: Exclude<Endpoint["method"], null>; path: string; description?: string }> = [];
-      Object.entries(paths).forEach(([pathValue, pathItem]) => {
+      Object.entries(paths as Record<string, unknown>).forEach(([pathValue, pathItem]) => {
         if (!pathItem || typeof pathItem !== "object") {
           return;
         }
-        methodOrder.forEach((methodName) => {
-          const operation = pathItem[methodName];
+        Object.entries(pathItem as Record<string, unknown>).forEach(([rawMethodName, operation]) => {
+          const methodName = rawMethodName.toLowerCase();
+          if (!methodSet.has(methodName as (typeof methodOrder)[number])) {
+            return;
+          }
           if (!operation || typeof operation !== "object") {
             return;
           }
           const opInfo = operation as { summary?: string; description?: string };
           const combinedDescription = [opInfo.summary, opInfo.description].filter(Boolean).join("\n\n");
+          const normalizedPath = `${basePath}${pathValue}`.replace(/\/{2,}/g, "/");
           operations.push({
             method: methodName.toUpperCase() as Exclude<Endpoint["method"], null>,
-            path: pathValue,
+            path: normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`,
             description: combinedDescription || undefined,
           });
         });
@@ -579,7 +759,9 @@ export function HostDetailPage() {
       if (!operations.length) {
         throw new Error("В Swagger/OpenAPI документе не найдено методов для импорта.");
       }
-      const existingKeys = new Set((host?.endpoints ?? []).map((item) => `${item.method ?? "ANY"}:${item.path}`));
+      const existingKeys = new Set(
+        (targetHostId === hostId ? host?.endpoints ?? [] : []).map((item) => `${item.method ?? "ANY"}:${item.path}`)
+      );
       let created = 0;
       let skipped = 0;
       let failed = 0;
@@ -590,15 +772,23 @@ export function HostDetailPage() {
           continue;
         }
         try {
-          await createEndpoint(projectId, hostId, operation);
+          await createEndpoint(projectId, targetHostId, operation);
           existingKeys.add(key);
           created += 1;
         } catch {
           failed += 1;
         }
       }
-      await loadHost();
-      setInfoMessage(`Swagger импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}.`);
+      if (targetHostId === hostId) {
+        await loadHost();
+      } else {
+        navigate(`/projects/${projectId}/hosts/${targetHostId}`);
+      }
+      setInfoMessage(
+        `Swagger импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}${
+          targetHostId !== hostId ? ` (в хост ${specHost || "из Swagger"})` : ""
+        }.`
+      );
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : "Не удалось импортировать Swagger/OpenAPI.");
     } finally {
@@ -700,9 +890,6 @@ export function HostDetailPage() {
             Хост: {hostTitle}
           </Typography>
         </Stack>
-        <IconButton onClick={openHostActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", borderRadius: 2 }}>
-          <MoreVertIcon />
-        </IconButton>
       </Stack>
 
       <Menu
@@ -803,9 +990,14 @@ export function HostDetailPage() {
             <Stack spacing={2}>
               <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
                 <CardContent>
-                  <Typography variant="h6" fontWeight={700} mb={1}>
-                    Описание хоста
-                  </Typography>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                    <Typography variant="h6" fontWeight={700}>
+                      Описание хоста
+                    </Typography>
+                    <IconButton size="small" onClick={openHostActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", borderRadius: 1 }}>
+                      <MoreVertIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
                   <Box sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0 }}>
                     <ReactMarkdown>{host?.notes || "_Описание хоста не заполнено_"}</ReactMarkdown>
                   </Box>
@@ -821,11 +1013,28 @@ export function HostDetailPage() {
                   <Typography variant="h6" fontWeight={700}>
                     Порты
                   </Typography>
-                  <Tooltip title="Добавить порт">
-                    <IconButton size="small" onClick={() => setCreatePortOpen(true)}>
-                      <AddIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
+                  <Stack direction="row" spacing={0.5}>
+                    <Tooltip title="Импортировать порты из Nmap">
+                      <IconButton size="small" component="label" disabled={nmapImporting}>
+                        <UploadFileIcon fontSize="small" />
+                        <input
+                          hidden
+                          type="file"
+                          accept=".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml"
+                          onChange={(event) => {
+                            const selectedFile = event.target.files?.[0] ?? null;
+                            void importPortsFromNmapFile(selectedFile);
+                            event.target.value = "";
+                          }}
+                        />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Добавить порт">
+                      <IconButton size="small" onClick={() => setCreatePortOpen(true)}>
+                        <AddIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
                 </Stack>
                 <Stack spacing={1}>
                   {host?.ports.map((port) => (

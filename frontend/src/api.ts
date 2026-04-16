@@ -13,6 +13,7 @@ import type {
   PaginatedResponse,
   Port,
   Project,
+  ProjectFolder,
   ProjectMember,
   User,
   Vulnerability,
@@ -70,48 +71,8 @@ export async function getMe(): Promise<User> {
 }
 
 export async function getUsers(page = 1, size = 200): Promise<PaginatedResponse<User>> {
-  // #region agent log
-  fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-    body: JSON.stringify({
-      sessionId: "a74592",
-      runId: "users-422-post-fix",
-      hypothesisId: "H11",
-      location: "api.ts:getUsers:request",
-      message: "Requesting users list",
-      data: { page, size },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
-  try {
-    const { data } = await api.get<PaginatedResponse<User>>("/users", { params: { page, size } });
-    return data;
-  } catch (error) {
-    const axiosError = error as { response?: { status?: number; data?: unknown } };
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-      body: JSON.stringify({
-        sessionId: "a74592",
-        runId: "users-422-post-fix",
-        hypothesisId: "H12",
-        location: "api.ts:getUsers:error",
-        message: "Users list request failed",
-        data: {
-          page,
-          size,
-          status: axiosError.response?.status ?? null,
-          responseData: axiosError.response?.data ?? null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-    throw error;
-  }
+  const { data } = await api.get<PaginatedResponse<User>>("/users", { params: { page, size } });
+  return data;
 }
 
 export async function getProjects(page = 1, size = 20, status?: Project["status"]): Promise<PaginatedResponse<Project>> {
@@ -119,8 +80,24 @@ export async function getProjects(page = 1, size = 20, status?: Project["status"
   return data;
 }
 
+export async function getProjectFolders(): Promise<ProjectFolder[]> {
+  const { data } = await api.get<ProjectFolder[]>("/projects/folders");
+  return data;
+}
+
+export async function createProjectFolder(payload: { name: string; parent_id?: string | null }): Promise<ProjectFolder> {
+  const { data } = await api.post<ProjectFolder>("/projects/folders", payload);
+  return data;
+}
+
+export async function moveProjectFolder(folderId: string, payload: { parent_id?: string | null }): Promise<ProjectFolder> {
+  const { data } = await api.patch<ProjectFolder>(`/projects/folders/${folderId}/move`, payload);
+  return data;
+}
+
 export async function createProject(payload: {
   name: string;
+  folder?: string;
   description?: string;
   start_date?: string;
   end_date?: string;
@@ -138,6 +115,7 @@ export async function updateProject(
   projectId: string,
   payload: {
     name?: string;
+    folder?: string;
     description?: string;
     start_date?: string;
     end_date?: string;

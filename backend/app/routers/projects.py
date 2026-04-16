@@ -9,6 +9,9 @@ from app.models import User
 from app.pagination import PageParams, to_paginated_response
 from app.schemas import (
     ProjectCreate,
+    ProjectFolderCreate,
+    ProjectFolderMove,
+    ProjectFolderOut,
     ProjectMemberCreate,
     ProjectMemberOut,
     ProjectOut,
@@ -43,6 +46,43 @@ async def create_project(
     """Создаёт проект."""
     project = await ProjectService(db).create_project(payload.model_dump(), admin.id, get_client_ip(request))
     return ProjectOut.model_validate(project)
+
+
+@router.get("/folders", response_model=list[ProjectFolderOut])
+async def list_project_folders(
+    _: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ProjectFolderOut]:
+    """Возвращает дерево папок проектов (плоским списком)."""
+    items = await ProjectService(db).list_folders()
+    return [ProjectFolderOut.model_validate(folder) for folder in items]
+
+
+@router.post("/folders", response_model=ProjectFolderOut, status_code=status.HTTP_201_CREATED)
+async def create_project_folder(
+    payload: ProjectFolderCreate,
+    request: Request,
+    _: None = Depends(enforce_csrf),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectFolderOut:
+    """Создаёт папку проекта (в т.ч. вложенную)."""
+    folder = await ProjectService(db).create_folder(payload.name, payload.parent_id, admin.id, get_client_ip(request))
+    return ProjectFolderOut.model_validate(folder)
+
+
+@router.patch("/folders/{folder_id}/move", response_model=ProjectFolderOut)
+async def move_project_folder(
+    folder_id: UUID,
+    payload: ProjectFolderMove,
+    request: Request,
+    _: None = Depends(enforce_csrf),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectFolderOut:
+    """Перемещает папку проекта в другой раздел дерева."""
+    folder = await ProjectService(db).move_folder(folder_id, payload.parent_id, admin.id, get_client_ip(request))
+    return ProjectFolderOut.model_validate(folder)
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -117,3 +157,5 @@ async def remove_member(
 ) -> None:
     """Удаляет участника из проекта."""
     await ProjectService(db).remove_member(project_id, user_id, admin.id, get_client_ip(request))
+
+
