@@ -29,16 +29,34 @@ export interface Project {
   updated_at: string;
 }
 
+export interface ProjectMember {
+  user_id: string;
+  username: string;
+  email: string;
+  role: UserRole;
+  added_at: string;
+}
+
 export interface Host {
   id: string;
   project_id: string;
   ip_address: string | null;
   hostname: string | null;
-  os: string | null;
   status: "up" | "down" | "unknown";
   notes: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface HostDetails extends Host {
+  ports: Port[];
+  endpoints: Endpoint[];
+}
+
+export interface HostTreeStats {
+  portsCount: number;
+  endpointsCount: number;
+  vulnerabilitiesCount: number;
 }
 
 export interface Port {
@@ -78,6 +96,13 @@ export interface Vulnerability {
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface VulnerabilityAsset {
+  id: string;
+  vulnerability_id: string;
+  asset_type: "host" | "port" | "service" | "endpoint";
+  asset_id: string;
 }
 
 export interface Notification {

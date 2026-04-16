@@ -420,13 +420,34 @@ class AssetService:
             "project_id": host.project_id,
             "ip_address": host.ip_address,
             "hostname": host.hostname,
-            "os": host.os,
             "status": host.status,
             "notes": host.notes,
             "created_at": host.created_at,
             "updated_at": host.updated_at,
-            "ports": ports,
-            "endpoints": endpoints,
+            "ports": [
+                {
+                    "id": port.id,
+                    "host_id": port.host_id,
+                    "port_number": port.port_number,
+                    "protocol": port.protocol,
+                    "state": port.state,
+                    "created_at": port.created_at,
+                    "updated_at": port.updated_at,
+                }
+                for port in ports
+            ],
+            "endpoints": [
+                {
+                    "id": endpoint.id,
+                    "host_id": endpoint.host_id,
+                    "path": endpoint.path,
+                    "method": endpoint.method,
+                    "description": endpoint.description,
+                    "created_at": endpoint.created_at,
+                    "updated_at": endpoint.updated_at,
+                }
+                for endpoint in endpoints
+            ],
         }
 
     async def update_host(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Host:
@@ -476,6 +497,20 @@ class AssetService:
 
     async def update_port(self, project_id: UUID, host_id: UUID, port_id: UUID, payload: dict, actor_id: UUID) -> Port:
         port = await self._get_port(host_id, port_id)
+        next_port_number = payload.get("port_number", port.port_number)
+        next_protocol = payload.get("protocol", port.protocol)
+        duplicate = await self.db.scalar(
+            select(Port).where(
+                and_(
+                    Port.host_id == host_id,
+                    Port.id != port.id,
+                    Port.port_number == next_port_number,
+                    Port.protocol == next_protocol,
+                )
+            )
+        )
+        if duplicate:
+            raise ConflictError("Порт с таким номером и протоколом уже существует")
         for key, value in payload.items():
             if value is not None:
                 setattr(port, key, value)
@@ -584,6 +619,33 @@ class VulnerabilityService:
 
     async def list(self, project_id: UUID, page: int, size: int, severity: str | None, status: str | None) -> tuple[list[Vulnerability], int]:
         query = select(Vulnerability).where(Vulnerability.project_id == project_id)
+        if severity:
+            query = query.where(Vulnerability.severity == severity)
+        if status:
+            query = query.where(Vulnerability.status == status)
+        total = await self.db.scalar(select(func.count()).select_from(query.subquery())) or 0
+        items = (await self.db.scalars(query.order_by(Vulnerability.created_at.desc()).offset((page - 1) * size).limit(size))).all()
+        return list(items), total
+
+    async def list_for_host(
+        self, project_id: UUID, host_id: UUID, page: int, size: int, severity: str | None, status: str | None
+    ) -> tuple[list[Vulnerability], int]:
+        host_exists = await self.db.scalar(select(Host.id).where(and_(Host.id == host_id, Host.project_id == project_id)))
+        if not host_exists:
+            raise NotFoundError("Хост не найден")
+
+        query = (
+            select(Vulnerability)
+            .join(VulnerabilityAsset, VulnerabilityAsset.vulnerability_id == Vulnerability.id)
+            .where(
+                and_(
+                    Vulnerability.project_id == project_id,
+                    VulnerabilityAsset.asset_type == AssetType.HOST,
+                    VulnerabilityAsset.asset_id == host_id,
+                )
+            )
+            .distinct()
+        )
         if severity:
             query = query.where(Vulnerability.severity == severity)
         if status:
@@ -993,7 +1055,6 @@ class ImportService:
                     project_id=project_id,
                     ip_address=host_data.get("ip_address"),
                     hostname=host_data.get("hostname"),
-                    os=host_data.get("os"),
                     status=host_data.get("status", "unknown"),
                     notes=host_data.get("notes"),
                 )

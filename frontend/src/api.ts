@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Endpoint, Host, Notification, PaginatedResponse, Port, Project, User, Vulnerability } from "./types";
+import type { Endpoint, Host, HostDetails, Notification, PaginatedResponse, Port, Project, ProjectMember, User, Vulnerability, VulnerabilityAsset } from "./types";
 
 const api = axios.create({
   baseURL: "/api/v1",
@@ -66,6 +66,11 @@ export async function createProject(payload: {
   return data;
 }
 
+export async function getProjectMembers(projectId: string): Promise<ProjectMember[]> {
+  const { data } = await api.get<ProjectMember[]>(`/projects/${projectId}/members`);
+  return data;
+}
+
 export async function getHosts(projectId: string): Promise<PaginatedResponse<Host>> {
   const { data } = await api.get<PaginatedResponse<Host>>(`/projects/${projectId}/hosts`, {
     params: { page: 1, size: 100 },
@@ -78,13 +83,35 @@ export async function createHost(
   payload: {
     ip_address?: string;
     hostname?: string;
-    os?: string;
     notes?: string;
     status?: "up" | "down" | "unknown";
   }
 ): Promise<Host> {
   const { data } = await api.post<Host>(`/projects/${projectId}/hosts`, payload);
   return data;
+}
+
+export async function getHost(projectId: string, hostId: string): Promise<HostDetails> {
+  const { data } = await api.get<HostDetails>(`/projects/${projectId}/hosts/${hostId}`);
+  return data;
+}
+
+export async function updateHost(
+  projectId: string,
+  hostId: string,
+  payload: {
+    ip_address?: string;
+    hostname?: string;
+    notes?: string;
+    status?: "up" | "down" | "unknown";
+  }
+): Promise<Host> {
+  const { data } = await api.put<Host>(`/projects/${projectId}/hosts/${hostId}`, payload);
+  return data;
+}
+
+export async function deleteHost(projectId: string, hostId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/hosts/${hostId}`);
 }
 
 export async function getPorts(projectId: string, hostId: string): Promise<Port[]> {
@@ -105,6 +132,24 @@ export async function createPort(
   return data;
 }
 
+export async function updatePort(
+  projectId: string,
+  hostId: string,
+  portId: string,
+  payload: {
+    port_number?: number;
+    protocol?: "tcp" | "udp";
+    state?: "open" | "closed" | "filtered";
+  }
+): Promise<Port> {
+  const { data } = await api.put<Port>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}`, payload);
+  return data;
+}
+
+export async function deletePort(projectId: string, hostId: string, portId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}`);
+}
+
 export async function getEndpoints(projectId: string, hostId: string): Promise<Endpoint[]> {
   const { data } = await api.get<Endpoint[]>(`/projects/${projectId}/hosts/${hostId}/endpoints`);
   return data;
@@ -121,6 +166,24 @@ export async function createEndpoint(
 ): Promise<Endpoint> {
   const { data } = await api.post<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
   return data;
+}
+
+export async function updateEndpoint(
+  projectId: string,
+  hostId: string,
+  endpointId: string,
+  payload: {
+    path?: string;
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
+    description?: string;
+  }
+): Promise<Endpoint> {
+  const { data } = await api.put<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`, payload);
+  return data;
+}
+
+export async function deleteEndpoint(projectId: string, hostId: string, endpointId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`);
 }
 
 export async function getVulnerabilities(projectId: string): Promise<PaginatedResponse<Vulnerability>> {
@@ -140,6 +203,43 @@ export async function createVulnerability(
   }
 ): Promise<Vulnerability> {
   const { data } = await api.post<Vulnerability>(`/projects/${projectId}/vulnerabilities`, payload);
+  return data;
+}
+
+export async function updateVulnerability(
+  projectId: string,
+  vulnerabilityId: string,
+  payload: {
+    title?: string;
+    description?: string;
+    severity?: "critical" | "high" | "medium" | "low" | "info";
+    status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
+  }
+): Promise<Vulnerability> {
+  const { data } = await api.put<Vulnerability>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`, payload);
+  return data;
+}
+
+export async function deleteVulnerability(projectId: string, vulnerabilityId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
+}
+
+export async function getHostVulnerabilities(projectId: string, hostId: string): Promise<PaginatedResponse<Vulnerability>> {
+  const { data } = await api.get<PaginatedResponse<Vulnerability>>(`/projects/${projectId}/hosts/${hostId}/vulnerabilities`, {
+    params: { page: 1, size: 100 },
+  });
+  return data;
+}
+
+export async function addVulnerabilityAsset(
+  projectId: string,
+  vulnerabilityId: string,
+  payload: {
+    asset_type: "host" | "port" | "service" | "endpoint";
+    asset_id: string;
+  }
+): Promise<VulnerabilityAsset> {
+  const { data } = await api.post<VulnerabilityAsset>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets`, payload);
   return data;
 }
 
