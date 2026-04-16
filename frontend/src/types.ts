@@ -105,6 +105,45 @@ export interface VulnerabilityAsset {
   asset_id: string;
 }
 
+export interface VulnerabilityFile {
+  id: string;
+  original_name: string;
+  content_type: string;
+  size_bytes: number;
+  uploaded_by: string;
+  uploaded_at: string;
+}
+
+export interface Mention {
+  user_id: string;
+  username: string;
+}
+
+export interface VulnerabilityComment {
+  id: string;
+  vulnerability_id: string;
+  user_id: string;
+  username: string;
+  content: string;
+  mentions: Mention[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VulnerabilityDetails extends Vulnerability {
+  assets: VulnerabilityAsset[];
+  files: VulnerabilityFile[];
+  comments_count: number;
+}
+
+export interface ImportResult {
+  hosts_created: number;
+  ports_created: number;
+  services_created: number;
+  endpoints_created: number;
+  errors: string[];
+}
+
 export interface Notification {
   id: string;
   type: string;
