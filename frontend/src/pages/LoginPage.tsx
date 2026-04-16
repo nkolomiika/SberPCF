@@ -18,13 +18,25 @@ export function LoginPage() {
   };
 
   return (
-    <Box display="flex" minHeight="100vh" alignItems="center" justifyContent="center" sx={{ p: 2 }}>
-      <Paper elevation={6} sx={{ width: 420, p: 4 }}>
+    <Box
+      display="flex"
+      minHeight="100vh"
+      alignItems="center"
+      justifyContent="center"
+      sx={{
+        p: 2,
+        background: "linear-gradient(180deg, #08111F 0%, #0B1220 100%)",
+      }}
+    >
+      <Paper elevation={6} sx={{ width: 460, maxWidth: "100%", p: 4.5, borderRadius: 0 }}>
+        <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.8, fontWeight: 700 }}>
+          Pentest Workspace
+        </Typography>
         <Typography variant="h4" fontWeight={700} gutterBottom>
-          PCF
+          Вход в PCF
         </Typography>
         <Typography color="text.secondary" sx={{ mb: 3 }}>
-          Вход в систему
+          Открой проекты, активы и рабочие заметки команды в едином интерфейсе.
         </Typography>
         <Stack component="form" spacing={2} onSubmit={handleSubmit}>
           {error && <Alert severity="error">{error}</Alert>}
@@ -37,7 +49,7 @@ export function LoginPage() {
             type="password"
           />
           <Button disabled={isLoading} type="submit" variant="contained" size="large">
-            Войти
+            {isLoading ? "Вход..." : "Войти"}
           </Button>
         </Stack>
       </Paper>

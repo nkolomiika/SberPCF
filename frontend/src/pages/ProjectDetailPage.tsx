@@ -35,8 +35,10 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  addVulnerabilityAsset,
   createHost,
   createVulnerabilityComment,
+  deleteVulnerabilityAsset,
   addProjectMember,
   deleteVulnerability,
   deleteVulnerabilityComment,
@@ -46,6 +48,7 @@ import {
   getHostVulnerabilities,
   getHosts,
   getPorts,
+  getServices,
   getProjectMembers,
   getUsers,
   getProject,
@@ -61,7 +64,20 @@ import {
 } from "../api";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { useAuthStore } from "../store";
-import type { Endpoint, Host, HostTreeStats, ImportResult, Port, ProjectMember, User, Vulnerability, VulnerabilityComment, VulnerabilityDetails, VulnerabilityFile } from "../types";
+import type {
+  Endpoint,
+  Host,
+  HostTreeStats,
+  ImportResult,
+  Port,
+  ProjectMember,
+  Service,
+  User,
+  Vulnerability,
+  VulnerabilityComment,
+  VulnerabilityDetails,
+  VulnerabilityFile,
+} from "../types";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
@@ -123,6 +139,12 @@ export function ProjectDetailPage() {
   const [activeVuln, setActiveVuln] = useState<VulnerabilityDetails | null>(null);
   const [vulnFiles, setVulnFiles] = useState<VulnerabilityFile[]>([]);
   const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
+  const [assetHosts, setAssetHosts] = useState<Host[]>([]);
+  const [assetPorts, setAssetPorts] = useState<Port[]>([]);
+  const [assetEndpoints, setAssetEndpoints] = useState<Endpoint[]>([]);
+  const [assetServices, setAssetServices] = useState<Service[]>([]);
+  const [linkAssetType, setLinkAssetType] = useState<"host" | "port" | "service" | "endpoint">("host");
+  const [linkAssetId, setLinkAssetId] = useState("");
   const [newComment, setNewComment] = useState("");
   const [vulnBusy, setVulnBusy] = useState(false);
   const [editCommentOpen, setEditCommentOpen] = useState(false);
@@ -382,6 +404,22 @@ export function ProjectDetailPage() {
   const selectedHost = hosts.find((host) => host.id === selectedHostId) ?? null;
   const hostLabel = selectedHost ? selectedHost.hostname || selectedHost.ip_address || "unknown-host" : "Хост не выбран";
 
+  const loadHostAssetsCatalog = async () => {
+    if (!projectId || !selectedHostId || !selectedHost) {
+      setAssetHosts([]);
+      setAssetPorts([]);
+      setAssetEndpoints([]);
+      setAssetServices([]);
+      return;
+    }
+    const [hostPorts, hostEndpoints] = await Promise.all([getPorts(projectId, selectedHostId), getEndpoints(projectId, selectedHostId)]);
+    const hostServices = (await Promise.all(hostPorts.map(async (port) => await getServices(projectId, selectedHostId, port.id)))).flat();
+    setAssetHosts([selectedHost]);
+    setAssetPorts(hostPorts);
+    setAssetEndpoints(hostEndpoints);
+    setAssetServices(hostServices);
+  };
+
   const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
     if (!projectId) {
       return;
@@ -397,6 +435,7 @@ export function ProjectDetailPage() {
       setActiveVuln(vulnDetail);
       setVulnFiles(files);
       setVulnComments(commentsPage.items);
+      await loadHostAssetsCatalog();
       setVulnDetailOpen(true);
     } catch {
       setError("Не удалось загрузить карточку уязвимости");
@@ -479,6 +518,84 @@ export function ProjectDetailPage() {
       setVulnFiles(files);
     } catch {
       setError("Не удалось удалить файл");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const linkAssetOptions = useMemo(() => {
+    if (linkAssetType === "host") {
+      return assetHosts.map((host) => ({
+        id: host.id,
+        label: `Host: ${host.hostname || host.ip_address || host.id}`,
+      }));
+    }
+    if (linkAssetType === "port") {
+      return assetPorts.map((port) => ({
+        id: port.id,
+        label: `Port: ${port.port_number}/${port.protocol}`,
+      }));
+    }
+    if (linkAssetType === "service") {
+      return assetServices.map((service) => ({
+        id: service.id,
+        label: `Service: ${service.name}${service.version ? ` ${service.version}` : ""}`,
+      }));
+    }
+    return assetEndpoints.map((endpoint) => ({
+      id: endpoint.id,
+      label: `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}`,
+    }));
+  }, [assetEndpoints, assetHosts, assetPorts, assetServices, linkAssetType]);
+
+  const resolveAssetLabel = (assetType: string, assetId: string) => {
+    if (assetType === "host") {
+      const host = assetHosts.find((item) => item.id === assetId);
+      return host ? `Host: ${host.hostname || host.ip_address || host.id}` : `host:${assetId}`;
+    }
+    if (assetType === "port") {
+      const port = assetPorts.find((item) => item.id === assetId);
+      return port ? `Port: ${port.port_number}/${port.protocol}` : `port:${assetId}`;
+    }
+    if (assetType === "service") {
+      const service = assetServices.find((item) => item.id === assetId);
+      return service ? `Service: ${service.name}${service.version ? ` ${service.version}` : ""}` : `service:${assetId}`;
+    }
+    const endpoint = assetEndpoints.find((item) => item.id === assetId);
+    return endpoint ? `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}` : `endpoint:${assetId}`;
+  };
+
+  const addAssetLinkToActiveVuln = async () => {
+    if (!projectId || !activeVuln || !linkAssetId) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      await addVulnerabilityAsset(projectId, activeVuln.id, {
+        asset_type: linkAssetType,
+        asset_id: linkAssetId,
+      });
+      await loadVulnerabilityDetails(activeVuln.id);
+      setLinkAssetId("");
+    } catch {
+      setError("Не удалось привязать актив к уязвимости");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeAssetLinkFromActiveVuln = async (assetLinkId: string) => {
+    if (!projectId || !activeVuln) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      await deleteVulnerabilityAsset(projectId, activeVuln.id, assetLinkId);
+      await loadVulnerabilityDetails(activeVuln.id);
+    } catch {
+      setError("Не удалось удалить привязку актива");
     } finally {
       setVulnBusy(false);
     }
@@ -685,11 +802,17 @@ export function ProjectDetailPage() {
       {error && <Alert severity="error">{error}</Alert>}
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Box>
+          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.4, fontWeight: 700 }}>
+            Project Workspace
+          </Typography>
           <Typography variant="h4" fontWeight={700}>
             {projectName ? `Проект: ${projectName}` : "Проект"}
           </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6, maxWidth: 760 }}>
+            Управление сроками, участниками, активами и уязвимостями в одном контексте проекта.
+          </Typography>
         </Box>
-        <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", borderRadius: 2 }}>
+        <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", width: 42, height: 42, backgroundColor: "rgba(15,27,45,0.72)" }}>
           <MoreVertIcon />
         </IconButton>
       </Stack>
@@ -770,7 +893,7 @@ export function ProjectDetailPage() {
 
         <Stack flex={1} spacing={2}>
           {selectedSection !== "overview" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.18)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Typography variant="h6" fontWeight={700}>
                   {selectedSection === "hosts" && `Хост: ${hostLabel}`}
@@ -779,7 +902,7 @@ export function ProjectDetailPage() {
                   {selectedSection === "vulns" && `Уязвимости хоста: ${hostLabel}`}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  Слева — древовидная навигация по проекту, как в wiki-страницах.
+                  Выбранный раздел открыт в рабочей области, а навигация слева сохраняет структуру проекта и хостов.
                 </Typography>
               </CardContent>
             </Card>
@@ -787,7 +910,7 @@ export function ProjectDetailPage() {
 
           {selectedSection === "overview" && (
             <Stack spacing={2}>
-              <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
                 <CardContent>
                   <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1} alignItems={{ md: "center" }}>
                     <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
@@ -825,6 +948,10 @@ export function ProjectDetailPage() {
                             display: "grid",
                             gridTemplateColumns: `repeat(${timelineBar.totalDays}, minmax(12px, 1fr))`,
                             gap: 0.5,
+                            p: 1,
+                            border: "1px solid rgba(126,224,255,0.12)",
+                            borderRadius: 0,
+                            backgroundColor: "rgba(8,17,31,0.34)",
                           }}
                         >
                           {timelineBar.cells.map((cell, index) => (
@@ -857,7 +984,7 @@ export function ProjectDetailPage() {
               </Card>
               <Grid container spacing={2}>
                 <Grid size={{ xs: 12, md: 6 }}>
-                  <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0, height: "100%" }}>
+                  <Card sx={{ border: "1px solid rgba(126,224,255,0.14)", height: "100%" }}>
                     <CardContent>
                       <Typography color="text.secondary" mb={1}>
                         Хосты проекта
@@ -865,12 +992,17 @@ export function ProjectDetailPage() {
                       <Typography variant="h4" fontWeight={700}>
                         {hosts.length}
                       </Typography>
-                      <Stack spacing={0.6} mt={1} sx={{ maxHeight: 130, overflowY: "auto", pr: 0.5 }}>
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.2 }}>
+                        Активные хосты и инфраструктурные узлы проекта.
+                      </Typography>
+                      <Stack spacing={0.8} mt={1} sx={{ maxHeight: 160, overflowY: "auto", pr: 0.5 }}>
                         {hosts.length > 0 ? (
                           hosts.map((host) => (
-                            <Typography key={host.id} variant="body2" color="text.secondary">
-                              {host.hostname || host.ip_address || "unknown-host"}
-                            </Typography>
+                            <Box key={host.id} sx={{ px: 1.2, py: 0.9, border: "1px solid rgba(126,224,255,0.10)", borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
+                              <Typography variant="body2" color="text.primary">
+                                {host.hostname || host.ip_address || "unknown-host"}
+                              </Typography>
+                            </Box>
                           ))
                         ) : (
                           <Typography color="text.secondary">Хосты не добавлены</Typography>
@@ -880,7 +1012,7 @@ export function ProjectDetailPage() {
                   </Card>
                 </Grid>
                 <Grid size={{ xs: 12, md: 6 }}>
-                  <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0, height: "100%" }}>
+                  <Card sx={{ border: "1px solid rgba(126,224,255,0.14)", height: "100%" }}>
                     <CardContent sx={{ height: "100%" }}>
                       <Typography color="text.secondary" mb={1}>
                         Участники проекта
@@ -888,12 +1020,17 @@ export function ProjectDetailPage() {
                       <Typography variant="h4" fontWeight={700} mb={1}>
                         {projectMembers.length}
                       </Typography>
-                      <Stack spacing={0.6} sx={{ maxHeight: 130, overflowY: "auto", pr: 0.5 }}>
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.2 }}>
+                        Люди, подключенные к работе по этому проекту.
+                      </Typography>
+                      <Stack spacing={0.8} sx={{ maxHeight: 160, overflowY: "auto", pr: 0.5 }}>
                         {projectMembers.length > 0 ? (
                           projectMembers.map((member) => (
-                            <Typography key={member.user_id} variant="body2" color="text.secondary">
-                              {member.username} ({member.role})
-                            </Typography>
+                            <Box key={member.user_id} sx={{ px: 1.2, py: 0.9, border: "1px solid rgba(126,224,255,0.10)", borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
+                              <Typography variant="body2" color="text.primary">
+                                {member.username} ({member.role})
+                              </Typography>
+                            </Box>
                           ))
                         ) : (
                           <Typography color="text.secondary">Участники не добавлены</Typography>
@@ -903,7 +1040,7 @@ export function ProjectDetailPage() {
                   </Card>
                 </Grid>
               </Grid>
-              <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
                 <CardContent>
                   <Typography variant="h6" fontWeight={700} mb={1}>
                     Описание проекта
@@ -917,13 +1054,13 @@ export function ProjectDetailPage() {
           )}
 
           {selectedSection === "hosts" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack spacing={1.2}>
                   {hosts.map((host) => (
                     <Box
                       key={host.id}
-                      sx={{ border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0, cursor: "pointer" }}
+                      sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.6, borderRadius: 0, cursor: "pointer", backgroundColor: "rgba(8,17,31,0.24)" }}
                       onClick={() => navigate(`/projects/${projectId}/hosts/${host.id}`)}
                     >
                       <Typography>{host.hostname || host.ip_address || "unknown-host"}</Typography>
@@ -938,11 +1075,11 @@ export function ProjectDetailPage() {
           )}
 
           {selectedSection === "ports" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack spacing={1.2}>
                   {ports.map((port) => (
-                    <Box key={port.id} sx={{ border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }}>
+                    <Box key={port.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <Typography fontWeight={600}>
                           {port.port_number}/{port.protocol}
@@ -960,11 +1097,11 @@ export function ProjectDetailPage() {
           )}
 
           {selectedSection === "endpoints" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack spacing={1.2}>
                   {endpoints.map((endpoint) => (
-                    <Box key={endpoint.id} sx={{ border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }}>
+                    <Box key={endpoint.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <Chip size="small" label={endpoint.method || "ANY"} />
                         <Typography fontWeight={600}>{endpoint.path}</Typography>
@@ -983,16 +1120,22 @@ export function ProjectDetailPage() {
           )}
 
           {selectedSection === "vulns" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack direction="row" spacing={1} mb={2} flexWrap="wrap">
-                  {Object.entries(severityStats).map(([severity, value]) => (
+                  {Object.entries(vulnerabilities.reduce(
+                    (acc, item) => {
+                      acc[item.severity] += 1;
+                      return acc;
+                    },
+                    { critical: 0, high: 0, medium: 0, low: 0, info: 0 } as Record<Vulnerability["severity"], number>
+                  )).map(([severity, value]) => (
                     <Chip key={severity} label={`${severity}: ${value}`} />
                   ))}
                 </Stack>
                 <Stack spacing={1.2}>
                   {vulnerabilities.map((item) => (
-                    <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.16)", p: 1.5, borderRadius: 0 }}>
+                    <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
                       <Stack direction="row" justifyContent="space-between" alignItems="center">
                         <Typography>{item.title}</Typography>
                         <Button size="small" variant="outlined" onClick={() => void loadVulnerabilityDetails(item.id)} disabled={vulnBusy}>
@@ -1005,9 +1148,7 @@ export function ProjectDetailPage() {
                       </Stack>
                     </Box>
                   ))}
-                  {vulnerabilities.length === 0 && (
-                    <Typography color="text.secondary">Для выбранного хоста уязвимости не привязаны.</Typography>
-                  )}
+                  {vulnerabilities.length === 0 && <Typography color="text.secondary">Для выбранного хоста уязвимости не привязаны.</Typography>}
                 </Stack>
               </CardContent>
             </Card>
@@ -1200,6 +1341,57 @@ export function ProjectDetailPage() {
                   />
                 </Grid>
               </Grid>
+
+              <Divider />
+              <Stack spacing={1}>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Привязанные активы ({activeVuln.assets.length})
+                </Typography>
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+                  <TextField
+                    select
+                    label="Тип актива"
+                    value={linkAssetType}
+                    onChange={(event) => {
+                      setLinkAssetType(event.target.value as "host" | "port" | "service" | "endpoint");
+                      setLinkAssetId("");
+                    }}
+                    sx={{ minWidth: 180 }}
+                  >
+                    <MenuItem value="host">host</MenuItem>
+                    <MenuItem value="port">port</MenuItem>
+                    <MenuItem value="service">service</MenuItem>
+                    <MenuItem value="endpoint">endpoint</MenuItem>
+                  </TextField>
+                  <TextField
+                    select
+                    label="Актив"
+                    value={linkAssetId}
+                    onChange={(event) => setLinkAssetId(event.target.value)}
+                    fullWidth
+                    disabled={linkAssetOptions.length === 0}
+                  >
+                    {linkAssetOptions.map((option) => (
+                      <MenuItem key={option.id} value={option.id}>
+                        {option.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <Button variant="outlined" disabled={!linkAssetId || vulnBusy} onClick={() => void addAssetLinkToActiveVuln()}>
+                    Привязать
+                  </Button>
+                </Stack>
+                <Stack direction="row" spacing={1} flexWrap="wrap">
+                  {activeVuln.assets.map((assetLink) => (
+                    <Chip
+                      key={assetLink.id}
+                      label={resolveAssetLabel(assetLink.asset_type, assetLink.asset_id)}
+                      onDelete={() => void removeAssetLinkFromActiveVuln(assetLink.id)}
+                    />
+                  ))}
+                  {activeVuln.assets.length === 0 && <Typography color="text.secondary">Связанные активы пока не добавлены.</Typography>}
+                </Stack>
+              </Stack>
 
               <Divider />
               <Stack spacing={1}>

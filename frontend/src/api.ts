@@ -366,6 +366,10 @@ export async function addVulnerabilityAsset(
   return data;
 }
 
+export async function deleteVulnerabilityAsset(projectId: string, vulnerabilityId: string, assetLinkId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets/${assetLinkId}`);
+}
+
 export async function listVulnerabilityFiles(projectId: string, vulnerabilityId: string): Promise<VulnerabilityFile[]> {
   const { data } = await api.get<VulnerabilityFile[]>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`);
   return data;
@@ -440,7 +444,7 @@ export async function unreadCount(): Promise<number> {
 export async function getAuditLogs(
   page = 1,
   size = 50,
-  filters?: { user_id?: string; action?: string; entity_type?: string }
+  filters?: { user_id?: string; username?: string; action?: string; entity_type?: string }
 ): Promise<PaginatedResponse<AuditLog>> {
   const { data } = await api.get<PaginatedResponse<AuditLog>>("/audit-logs", {
     params: { page, size, ...filters },

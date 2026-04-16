@@ -316,6 +316,9 @@ class ProjectService:
         await self.db.commit()
         await self.db.refresh(project)
         await self.audit.log("CREATE", user_id=actor_id, entity_type="project", entity_id=project.id, ip_address=ip_address)
+        await ws_manager.broadcast_projects_index(
+            {"event": "created", "entity": "project", "project_id": str(project.id), "data": {"id": str(project.id)}}
+        )
         return project
 
     async def update_project(self, project_id: UUID, payload: dict, actor_id: UUID, ip_address: str | None = None) -> Project:
@@ -333,6 +336,10 @@ class ProjectService:
         await self.db.commit()
         await self.db.refresh(project)
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="project", entity_id=project.id, ip_address=ip_address)
+        await ws_manager.broadcast(project.id, {"event": "updated", "entity": "project", "project_id": str(project.id), "data": {"id": str(project.id)}})
+        await ws_manager.broadcast_projects_index(
+            {"event": "updated", "entity": "project", "project_id": str(project.id), "data": {"id": str(project.id)}}
+        )
         if payload.get("status") and payload["status"] != old_status:
             await self.audit.log(
                 "STATUS_CHANGE",
@@ -350,6 +357,10 @@ class ProjectService:
         await self.db.delete(project)
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="project", entity_id=project_id, ip_address=ip_address)
+        await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "project", "project_id": str(project_id), "data": {"id": str(project_id)}})
+        await ws_manager.broadcast_projects_index(
+            {"event": "deleted", "entity": "project", "project_id": str(project_id), "data": {"id": str(project_id)}}
+        )
 
     async def list_members(self, project_id: UUID) -> list[dict]:
         """Возвращает список участников проекта."""
@@ -423,6 +434,9 @@ class ProjectService:
         await self.db.commit()
         await self.db.refresh(folder)
         await self.audit.log("CREATE", user_id=actor_id, entity_type="project_folder", entity_id=folder.id, ip_address=ip_address)
+        await ws_manager.broadcast_projects_index(
+            {"event": "created", "entity": "project_folder", "data": {"id": str(folder.id), "path": folder.path}}
+        )
         return folder
 
     async def move_folder(
@@ -488,6 +502,13 @@ class ProjectService:
             entity_id=folder.id,
             details={"from": old_path, "to": new_path},
             ip_address=ip_address,
+        )
+        await ws_manager.broadcast_projects_index(
+            {
+                "event": "updated",
+                "entity": "project_folder",
+                "data": {"id": str(folder.id), "from": old_path, "to": new_path},
+            }
         )
         return folder
 
@@ -1079,6 +1100,7 @@ class CommentService:
         mention_models: list[MentionOut] = []
         for user in mentioned_users:
             self.db.add(CommentMention(comment_id=comment.id, user_id=user.id))
+            self.db.add(Notification(user_id=user.id, type=NotificationType.MENTION, comment_id=comment.id, is_read=False))
             mention_models.append(MentionOut(user_id=user.id, username=user.username))
         await self.db.commit()
         await self.db.refresh(comment)

@@ -8,28 +8,68 @@ function createAppTheme(mode: PaletteMode) {
   const theme = createTheme({
     palette: {
       mode,
-      primary: { main: "#6EA8FE" },
+      primary: { main: "#78A9FF" },
       secondary: { main: "#7EE0FF" },
-      background: { default: "#0B1220", paper: "#121D31" },
+      success: { main: "#4ADE80" },
+      warning: { main: "#FBBF24" },
+      error: { main: "#FB7185" },
+      background: { default: "#08111F", paper: "#0F1B2D" },
       text: {
         primary: "#E2E8F0",
         secondary: "#94A3B8",
       },
+      divider: "rgba(148,163,184,0.12)",
     },
     shape: {
       borderRadius: 0,
     },
     typography: {
       fontFamily: '"Inter", "SF Pro Text", "Segoe UI", "Roboto", sans-serif',
+      h4: { fontSize: "1.85rem", fontWeight: 700, letterSpacing: -0.02 },
+      h5: { fontSize: "1.35rem", fontWeight: 700, letterSpacing: -0.02 },
+      h6: { fontSize: "1rem", fontWeight: 700, letterSpacing: -0.01 },
+      subtitle1: { fontSize: "0.95rem", fontWeight: 600 },
+      subtitle2: { fontSize: "0.85rem", fontWeight: 600, letterSpacing: 0.1 },
+      button: { fontWeight: 600 },
     },
     components: {
+      MuiCssBaseline: {
+        styleOverrides: {
+          body: {
+            backgroundImage: "linear-gradient(180deg, #08111F 0%, #0B1220 100%)",
+          },
+          "::selection": {
+            backgroundColor: "rgba(120,169,255,0.35)",
+          },
+        },
+      },
       MuiPaper: {
         styleOverrides: {
           root: {
-            backdropFilter: "blur(12px)",
+            backdropFilter: "none",
             backgroundImage: "none",
-            border: "1px solid rgba(126, 224, 255, 0.14)",
-            boxShadow: undefined,
+            border: "1px solid rgba(126, 224, 255, 0.10)",
+            boxShadow: "none",
+          },
+        },
+      },
+      MuiCard: {
+        styleOverrides: {
+          root: {
+            borderRadius: 0,
+            border: "1px solid rgba(126, 224, 255, 0.10)",
+            backgroundColor: "rgba(15, 27, 45, 0.88)",
+            boxShadow: "none",
+          },
+        },
+      },
+      MuiCardContent: {
+        styleOverrides: {
+          root: {
+            padding: 20,
+            "&:last-child": {
+              paddingBottom: 20,
+            },
           },
         },
       },
@@ -38,6 +78,77 @@ function createAppTheme(mode: PaletteMode) {
           root: {
             textTransform: "none",
             fontWeight: 600,
+            borderRadius: 0,
+            minHeight: 38,
+            paddingInline: 14,
+          },
+          contained: {
+            boxShadow: "none",
+          },
+          outlined: {
+            borderColor: "rgba(126,224,255,0.18)",
+            backgroundColor: "rgba(15,27,45,0.42)",
+          },
+        },
+      },
+      MuiIconButton: {
+        styleOverrides: {
+          root: {
+            borderRadius: 0,
+          },
+        },
+      },
+      MuiChip: {
+        styleOverrides: {
+          root: {
+            borderRadius: 0,
+            fontWeight: 600,
+          },
+        },
+      },
+      MuiTextField: {
+        defaultProps: {
+          variant: "outlined",
+          fullWidth: true,
+        },
+      },
+      MuiOutlinedInput: {
+        styleOverrides: {
+          root: {
+            borderRadius: 0,
+            backgroundColor: "rgba(8,17,31,0.55)",
+            transition: "box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease",
+            "&:hover": {
+              backgroundColor: "rgba(8,17,31,0.72)",
+            },
+            "&.Mui-focused": {
+              boxShadow: "0 0 0 4px rgba(120,169,255,0.12)",
+            },
+          },
+          notchedOutline: {
+            borderColor: "rgba(148,163,184,0.16)",
+          },
+        },
+      },
+      MuiMenu: {
+        styleOverrides: {
+          paper: {
+            borderRadius: 0,
+          },
+        },
+      },
+      MuiDialog: {
+        styleOverrides: {
+          paper: {
+            borderRadius: 0,
+            backgroundColor: "rgba(15,27,45,0.96)",
+          },
+        },
+      },
+      MuiListItemButton: {
+        styleOverrides: {
+          root: {
+            borderRadius: 0,
           },
         },
       },

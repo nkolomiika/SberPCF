@@ -18,6 +18,7 @@ async def list_audit_logs(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     user_id: UUID | None = None,
+    username: str | None = None,
     action: str | None = None,
     entity_type: str | None = None,
     _admin: User = Depends(require_admin),
@@ -28,10 +29,12 @@ async def list_audit_logs(
     conditions = []
     if user_id:
         conditions.append(AuditLog.user_id == user_id)
+    if username:
+        conditions.append(User.username.ilike(f"%{username.strip()}%"))
     if action:
-        conditions.append(AuditLog.action == action)
+        conditions.append(AuditLog.action.ilike(f"%{action.strip()}%"))
     if entity_type:
-        conditions.append(AuditLog.entity_type == entity_type)
+        conditions.append(AuditLog.entity_type.ilike(f"%{entity_type.strip()}%"))
     if conditions:
         query = query.where(and_(*conditions))
     total = await db.scalar(select(func.count()).select_from(query.subquery()))

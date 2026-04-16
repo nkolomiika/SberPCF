@@ -886,8 +886,14 @@ export function HostDetailPage() {
 
       <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
         <Stack spacing={0.2}>
+          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.4, fontWeight: 700 }}>
+            Host Workspace
+          </Typography>
           <Typography variant="h4" fontWeight={700}>
             Хост: {hostTitle}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 760 }}>
+            Детали выбранного актива, сетевые точки, endpoint-структура и привязанные уязвимости.
           </Typography>
         </Stack>
       </Stack>
@@ -939,13 +945,16 @@ export function HostDetailPage() {
                 sx={{
                   cursor: "pointer",
                   border: selectedSection === "ports" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
-                  borderRadius: 0,
+                  backgroundColor: selectedSection === "ports" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
                 }}
               >
                 <CardContent>
                   <Typography color="text.secondary">Портов хоста</Typography>
                   <Typography variant="h4" fontWeight={700}>
                     {portsCount}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6 }}>
+                    Сетевые входы и обнаруженные сервисы.
                   </Typography>
                 </CardContent>
               </Card>
@@ -956,13 +965,16 @@ export function HostDetailPage() {
                 sx={{
                   cursor: "pointer",
                   border: selectedSection === "endpoints" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
-                  borderRadius: 0,
+                  backgroundColor: selectedSection === "endpoints" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
                 }}
               >
                 <CardContent>
                   <Typography color="text.secondary">Эндпоинтов хоста</Typography>
                   <Typography variant="h4" fontWeight={700}>
                     {endpointsCount}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6 }}>
+                    HTTP-маршруты и импорт из Swagger/OpenAPI.
                   </Typography>
                 </CardContent>
               </Card>
@@ -973,13 +985,16 @@ export function HostDetailPage() {
                 sx={{
                   cursor: "pointer",
                   border: selectedSection === "vulns" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
-                  borderRadius: 0,
+                  backgroundColor: selectedSection === "vulns" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
                 }}
               >
                 <CardContent>
                   <Typography color="text.secondary">Уязвимостей хоста</Typography>
                   <Typography variant="h4" fontWeight={700}>
                     {vulnerabilitiesCount}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6 }}>
+                    Найденные проблемы и рабочие карточки исправления.
                   </Typography>
                 </CardContent>
               </Card>
@@ -988,17 +1003,17 @@ export function HostDetailPage() {
 
           {selectedSection === "overview" && (
             <Stack spacing={2}>
-              <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
                 <CardContent>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                     <Typography variant="h6" fontWeight={700}>
                       Описание хоста
                     </Typography>
-                    <IconButton size="small" onClick={openHostActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", borderRadius: 1 }}>
+                    <IconButton size="small" onClick={openHostActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", backgroundColor: "rgba(15,27,45,0.6)" }}>
                       <MoreVertIcon fontSize="small" />
                     </IconButton>
                   </Stack>
-                  <Box sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0 }}>
+                  <Box sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 2, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
                     <ReactMarkdown>{host?.notes || "_Описание хоста не заполнено_"}</ReactMarkdown>
                   </Box>
                 </CardContent>
@@ -1007,7 +1022,7 @@ export function HostDetailPage() {
           )}
 
           {selectedSection === "ports" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                   <Typography variant="h6" fontWeight={700}>
@@ -1043,8 +1058,9 @@ export function HostDetailPage() {
                       onClick={() => toggleExpandedId(port.id, setExpandedPortIds)}
                       sx={{
                         border: "1px solid rgba(126,224,255,0.12)",
-                        p: 1.2,
+                        p: 1.4,
                         borderRadius: 0,
+                        backgroundColor: "rgba(8,17,31,0.24)",
                         cursor: "pointer",
                         "& .port-actions": {
                           opacity: 0,
@@ -1100,7 +1116,7 @@ export function HostDetailPage() {
                                 direction="row"
                                 justifyContent="space-between"
                                 alignItems="center"
-                                sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 0.8, borderRadius: 0 }}
+                                sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.26)" }}
                               >
                                 <Stack spacing={0.2}>
                                   <Typography variant="body2" fontWeight={600}>
@@ -1184,7 +1200,7 @@ export function HostDetailPage() {
           )}
 
           {selectedSection === "endpoints" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                   <Typography variant="h6" fontWeight={700}>
@@ -1220,8 +1236,9 @@ export function HostDetailPage() {
                       onClick={() => toggleExpandedId(endpoint.id, setExpandedEndpointIds)}
                       sx={{
                         border: "1px solid rgba(126,224,255,0.12)",
-                        p: 1.2,
+                        p: 1.4,
                         borderRadius: 0,
+                        backgroundColor: "rgba(8,17,31,0.24)",
                         cursor: "pointer",
                         "& .endpoint-actions": {
                           opacity: 0,
@@ -1299,7 +1316,7 @@ export function HostDetailPage() {
           )}
 
           {selectedSection === "vulns" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", borderRadius: 0 }}>
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                   <Typography variant="h6" fontWeight={700}>
@@ -1318,8 +1335,9 @@ export function HostDetailPage() {
                       onClick={() => toggleExpandedId(item.id, setExpandedVulnerabilityIds)}
                       sx={{
                         border: "1px solid rgba(126,224,255,0.12)",
-                        p: 1.2,
+                        p: 1.4,
                         borderRadius: 0,
+                        backgroundColor: "rgba(8,17,31,0.24)",
                         cursor: "pointer",
                         "& .vuln-actions": {
                           opacity: 0,

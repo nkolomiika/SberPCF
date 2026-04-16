@@ -12,6 +12,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
@@ -29,7 +30,7 @@ import {
   IconButton,
   Tooltip,
 } from "@mui/material";
-import { type DragEvent, type MouseEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type DragEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   addProjectMember,
@@ -47,6 +48,7 @@ import type { Project, ProjectFolder, User } from "../types";
 
 const DEFAULT_PROJECT_DURATION_DAYS = 14;
 const DEFAULT_FOLDER_NAME = "Без папки";
+const ROOT_FOLDER_NODE: FolderTreeNode = { id: null, name: DEFAULT_FOLDER_NAME, path: DEFAULT_FOLDER_NAME, children: [], projects: [] };
 
 type FolderTreeNode = {
   id: string | null;
@@ -54,6 +56,11 @@ type FolderTreeNode = {
   path: string;
   children: FolderTreeNode[];
   projects: Project[];
+};
+
+type DragPayload = {
+  type: "project" | "folder";
+  id: string;
 };
 
 const toDateInputValue = (date: Date) => {
@@ -100,6 +107,7 @@ export function ProjectsPage() {
   const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null);
   const [draggingFolderPath, setDraggingFolderPath] = useState<string | null>(null);
   const [dragOverFolderPath, setDragOverFolderPath] = useState<string | null>(null);
+  const [dropLineTarget, setDropLineTarget] = useState<string | null>(null);
   const [, setDraggingType] = useState<"project" | "folder" | null>(null);
   const [expandedFolderPaths, setExpandedFolderPaths] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -111,6 +119,11 @@ export function ProjectsPage() {
   const [editingProjectEndDate, setEditingProjectEndDate] = useState("");
   const [editingProjectStatus, setEditingProjectStatus] = useState<Project["status"]>("active");
   const [editingProjectFolder, setEditingProjectFolder] = useState(DEFAULT_FOLDER_NAME);
+  const projectListRef = useRef<HTMLUListElement | null>(null);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  const autoScrollVelocityRef = useRef(0);
+  const autoExpandTimerRef = useRef<number | null>(null);
+  const autoExpandTargetRef = useRef<string | null>(null);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -130,6 +143,15 @@ export function ProjectsPage() {
 
   useEffect(() => {
     void loadProjects();
+  }, [loadProjects]);
+
+  useEffect(() => {
+    const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${wsProtocol}://${window.location.host}/ws/projects-index`);
+    ws.onmessage = () => {
+      void loadProjects();
+    };
+    return () => ws.close();
   }, [loadProjects]);
 
   useEffect(() => {
@@ -195,6 +217,17 @@ export function ProjectsPage() {
     sortTree(root);
     return root.children;
   }, [folderPaths, folders, visibleProjects]);
+
+  const folderPathById = useMemo(() => {
+    return new Map(folders.map((folder) => [folder.id, folder.path] as const));
+  }, [folders]);
+
+  const treeStats = useMemo(() => {
+    const totalProjects = visibleProjects.length;
+    const totalFolders = folders.length;
+    const nestedFolders = folders.filter((folder) => folder.parent_id).length;
+    return { totalProjects, totalFolders, nestedFolders };
+  }, [folders, visibleProjects]);
 
   useEffect(() => {
     if (!createOpen || user?.role !== "admin") {
@@ -379,6 +412,7 @@ export function ProjectsPage() {
     } finally {
       setDraggingProjectId(null);
       setDragOverFolderPath(null);
+      stopAutoScroll();
     }
   };
 
@@ -399,6 +433,7 @@ export function ProjectsPage() {
       setDraggingFolderId(null);
       setDraggingFolderPath(null);
       setDragOverFolderPath(null);
+      stopAutoScroll();
     }
   };
 
@@ -417,11 +452,192 @@ export function ProjectsPage() {
     event.dataTransfer.setDragImage(img, 0, 0);
   };
 
-  const renderFolderNode = (node: FolderTreeNode, depth = 0): JSX.Element => (
+  const parseDragPayload = (event: DragEvent): DragPayload | null => {
+    const raw = event.dataTransfer.getData("text/plain") || "";
+    const [type, id] = raw.split(":");
+    if ((type === "project" || type === "folder") && id) {
+      return { type, id };
+    }
+    if (draggingProjectId) {
+      return { type: "project", id: draggingProjectId };
+    }
+    if (draggingFolderId) {
+      return { type: "folder", id: draggingFolderId };
+    }
+    return null;
+  };
+
+  const getFolderSourcePath = useCallback(
+    (folderId: string) => {
+      return folderId === draggingFolderId ? draggingFolderPath : folderPathById.get(folderId) ?? null;
+    },
+    [draggingFolderId, draggingFolderPath, folderPathById]
+  );
+
+  const stopAutoScroll = useCallback(() => {
+    autoScrollVelocityRef.current = 0;
+    if (autoScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = null;
+    }
+  }, []);
+
+  const startAutoScroll = useCallback((velocity: number) => {
+    autoScrollVelocityRef.current = velocity;
+    if (autoScrollFrameRef.current !== null) {
+      return;
+    }
+    const step = () => {
+      const delta = autoScrollVelocityRef.current;
+      if (!delta) {
+        autoScrollFrameRef.current = null;
+        return;
+      }
+      projectListRef.current?.scrollBy({ top: delta });
+      window.scrollBy({ top: delta });
+      autoScrollFrameRef.current = window.requestAnimationFrame(step);
+    };
+    autoScrollFrameRef.current = window.requestAnimationFrame(step);
+  }, []);
+
+  const updateAutoScrollFromPointer = useCallback(
+    (clientY: number) => {
+      const listRect = projectListRef.current?.getBoundingClientRect();
+      const viewportHeight = window.innerHeight;
+      const topBoundary = listRect ? Math.max(listRect.top, 0) : 0;
+      const bottomBoundary = listRect ? Math.min(listRect.bottom, viewportHeight) : viewportHeight;
+      const threshold = 72;
+      if (clientY <= topBoundary + threshold) {
+        startAutoScroll(-14);
+        return;
+      }
+      if (clientY >= bottomBoundary - threshold) {
+        startAutoScroll(14);
+        return;
+      }
+      stopAutoScroll();
+    },
+    [startAutoScroll, stopAutoScroll]
+  );
+
+  const stopAutoExpand = useCallback(() => {
+    if (autoExpandTimerRef.current !== null) {
+      window.clearTimeout(autoExpandTimerRef.current);
+      autoExpandTimerRef.current = null;
+    }
+    autoExpandTargetRef.current = null;
+  }, []);
+
+  const scheduleAutoExpand = useCallback(
+    (folderPath: string, canExpand: boolean) => {
+      if (!canExpand || expandedFolderPaths.includes(folderPath)) {
+        stopAutoExpand();
+        return;
+      }
+      if (autoExpandTargetRef.current === folderPath) {
+        return;
+      }
+      stopAutoExpand();
+      autoExpandTargetRef.current = folderPath;
+      autoExpandTimerRef.current = window.setTimeout(() => {
+        setExpandedFolderPaths((prev) => (prev.includes(folderPath) ? prev : [...prev, folderPath]));
+        autoExpandTimerRef.current = null;
+      }, 500);
+    },
+    [expandedFolderPaths, stopAutoExpand]
+  );
+
+  const canDropOnNode = (dragging: DragPayload, targetNode: FolderTreeNode) => {
+    if (dragging.type === "project") {
+      return true;
+    }
+    const sourcePath = getFolderSourcePath(dragging.id);
+    if (!sourcePath) {
+      return false;
+    }
+    if (targetNode.path === sourcePath || targetNode.path.startsWith(`${sourcePath}/`)) {
+      return false;
+    }
+    if (!targetNode.id && targetNode.path !== DEFAULT_FOLDER_NAME) {
+      return false;
+    }
+    return true;
+  };
+
+  useEffect(() => {
+    return () => {
+      stopAutoScroll();
+      stopAutoExpand();
+    };
+  }, [stopAutoExpand, stopAutoScroll]);
+
+  const isDraggingSomething = Boolean(draggingProjectId || draggingFolderId);
+
+  const renderDropLine = (targetNode: FolderTreeNode, lineKey: string, depth: number) => (
+    <Box
+      key={lineKey}
+      onDragOver={(event) => {
+        const dragging = parseDragPayload(event);
+        if (!dragging || !canDropOnNode(dragging, targetNode)) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        setDragOverFolderPath(null);
+        setDropLineTarget(lineKey);
+        stopAutoExpand();
+        updateAutoScrollFromPointer(event.clientY);
+      }}
+      onDragLeave={() => {
+        if (dropLineTarget === lineKey) {
+          setDropLineTarget(null);
+        }
+      }}
+      onDrop={(event) => {
+        const dragging = parseDragPayload(event);
+        stopAutoScroll();
+        stopAutoExpand();
+        if (!dragging || !canDropOnNode(dragging, targetNode)) {
+          setDropLineTarget(null);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setDropLineTarget(null);
+        if (dragging.type === "project") {
+          void moveProjectToFolder(dragging.id, targetNode.path);
+          return;
+        }
+        void moveFolderToFolder(dragging.id, targetNode);
+      }}
+      sx={{
+        height: 10,
+        mx: 1.2,
+        ml: 1.2 + depth * 2.1,
+        position: "relative",
+        opacity: isDraggingSomething ? 1 : 0,
+        transition: "opacity 0.15s ease-in-out",
+        "&::before": {
+          content: '""',
+          position: "absolute",
+          left: 0,
+          right: 0,
+          top: "50%",
+          transform: "translateY(-50%)",
+          borderTop: dropLineTarget === lineKey ? "2px solid rgba(126,224,255,0.9)" : "1px dashed rgba(126,224,255,0.16)",
+        },
+      }}
+    />
+  );
+
+  const renderFolderNode = (node: FolderTreeNode, depth = 0, parentNode: FolderTreeNode = ROOT_FOLDER_NODE): JSX.Element => (
     <Box key={node.path}>
+      {renderDropLine(parentNode, `before-folder:${node.path}`, depth)}
       {(() => {
         const hasNestedContent = node.children.length > 0 || node.projects.length > 0;
         const isExpanded = expandedFolderPaths.includes(node.path);
+        const isFolderDropActive = dragOverFolderPath === node.path;
         return (
       <Stack
         direction="row"
@@ -441,51 +657,75 @@ export function ProjectsPage() {
           setDraggingFolderId(null);
           setDraggingFolderPath(null);
           setDragOverFolderPath(null);
+          setDropLineTarget(null);
           setDraggingType(null);
+          stopAutoScroll();
+          stopAutoExpand();
         }}
         onDragOver={(event) => {
-          if (!draggingProjectId && !draggingFolderId) {
+          const dragging = parseDragPayload(event);
+          if (!dragging) {
+            stopAutoScroll();
             return;
           }
-          if (draggingFolderId && draggingFolderPath && (node.path === draggingFolderPath || node.path.startsWith(`${draggingFolderPath}/`))) {
-            return;
-          }
-          if (draggingFolderId && !node.id && node.path !== DEFAULT_FOLDER_NAME) {
+          const canDrop = canDropOnNode(dragging, node);
+          if (!canDrop) {
+            stopAutoScroll();
             return;
           }
           event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = "move";
           setDragOverFolderPath(node.path);
+          setDropLineTarget(null);
+          scheduleAutoExpand(node.path, hasNestedContent);
+          updateAutoScrollFromPointer(event.clientY);
         }}
         onDragLeave={() => {
           if (dragOverFolderPath === node.path) {
             setDragOverFolderPath(null);
           }
+          stopAutoExpand();
         }}
         onDrop={(event) => {
+          const dragging = parseDragPayload(event);
+          if (!dragging) {
+            stopAutoScroll();
+            return;
+          }
           event.preventDefault();
-          if (draggingProjectId) {
-            void moveProjectToFolder(draggingProjectId, node.path);
+          event.stopPropagation();
+          const canDrop = canDropOnNode(dragging, node);
+          if (!canDrop) {
+            setDragOverFolderPath(null);
+            stopAutoScroll();
+            stopAutoExpand();
             return;
           }
-          if (draggingFolderId && draggingFolderPath && !(node.path === draggingFolderPath || node.path.startsWith(`${draggingFolderPath}/`))) {
-            void moveFolderToFolder(draggingFolderId, node);
+          if (dragging.type === "project") {
+            void moveProjectToFolder(dragging.id, node.path);
             return;
           }
+          void moveFolderToFolder(dragging.id, node);
           setDragOverFolderPath(null);
+          setDropLineTarget(null);
           setDraggingFolderId(null);
           setDraggingFolderPath(null);
           setDraggingType(null);
+          stopAutoScroll();
+          stopAutoExpand();
         }}
         sx={{
           px: 1.2,
-          py: 0.65,
+          py: 0.75,
           pl: 1.2 + depth * 2.1,
           backgroundColor:
-            dragOverFolderPath === node.path
-              ? "rgba(126,224,255,0.16)"
+            isFolderDropActive
+              ? "rgba(126,224,255,0.14)"
               : depth === 0
                 ? "rgba(126,224,255,0.06)"
                 : "transparent",
+          borderRadius: 0,
           "& .folder-actions": {
             opacity: 0,
             pointerEvents: "none",
@@ -495,7 +735,8 @@ export function ProjectsPage() {
             opacity: 1,
             pointerEvents: "auto",
           },
-          outline: dragOverFolderPath === node.path ? "1px solid rgba(126,224,255,0.45)" : "none",
+          outline: isFolderDropActive ? "1px solid rgba(126,224,255,0.55)" : "none",
+          boxShadow: isFolderDropActive ? "inset 0 0 0 1px rgba(126,224,255,0.22)" : "none",
         }}
       >
         <Stack
@@ -528,6 +769,11 @@ export function ProjectsPage() {
         </Stack>
         {user?.role === "admin" && node.id && (
           <Stack direction="row" className="folder-actions">
+            {isFolderDropActive && (
+              <Typography variant="caption" color="primary.main" sx={{ alignSelf: "center", mr: 0.5, whiteSpace: "nowrap" }}>
+                Вложить в папку
+              </Typography>
+            )}
             <Tooltip title="Действия папки">
               <IconButton
                 size="small"
@@ -545,74 +791,84 @@ export function ProjectsPage() {
       {expandedFolderPaths.includes(node.path) && (
         <>
       {node.projects.map((project) => (
-        <Stack
-          key={project.id}
-          direction="row"
-          alignItems="center"
-          justifyContent="space-between"
-          draggable={user?.role === "admin"}
-          onDragStart={(event) => {
-            setDraggingFolderId(null);
-            setDraggingFolderPath(null);
-            setDraggingProjectId(project.id);
-            prepareDragPayload(event, "project", project.id);
-          }}
-          onDragEnd={() => {
-            setDraggingProjectId(null);
-            setDragOverFolderPath(null);
-            setDraggingType(null);
-          }}
-          sx={{
-            "& .project-actions": {
-              opacity: 0,
-              pointerEvents: "none",
-              transition: "opacity 0.15s ease-in-out",
+        <Box key={project.id}>
+          {renderDropLine(node, `before-project:${project.id}`, depth + 1)}
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            draggable={user?.role === "admin"}
+            onDragStart={(event) => {
+              setDraggingFolderId(null);
+              setDraggingFolderPath(null);
+              setDraggingProjectId(project.id);
+              prepareDragPayload(event, "project", project.id);
+            }}
+            onDragEnd={() => {
+              setDraggingProjectId(null);
+              setDragOverFolderPath(null);
+              setDropLineTarget(null);
+              setDraggingType(null);
+              stopAutoScroll();
+              stopAutoExpand();
+            }}
+            sx={{
+              "& .project-actions": {
+                opacity: 0,
+                pointerEvents: "none",
+                transition: "opacity 0.15s ease-in-out",
+              },
+              "&:hover .project-actions": {
+                opacity: 1,
+                pointerEvents: "auto",
+              },
+            borderRadius: 0,
+            "&:hover": {
+              backgroundColor: "rgba(126,224,255,0.06)",
             },
-            "&:hover .project-actions": {
-              opacity: 1,
-              pointerEvents: "auto",
-            },
-          }}
-        >
-          <ListItemButton sx={{ py: 1, pl: 4 + depth * 2 }} onClick={() => navigate(`/projects/${project.id}`)}>
-            <ListItemIcon sx={{ minWidth: 32 }}>
-              <DescriptionOutlinedIcon fontSize="small" color="action" />
-            </ListItemIcon>
-            <ListItemText
-              primary={project.name}
-              secondaryTypographyProps={{ component: "div" }}
-              secondary={
-                <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 0.5, md: 1.5 }} alignItems={{ md: "center" }}>
-                  <Typography variant="caption" color="text.secondary">
-                    {project.status}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {project.start_date || "дата не задана"}
-                  </Typography>
-                </Stack>
-              }
-            />
-          </ListItemButton>
-          {user?.role === "admin" && (
-            <Stack direction="row" alignItems="center" className="project-actions" sx={{ pr: 0.5 }}>
-              <Tooltip title="Действия">
-                <IconButton
-                  size="small"
-                  onClick={(event) => openProjectActions(event, project)}
-                  sx={{ width: 28, height: 28 }}
-                >
-                  <MoreVertIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </Stack>
-          )}
-        </Stack>
+            }}
+          >
+            <ListItemButton sx={{ py: 1, pl: 4 + depth * 2, borderRadius: 0 }} onClick={() => navigate(`/projects/${project.id}`)}>
+              <ListItemIcon sx={{ minWidth: 32 }}>
+                <DescriptionOutlinedIcon fontSize="small" color="action" />
+              </ListItemIcon>
+              <ListItemText
+                primary={project.name}
+                secondaryTypographyProps={{ component: "div" }}
+                secondary={
+                  <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 0.5, md: 1.5 }} alignItems={{ md: "center" }}>
+                    <Typography variant="caption" color="text.secondary">
+                      {project.status}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {project.start_date || "дата не задана"}
+                    </Typography>
+                  </Stack>
+                }
+              />
+            </ListItemButton>
+            {user?.role === "admin" && (
+              <Stack direction="row" alignItems="center" className="project-actions" sx={{ pr: 0.5 }}>
+                <Tooltip title="Действия">
+                  <IconButton
+                    size="small"
+                    onClick={(event) => openProjectActions(event, project)}
+                    sx={{ width: 28, height: 28 }}
+                  >
+                    <MoreVertIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            )}
+          </Stack>
+        </Box>
       ))}
       {node.children.map((child) => (
         <Box key={child.path} sx={{ pl: 0.8 }}>
-          {renderFolderNode(child, depth + 1)}
+          {renderFolderNode(child, depth + 1, node)}
         </Box>
       ))}
+      {renderDropLine(node, `after-folder-content:${node.path}`, depth + 1)}
         </>
       )}
       {depth === 0 && <Divider />}
@@ -621,10 +877,13 @@ export function ProjectsPage() {
 
   return (
     <Stack spacing={3}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center">
+      <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={2}>
         <Box>
           <Typography variant="h4" fontWeight={700}>
             Проекты
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6, maxWidth: 760 }}>
+            Рабочее пространство с древовидной структурой папок, проектами и drag&drop управлением как в файловом навигаторе.
           </Typography>
         </Box>
         {user?.role === "admin" && (
@@ -632,9 +891,9 @@ export function ProjectsPage() {
             onClick={openActionsMenu}
             sx={{
               border: "1px solid rgba(126,224,255,0.24)",
-              borderRadius: 0,
-              width: 36,
-              height: 36,
+              width: 40,
+              height: 40,
+              backgroundColor: "rgba(15,27,45,0.74)",
             }}
           >
             <MoreVertIcon />
@@ -735,24 +994,97 @@ export function ProjectsPage() {
 
       {error && <Alert severity="error">{error}</Alert>}
 
-      <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
-        <TextField
-          label="Поиск проекта"
-          placeholder="Название или описание"
-          value={searchQuery}
-          onChange={(event) => setSearchQuery(event.target.value)}
-          fullWidth
-        />
-        <TextField select label="Статус" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | Project["status"])} sx={{ minWidth: 200 }}>
-          <MenuItem value="all">Все статусы</MenuItem>
-          <MenuItem value="active">active</MenuItem>
-          <MenuItem value="completed">completed</MenuItem>
-          <MenuItem value="archived">archived</MenuItem>
-        </TextField>
-      </Stack>
+      <Box
+        sx={{
+          border: "1px solid rgba(126,224,255,0.12)",
+          borderRadius: 0,
+          p: 2,
+          backgroundColor: "rgba(15,27,45,0.56)",
+        }}
+      >
+        <Stack spacing={2}>
+          <Stack direction={{ xs: "column", lg: "row" }} spacing={1.5} alignItems={{ lg: "center" }} justifyContent="space-between">
+            <Stack direction="row" spacing={1} flexWrap="wrap">
+              <Chip label={`Проектов: ${treeStats.totalProjects}`} variant="outlined" />
+              <Chip label={`Папок: ${treeStats.totalFolders}`} variant="outlined" />
+              <Chip label={`Вложенных папок: ${treeStats.nestedFolders}`} variant="outlined" />
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              Подсветка папки означает вложение внутрь, линия между элементами означает перенос на этот уровень.
+            </Typography>
+          </Stack>
+          <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+            <TextField
+              label="Поиск проекта"
+              placeholder="Название или описание"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              fullWidth
+            />
+            <TextField
+              select
+              label="Статус"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as "all" | Project["status"])}
+              sx={{ minWidth: 220 }}
+            >
+              <MenuItem value="all">Все статусы</MenuItem>
+              <MenuItem value="active">active</MenuItem>
+              <MenuItem value="completed">completed</MenuItem>
+              <MenuItem value="archived">archived</MenuItem>
+            </TextField>
+          </Stack>
+        </Stack>
+      </Box>
 
-      <List disablePadding sx={{ border: "1px solid rgba(126,224,255,0.18)" }}>
+      <List
+        ref={projectListRef}
+        disablePadding
+        onDragOver={(event) => {
+          const dragging = parseDragPayload(event);
+          if (!dragging) {
+            stopAutoScroll();
+            return;
+          }
+          event.preventDefault();
+          updateAutoScrollFromPointer(event.clientY);
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            stopAutoScroll();
+            stopAutoExpand();
+            setDragOverFolderPath(null);
+            setDropLineTarget(null);
+          }
+        }}
+        onDrop={(event) => {
+          const dragging = parseDragPayload(event);
+          stopAutoScroll();
+          stopAutoExpand();
+          if (!dragging) {
+            return;
+          }
+          event.preventDefault();
+          setDropLineTarget(null);
+          setDragOverFolderPath(null);
+          if (dragging.type === "project") {
+            void moveProjectToFolder(dragging.id, DEFAULT_FOLDER_NAME);
+            return;
+          }
+          void moveFolderToFolder(dragging.id, ROOT_FOLDER_NODE);
+        }}
+        sx={{
+          border: "1px solid rgba(126,224,255,0.14)",
+          borderRadius: 0,
+          backgroundColor: "rgba(15,27,45,0.58)",
+          maxHeight: "calc(100vh - 300px)",
+          overflowY: "auto",
+          p: 1,
+        }}
+      >
+        {renderDropLine(ROOT_FOLDER_NODE, "root-drop-line", 0)}
         {groupedProjects.map((node) => renderFolderNode(node))}
+        {renderDropLine(ROOT_FOLDER_NODE, "root-drop-line-end", 0)}
         {groupedProjects.length === 0 && (
           <Box sx={{ px: 2, py: 2 }}>
             <Typography color="text.secondary">Проекты не найдены.</Typography>
@@ -760,7 +1092,7 @@ export function ProjectsPage() {
         )}
       </List>
 
-      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} fullWidth>
+      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Создать проект</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
@@ -871,7 +1203,7 @@ export function ProjectsPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={editOpen} onClose={() => setEditOpen(false)} fullWidth>
+      <Dialog open={editOpen} onClose={() => setEditOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Редактировать проект</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
