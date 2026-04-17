@@ -6,7 +6,7 @@ import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import magic
 from docx import Document
@@ -1017,7 +1017,58 @@ class VulnerabilityService:
         vuln = await self.db.scalar(select(Vulnerability).where(and_(Vulnerability.id == vuln_id, Vulnerability.project_id == project_id)))
         if not vuln:
             raise NotFoundError("Уязвимость не найдена")
+        self._hydrate_workflow_steps(vuln)
         return vuln
+
+    @staticmethod
+    def _hydrate_workflow_steps(vuln: Vulnerability) -> None:
+        if vuln.workflow_steps:
+            return
+        if vuln.steps_to_reproduce:
+            vuln.workflow_steps = [
+                {
+                    "id": str(uuid4()),
+                    "title": "Этап 1",
+                    "description": vuln.steps_to_reproduce,
+                    "image_file_ids": [],
+                }
+            ]
+            return
+        vuln.workflow_steps = []
+
+    @staticmethod
+    def _normalize_workflow_steps(steps: list[dict] | None) -> list[dict]:
+        normalized: list[dict] = []
+        for raw_step in steps or []:
+            title = str(raw_step.get("title", "")).strip()
+            description = str(raw_step.get("description", "")).strip()
+            if not title and not description:
+                continue
+            normalized.append(
+                {
+                    "id": str(raw_step.get("id") or uuid4()),
+                    "title": title or "Этап",
+                    "description": description or None,
+                    "image_file_ids": [str(file_id) for file_id in raw_step.get("image_file_ids", []) if file_id],
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _workflow_steps_to_text(steps: list[dict]) -> str | None:
+        if not steps:
+            return None
+        blocks: list[str] = []
+        for index, step in enumerate(steps, start=1):
+            title = str(step.get("title", "")).strip() or f"Этап {index}"
+            description = str(step.get("description", "")).strip()
+            block = f"{index}. {title}"
+            if description:
+                block = f"{block}\n{description}"
+            if step.get("image_file_ids"):
+                block = f"{block}\n[Изображений: {len(step['image_file_ids'])}]"
+            blocks.append(block)
+        return "\n\n".join(blocks)
 
     async def list(self, project_id: UUID, page: int, size: int, severity: str | None, status: str | None) -> tuple[list[Vulnerability], int]:
         query = select(Vulnerability).where(Vulnerability.project_id == project_id)
@@ -1027,6 +1078,8 @@ class VulnerabilityService:
             query = query.where(Vulnerability.status == status)
         total = await self.db.scalar(select(func.count()).select_from(query.subquery())) or 0
         items = (await self.db.scalars(query.order_by(Vulnerability.created_at.desc()).offset((page - 1) * size).limit(size))).all()
+        for item in items:
+            self._hydrate_workflow_steps(item)
         return list(items), total
 
     async def list_for_host(
@@ -1054,6 +1107,8 @@ class VulnerabilityService:
             query = query.where(Vulnerability.status == status)
         total = await self.db.scalar(select(func.count()).select_from(query.subquery())) or 0
         items = (await self.db.scalars(query.order_by(Vulnerability.created_at.desc()).offset((page - 1) * size).limit(size))).all()
+        for item in items:
+            self._hydrate_workflow_steps(item)
         return list(items), total
 
     async def create(self, project_id: UUID, payload: dict, actor_id: UUID) -> Vulnerability:
@@ -1061,6 +1116,9 @@ class VulnerabilityService:
         if not host_id:
             raise ValidationError("Уязвимость должна быть привязана к конкретному хосту")
         await self._assert_asset_in_project(project_id, AssetType.HOST, host_id)
+        if "workflow_steps" in payload:
+            payload["workflow_steps"] = self._normalize_workflow_steps(payload.get("workflow_steps"))
+            payload["steps_to_reproduce"] = self._workflow_steps_to_text(payload["workflow_steps"])
         vuln = Vulnerability(project_id=project_id, created_by=actor_id, **payload)
         self.db.add(vuln)
         await self.db.flush()
@@ -1086,8 +1144,13 @@ class VulnerabilityService:
 
     async def update(self, project_id: UUID, vuln_id: UUID, payload: dict, actor_id: UUID) -> Vulnerability:
         vuln = await self._get_vuln(project_id, vuln_id)
+        if "workflow_steps" in payload:
+            payload["workflow_steps"] = self._normalize_workflow_steps(payload.get("workflow_steps"))
+            payload["steps_to_reproduce"] = self._workflow_steps_to_text(payload["workflow_steps"])
         for key, value in payload.items():
-            if value is not None:
+            if key == "steps_to_reproduce" and "workflow_steps" in payload:
+                setattr(vuln, key, value)
+            elif value is not None:
                 setattr(vuln, key, value)
         await self.db.commit()
         await self.db.refresh(vuln)

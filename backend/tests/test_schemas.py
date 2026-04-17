@@ -7,6 +7,7 @@ from app.schemas import (
     PortCreate,
     UserCreate,
     VulnerabilityCreate,
+    VulnerabilityWorkflowStep,
     VulnerabilityStatusPatch,
 )
 
@@ -62,3 +63,22 @@ def test_vulnerability_rejects_invalid_cvss_score_tc_vuln_005() -> None:
 def test_vulnerability_rejects_invalid_status_patch_tc_vuln_010() -> None:
     with pytest.raises(PydanticValidationError):
         VulnerabilityStatusPatch(status="closed")
+
+
+def test_vulnerability_accepts_structured_workflow_steps() -> None:
+    payload = VulnerabilityCreate(
+        host_id="f4d84c05-c8a5-4e5d-9811-43d0883d773c",
+        title="Stored XSS",
+        severity="high",
+        workflow_steps=[
+            VulnerabilityWorkflowStep(
+                id="step-1",
+                title="Открыть форму",
+                description="Перейти в профиль и открыть форму комментария",
+                image_file_ids=[],
+            )
+        ],
+    )
+
+    assert len(payload.workflow_steps) == 1
+    assert payload.workflow_steps[0].title == "Открыть форму"

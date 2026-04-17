@@ -75,6 +75,8 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    environment:
+      RABBITMQ_ERLANG_COOKIE: pcf_rabbitmq_dev_cookie_1234567890
 
   mailpit:
     image: axllent/mailpit

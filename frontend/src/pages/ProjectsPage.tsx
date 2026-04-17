@@ -633,6 +633,10 @@ export function ProjectsPage() {
     />
   );
 
+  const getNestedProjectsCount = (node: FolderTreeNode): number => {
+    return node.projects.length + node.children.reduce((total, child) => total + getNestedProjectsCount(child), 0);
+  };
+
   const renderFolderNode = (node: FolderTreeNode, depth = 0, parentNode: FolderTreeNode = ROOT_FOLDER_NODE): JSX.Element => (
     <Box key={node.path}>
       {renderDropLine(parentNode, `before-folder:${node.path}`, depth)}
@@ -766,7 +770,7 @@ export function ProjectsPage() {
             {node.name}
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            {node.projects.length + node.children.length > 0 ? `${node.projects.length} пр.` : ""}
+            {getNestedProjectsCount(node) > 0 ? `${getNestedProjectsCount(node)} пр.` : ""}
           </Typography>
         </Stack>
         {user?.role === "admin" && node.id && (

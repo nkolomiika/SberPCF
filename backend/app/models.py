@@ -232,6 +232,7 @@ class Vulnerability(Base, TimestampMixin):
     status: Mapped[VulnerabilityStatus] = mapped_column(
         Enum(VulnerabilityStatus, name="vuln_status"), nullable=False, default=VulnerabilityStatus.OPEN, index=True
     )
+    workflow_steps: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     steps_to_reproduce: Mapped[str | None] = mapped_column(Text, nullable=True)
     impact: Mapped[str | None] = mapped_column(Text, nullable=True)
     recommendations: Mapped[str | None] = mapped_column(Text, nullable=True)

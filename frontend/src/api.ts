@@ -378,6 +378,7 @@ export async function createVulnerability(
     cvss_vector?: string;
     cwe_id?: string;
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
+    workflow_steps?: Array<{ id: string; title: string; description?: string; image_file_ids?: string[] }>;
     steps_to_reproduce?: string;
     impact?: string;
     recommendations?: string;
@@ -399,6 +400,7 @@ export async function updateVulnerability(
     cvss_vector?: string;
     cwe_id?: string;
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
+    workflow_steps?: Array<{ id: string; title: string; description?: string; image_file_ids?: string[] }>;
     steps_to_reproduce?: string;
     impact?: string;
     recommendations?: string;

@@ -98,6 +98,7 @@ async def startup() -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_uploaded_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS workflow_steps JSON"))
             await conn.execute(text("UPDATE users SET tags = '[]'::json WHERE tags IS NULL"))
         elif conn.dialect.name == "sqlite":
             columns = (await conn.execute(text("PRAGMA table_info(projects)"))).fetchall()

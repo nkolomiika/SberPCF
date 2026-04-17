@@ -62,6 +62,7 @@ import {
   uploadVulnerabilityFile,
 } from "../api";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
+import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
 import { useAuthStore } from "../store";
 import type {
   Endpoint,
@@ -95,6 +96,12 @@ const parseIsoDateOnly = (value: string | null) => {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
+const projectStatusLabels = {
+  active: "Активен",
+  completed: "Завершён",
+  archived: "Архив",
+} as const;
+
 export function ProjectDetailPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
@@ -109,6 +116,7 @@ export function ProjectDetailPage() {
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [projectName, setProjectName] = useState<string>("");
   const [projectDescription, setProjectDescription] = useState<string>("");
+  const [projectStatus, setProjectStatus] = useState<"active" | "completed" | "archived">("active");
   const [projectStartDate, setProjectStartDate] = useState<string | null>(null);
   const [projectEndDate, setProjectEndDate] = useState<string | null>(null);
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
@@ -170,6 +178,7 @@ export function ProjectDetailPage() {
       setProjectMembers(membersResp);
       setProjectName(projectResp.name ?? projectId);
       setProjectDescription(projectResp.description ?? "");
+      setProjectStatus(projectResp.status);
       setProjectStartDate(projectResp.start_date);
       setProjectEndDate(projectResp.end_date);
       setSelectedHostId((previousHostId) => {
@@ -350,7 +359,18 @@ export function ProjectDetailPage() {
         endLabel: end ? end.toLocaleDateString("ru-RU") : "не задано",
         daysLeft: null as number | null,
         statusTone: "neutral" as "neutral" | "success" | "warning" | "error",
-        statusLabel: "Стандартный срок: 14 дней",
+        statusLabel:
+          projectStatus === "active" ? "Стандартный срок: 14 дней" : `Статус: ${projectStatusLabels[projectStatus]}`,
+      };
+    }
+
+    if (projectStatus !== "active") {
+      return {
+        startLabel: start.toLocaleDateString("ru-RU"),
+        endLabel: end.toLocaleDateString("ru-RU"),
+        daysLeft: null as number | null,
+        statusTone: "neutral" as const,
+        statusLabel: `Статус: ${projectStatusLabels[projectStatus]}`,
       };
     }
 
@@ -380,7 +400,7 @@ export function ProjectDetailPage() {
       statusTone: "success" as const,
       statusLabel: "В графике",
     };
-  }, [projectStartDate, projectEndDate]);
+  }, [projectEndDate, projectStartDate, projectStatus]);
   const timelineBar = useMemo(() => {
     const startRaw = parseIsoDateOnly(projectStartDate);
     const endRaw = parseIsoDateOnly(projectEndDate);
@@ -388,6 +408,8 @@ export function ProjectDetailPage() {
     const end = endRaw ?? (startRaw ? new Date(startRaw.getTime() + 14 * DAY_IN_MS) : null);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const effectiveToday =
+      projectStatus === "active" ? today : new Date(Math.min(today.getTime(), end?.getTime() ?? today.getTime()));
 
     if (!start || !end || end.getTime() <= start.getTime()) {
       return {
@@ -396,7 +418,7 @@ export function ProjectDetailPage() {
     }
 
     const totalDays = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / DAY_IN_MS));
-    const elapsedInclusive = Math.floor((today.getTime() - start.getTime()) / DAY_IN_MS) + 1;
+    const elapsedInclusive = Math.floor((effectiveToday.getTime() - start.getTime()) / DAY_IN_MS) + 1;
     const passedDays = Math.max(0, Math.min(totalDays, elapsedInclusive));
     const reportStartIndex = Math.max(0, totalDays - 2);
     const cells = Array.from({ length: totalDays }, (_, index) => {
@@ -420,7 +442,7 @@ export function ProjectDetailPage() {
       startLabel: start.toLocaleDateString("ru-RU"),
       endLabel: end.toLocaleDateString("ru-RU"),
     };
-  }, [projectStartDate, projectEndDate]);
+  }, [projectEndDate, projectStartDate, projectStatus]);
 
   const submitHost = async () => {
     if (!projectId) {
@@ -599,6 +621,7 @@ export function ProjectDetailPage() {
         cvss_score: activeVuln.cvss_score ?? undefined,
         cvss_vector: activeVuln.cvss_vector || undefined,
         cwe_id: activeVuln.cwe_id || undefined,
+        workflow_steps: activeVuln.workflow_steps,
         steps_to_reproduce: activeVuln.steps_to_reproduce || undefined,
         impact: activeVuln.impact || undefined,
         recommendations: activeVuln.recommendations || undefined,
@@ -886,6 +909,20 @@ export function ProjectDetailPage() {
     }
   };
 
+  const updateProjectStatus = async (nextStatus: "active" | "completed" | "archived") => {
+    if (!projectId || nextStatus === projectStatus) {
+      return;
+    }
+    setError(null);
+    try {
+      await updateProject(projectId, { status: nextStatus });
+      setProjectStatus(nextStatus);
+      await loadProjectData();
+    } catch {
+      setError("Не удалось обновить статус проекта");
+    }
+  };
+
   const openMembersDialog = async () => {
     if (!projectId) {
       return;
@@ -1050,11 +1087,25 @@ export function ProjectDetailPage() {
                       )}
                     </Stack>
                     {user?.role === "admin" && (
-                      <Button size="small" variant="outlined" startIcon={<AccessTimeIcon />} onClick={openExtendDialog}>
-                        Продлить
-                      </Button>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                        <TextField
+                          select
+                          size="small"
+                          label="Статус проекта"
+                          value={projectStatus}
+                          onChange={(event) => void updateProjectStatus(event.target.value as "active" | "completed" | "archived")}
+                          sx={{ minWidth: 180 }}
+                        >
+                          <MenuItem value="active">Активен</MenuItem>
+                          <MenuItem value="completed">Завершён</MenuItem>
+                          <MenuItem value="archived">Архив</MenuItem>
+                        </TextField>
+                        <Button size="small" variant="outlined" startIcon={<AccessTimeIcon />} onClick={openExtendDialog}>
+                          Продлить
+                        </Button>
+                      </Stack>
                     )}
-                  </Stack>
+        </Stack>
                   <Box sx={{ mt: 1.5 }}>
                     {timelineBar.ready ? (
                       <>
@@ -1087,7 +1138,7 @@ export function ProjectDetailPage() {
                           <Typography variant="caption" color="text.secondary">
                             End: {timelineBar.endLabel}
                           </Typography>
-                        </Stack>
+      </Stack>
                       </>
                     ) : (
                       <Typography variant="body2" color="text.secondary">
@@ -1097,8 +1148,8 @@ export function ProjectDetailPage() {
                   </Box>
                 </CardContent>
               </Card>
-              <Grid container spacing={2}>
-                <Grid size={{ xs: 12, md: 6 }}>
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, md: 6 }}>
                   <Card
                     sx={{
                       position: "relative",
@@ -1129,7 +1180,7 @@ export function ProjectDetailPage() {
                     >
                       <AddIcon fontSize="small" />
                     </IconButton>
-                    <CardContent>
+            <CardContent>
                       <Typography color="text.secondary" mb={1}>
                         Хосты проекта
                       </Typography>
@@ -1148,7 +1199,7 @@ export function ProjectDetailPage() {
                         ) : (
                           <Typography color="text.secondary">Хосты не добавлены</Typography>
                         )}
-                      </Stack>
+              </Stack>
                     </CardContent>
                   </Card>
                 </Grid>
@@ -1225,27 +1276,27 @@ export function ProjectDetailPage() {
           {selectedSection === "hosts" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
-                <Stack spacing={1.2}>
-                  {hosts.map((host) => (
+              <Stack spacing={1.2}>
+                {hosts.map((host) => (
                     <Box
                       key={host.id}
                       sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.6, borderRadius: 0, cursor: "pointer", backgroundColor: "rgba(8,17,31,0.24)" }}
                       onClick={() => navigate(`/projects/${projectId}/hosts/${host.id}`)}
                     >
                       <Typography>{host.hostname || host.ip_address || "unknown-host"}</Typography>
-                      <Typography variant="body2" color="text.secondary">
+                    <Typography variant="body2" color="text.secondary">
                         Статус: {host.status}
-                      </Typography>
-                    </Box>
-                  ))}
-                </Stack>
-              </CardContent>
-            </Card>
+                    </Typography>
+                  </Box>
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
           )}
 
           {selectedSection === "ports" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
-              <CardContent>
+            <CardContent>
                 <Stack spacing={1.2}>
                   {ports.map((port) => (
                     <Box key={port.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
@@ -1254,7 +1305,7 @@ export function ProjectDetailPage() {
                           {port.port_number}/{port.protocol}
                         </Typography>
                         <Chip size="small" label={port.state} />
-                      </Stack>
+              </Stack>
                     </Box>
                   ))}
                   {ports.length === 0 && (
@@ -1291,7 +1342,7 @@ export function ProjectDetailPage() {
           {selectedSection === "vulns" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
-                <Stack direction="row" spacing={1} mb={2} flexWrap="wrap">
+              <Stack direction="row" spacing={1} mb={2} flexWrap="wrap">
                   {Object.entries(vulnerabilities.reduce(
                     (acc, item) => {
                       acc[item.severity] += 1;
@@ -1299,14 +1350,14 @@ export function ProjectDetailPage() {
                     },
                     { critical: 0, high: 0, medium: 0, low: 0, info: 0 } as Record<Vulnerability["severity"], number>
                   )).map(([severity, value]) => (
-                    <Chip key={severity} label={`${severity}: ${value}`} />
-                  ))}
-                </Stack>
-                <Stack spacing={1.2}>
-                  {vulnerabilities.map((item) => (
+                  <Chip key={severity} label={`${severity}: ${value}`} />
+                ))}
+              </Stack>
+              <Stack spacing={1.2}>
+                {vulnerabilities.map((item) => (
                     <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
                       <Stack direction="row" justifyContent="space-between" alignItems="center">
-                        <Typography>{item.title}</Typography>
+                    <Typography>{item.title}</Typography>
                         <Button size="small" variant="outlined" onClick={() => void loadVulnerabilityDetails(item.id)} disabled={vulnBusy}>
                           Открыть
                         </Button>
@@ -1314,13 +1365,13 @@ export function ProjectDetailPage() {
                       <Stack direction="row" spacing={1} mt={1} flexWrap="wrap">
                         <Chip label={item.severity} size="small" sx={severityChipSx[item.severity]} />
                         <Chip label={item.status} size="small" sx={vulnerabilityStatusChipSx[item.status]} />
-                      </Stack>
-                    </Box>
-                  ))}
+                    </Stack>
+                  </Box>
+                ))}
                   {vulnerabilities.length === 0 && <Typography color="text.secondary">Для выбранного хоста уязвимости не привязаны.</Typography>}
-                </Stack>
-              </CardContent>
-            </Card>
+              </Stack>
+            </CardContent>
+          </Card>
           )}
         </Stack>
       </Stack>
@@ -1480,13 +1531,42 @@ export function ProjectDetailPage() {
                   />
                 </Grid>
                 <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Шаги воспроизведения"
-                    fullWidth
-                    multiline
-                    minRows={2}
-                    value={activeVuln.steps_to_reproduce || ""}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, steps_to_reproduce: e.target.value || null } : prev))}
+                  <VulnerabilityStagesEditor
+                    stages={activeVuln.workflow_steps || []}
+                    busy={vulnBusy}
+                    onChange={(nextStages) =>
+                      setActiveVuln((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              workflow_steps: nextStages,
+                            }
+                          : prev
+                      )
+                    }
+                    onUploadImage={async (stageId, file) => {
+                      if (!projectId || !activeVuln) {
+                        return;
+                      }
+                      try {
+                        const uploadedFile = await uploadVulnerabilityFile(projectId, activeVuln.id, file);
+                        setVulnFiles((prev) => [uploadedFile, ...prev]);
+                        setActiveVuln((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                workflow_steps: (prev.workflow_steps || []).map((stage) =>
+                                  stage.id === stageId
+                                    ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] }
+                                    : stage
+                                ),
+                              }
+                            : prev
+                        );
+                      } catch {
+                        setError("Не удалось загрузить картинку этапа");
+                      }
+                    }}
                   />
                 </Grid>
                 <Grid size={{ xs: 12 }}>

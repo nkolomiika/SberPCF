@@ -36,7 +36,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { load as parseYaml } from "js-yaml";
 import ReactMarkdown from "react-markdown";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   addVulnerabilityAsset,
   createHost,
@@ -69,6 +69,7 @@ import {
   uploadVulnerabilityFile,
 } from "../api";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
+import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
 import { useAuthStore } from "../store";
 import type {
   Endpoint,
@@ -85,6 +86,7 @@ import type {
 
 export function HostDetailPage() {
   const { projectId, hostId } = useParams<{ projectId: string; hostId: string }>();
+  const location = useLocation();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const storagePrefix = projectId && hostId ? `host-detail:${projectId}:${hostId}` : null;
@@ -147,7 +149,7 @@ export function HostDetailPage() {
   const [creatingVulnerabilityCvssScore, setCreatingVulnerabilityCvssScore] = useState("");
   const [creatingVulnerabilityCvssVector, setCreatingVulnerabilityCvssVector] = useState("");
   const [creatingVulnerabilityCweId, setCreatingVulnerabilityCweId] = useState("");
-  const [creatingVulnerabilitySteps, setCreatingVulnerabilitySteps] = useState("");
+  const [creatingVulnerabilityStages, setCreatingVulnerabilityStages] = useState<VulnerabilityDetails["workflow_steps"]>([]);
   const [creatingVulnerabilityImpact, setCreatingVulnerabilityImpact] = useState("");
   const [creatingVulnerabilityRecommendations, setCreatingVulnerabilityRecommendations] = useState("");
   const [hostActionsAnchorEl, setHostActionsAnchorEl] = useState<HTMLElement | null>(null);
@@ -176,6 +178,7 @@ export function HostDetailPage() {
   const [editCommentOpen, setEditCommentOpen] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingCommentContent, setEditingCommentContent] = useState("");
+  const pendingSection = (location.state as { section?: DetailSection } | null)?.section;
 
   const loadHost = useCallback(async () => {
     if (!projectId || !hostId) {
@@ -255,6 +258,10 @@ export function HostDetailPage() {
     if (!storagePrefix) {
       return;
     }
+    if (pendingSection) {
+      setSelectedSection(pendingSection);
+      return;
+    }
     const storedSection = window.localStorage.getItem(`${storagePrefix}:selectedSection`) as DetailSection | null;
     const storedCollapsed = window.localStorage.getItem(`${storagePrefix}:sidebarCollapsed`);
     if (storedSection) {
@@ -263,7 +270,7 @@ export function HostDetailPage() {
     if (storedCollapsed) {
       setSidebarCollapsed(storedCollapsed === "1");
     }
-  }, [storagePrefix]);
+  }, [pendingSection, storagePrefix]);
 
   useEffect(() => {
     if (!storagePrefix) {
@@ -934,7 +941,7 @@ export function HostDetailPage() {
       cvss_score: creatingVulnerabilityCvssScore === "" ? undefined : Number(creatingVulnerabilityCvssScore),
       cvss_vector: creatingVulnerabilityCvssVector.trim() || undefined,
       cwe_id: creatingVulnerabilityCweId.trim() || undefined,
-      steps_to_reproduce: creatingVulnerabilitySteps.trim() || undefined,
+      workflow_steps: creatingVulnerabilityStages,
       impact: creatingVulnerabilityImpact.trim() || undefined,
       recommendations: creatingVulnerabilityRecommendations.trim() || undefined,
     });
@@ -947,7 +954,7 @@ export function HostDetailPage() {
     setCreatingVulnerabilityCvssScore("");
     setCreatingVulnerabilityCvssVector("");
     setCreatingVulnerabilityCweId("");
-    setCreatingVulnerabilitySteps("");
+    setCreatingVulnerabilityStages([]);
     setCreatingVulnerabilityImpact("");
     setCreatingVulnerabilityRecommendations("");
     await loadHost();
@@ -1102,6 +1109,7 @@ export function HostDetailPage() {
         cvss_score: activeVulnDetails.cvss_score ?? undefined,
         cvss_vector: activeVulnDetails.cvss_vector || undefined,
         cwe_id: activeVulnDetails.cwe_id || undefined,
+        workflow_steps: activeVulnDetails.workflow_steps,
         steps_to_reproduce: activeVulnDetails.steps_to_reproduce || undefined,
         impact: activeVulnDetails.impact || undefined,
         recommendations: activeVulnDetails.recommendations || undefined,
@@ -1334,8 +1342,8 @@ export function HostDetailPage() {
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
           onSelectSection={setSelectedSection}
           onSelectProjectOverview={() => navigate(`/projects/${projectId}`)}
-          onSelectHost={(nextHostId) => navigate(`/projects/${projectId}/hosts/${nextHostId}`)}
-          onOpenHost={(nextHostId) => navigate(`/projects/${projectId}/hosts/${nextHostId}`)}
+          onSelectHost={() => undefined}
+          onOpenHost={(nextHostId, section) => navigate(`/projects/${projectId}/hosts/${nextHostId}`, { state: { section } })}
         />
 
         <Stack flex={1} spacing={2}>
@@ -2161,15 +2169,42 @@ export function HostDetailPage() {
                   />
                 </Grid>
                 <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Шаги воспроизведения"
-                    fullWidth
-                    multiline
-                    minRows={2}
-                    value={activeVulnDetails.steps_to_reproduce || ""}
-                    onChange={(event) =>
-                      setActiveVulnDetails((prev) => (prev ? { ...prev, steps_to_reproduce: event.target.value || null } : prev))
+                  <VulnerabilityStagesEditor
+                    stages={activeVulnDetails.workflow_steps || []}
+                    busy={vulnBusy}
+                    onChange={(nextStages) =>
+                      setActiveVulnDetails((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              workflow_steps: nextStages,
+                            }
+                          : prev
+                      )
                     }
+                    onUploadImage={async (stageId, file) => {
+                      if (!projectId || !activeVulnDetails) {
+                        return;
+                      }
+                      try {
+                        const uploadedFile = await uploadVulnerabilityFile(projectId, activeVulnDetails.id, file);
+                        setVulnFiles((prev) => [uploadedFile, ...prev]);
+                        setActiveVulnDetails((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                workflow_steps: (prev.workflow_steps || []).map((stage) =>
+                                  stage.id === stageId
+                                    ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] }
+                                    : stage
+                                ),
+                              }
+                            : prev
+                        );
+                      } catch {
+                        setError("Не удалось загрузить картинку этапа.");
+                      }
+                    }}
                   />
                 </Grid>
                 <Grid size={{ xs: 12 }}>
@@ -2460,13 +2495,7 @@ export function HostDetailPage() {
               onChange={(event) => setCreatingVulnerabilityCvssVector(event.target.value)}
             />
             <TextField label="CWE ID" value={creatingVulnerabilityCweId} onChange={(event) => setCreatingVulnerabilityCweId(event.target.value)} />
-            <TextField
-              multiline
-              minRows={3}
-              label="Шаги воспроизведения"
-              value={creatingVulnerabilitySteps}
-              onChange={(event) => setCreatingVulnerabilitySteps(event.target.value)}
-            />
+            <VulnerabilityStagesEditor stages={creatingVulnerabilityStages} onChange={setCreatingVulnerabilityStages} />
             <TextField multiline minRows={3} label="Влияние" value={creatingVulnerabilityImpact} onChange={(event) => setCreatingVulnerabilityImpact(event.target.value)} />
             <TextField
               multiline

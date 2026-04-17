@@ -139,12 +139,20 @@ export interface Vulnerability {
   cvss_score: number | null;
   cvss_vector: string | null;
   cwe_id: string | null;
+  workflow_steps: VulnerabilityWorkflowStep[];
   steps_to_reproduce: string | null;
   impact: string | null;
   recommendations: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface VulnerabilityWorkflowStep {
+  id: string;
+  title: string;
+  description: string | null;
+  image_file_ids: string[];
 }
 
 export interface VulnerabilityAsset {

@@ -273,6 +273,13 @@ class EndpointOut(ORMBase):
     updated_at: datetime
 
 
+class VulnerabilityWorkflowStep(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=500)
+    description: str | None = None
+    image_file_ids: list[UUID] = Field(default_factory=list)
+
+
 class VulnerabilityCreate(BaseModel):
     host_id: UUID
     title: str = Field(min_length=1, max_length=500)
@@ -283,6 +290,7 @@ class VulnerabilityCreate(BaseModel):
     cvss_vector: str | None = Field(default=None, max_length=255)
     cwe_id: str | None = Field(default=None, max_length=20)
     status: VulnerabilityStatus = VulnerabilityStatus.OPEN
+    workflow_steps: list["VulnerabilityWorkflowStep"] = Field(default_factory=list)
     steps_to_reproduce: str | None = None
     impact: str | None = None
     recommendations: str | None = None
@@ -297,6 +305,7 @@ class VulnerabilityUpdate(BaseModel):
     cvss_vector: str | None = Field(default=None, max_length=255)
     cwe_id: str | None = Field(default=None, max_length=20)
     status: VulnerabilityStatus | None = None
+    workflow_steps: list["VulnerabilityWorkflowStep"] | None = None
     steps_to_reproduce: str | None = None
     impact: str | None = None
     recommendations: str | None = None
@@ -317,6 +326,7 @@ class VulnerabilityOut(ORMBase):
     cvss_vector: str | None
     cwe_id: str | None
     status: VulnerabilityStatus
+    workflow_steps: list["VulnerabilityWorkflowStep"] = Field(default_factory=list)
     steps_to_reproduce: str | None
     impact: str | None
     recommendations: str | None

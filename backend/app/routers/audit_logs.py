@@ -53,7 +53,7 @@ async def list_audit_logs(
             payload = [AuditLogOut.model_validate(item) for item in items]
             return to_paginated_response(payload, total, PageParams(page=page, size=size)).model_dump()
 
-    query = select(AuditLog, User.username).outerjoin(User, User.id == AuditLog.user_id)
+    stmt = select(AuditLog, User.username).outerjoin(User, User.id == AuditLog.user_id)
     conditions = []
     if user_id:
         conditions.append(AuditLog.user_id == user_id)
@@ -67,7 +67,7 @@ async def list_audit_logs(
         conditions.append(AuditLog.entity_id == entity_id)
     if ip_address:
         conditions.append(AuditLog.ip_address.ilike(f"%{ip_address.strip()}%"))
-    if query:
+    if query is not None and query.strip():
         query_value = f"%{query.strip()}%"
         conditions.append(
             (
@@ -87,10 +87,10 @@ async def list_audit_logs(
         except ValueError:
             pass
     if conditions:
-        query = query.where(and_(*conditions))
-    total = await db.scalar(select(func.count()).select_from(query.subquery()))
+        stmt = stmt.where(and_(*conditions))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = (
-        await db.execute(query.order_by(AuditLog.created_at.desc()).offset((page - 1) * size).limit(size))
+        await db.execute(stmt.order_by(AuditLog.created_at.desc()).offset((page - 1) * size).limit(size))
     ).all()
     total_count = total if isinstance(total, int) else 0
     payload = [
