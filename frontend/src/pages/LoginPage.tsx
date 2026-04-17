@@ -13,8 +13,8 @@ export function LoginPage() {
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    await signIn(username, password);
-    navigate("/");
+    const currentUser = await signIn(username, password);
+    navigate(currentUser.must_change_password ? "/force-change-password" : "/");
   };
 
   return (

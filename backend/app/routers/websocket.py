@@ -56,6 +56,21 @@ async def projects_index_ws(websocket: WebSocket) -> None:
         ws_manager.disconnect_projects_index(websocket)
 
 
+@router.websocket("/ws/notifications")
+async def notifications_ws(websocket: WebSocket) -> None:
+    """Персональный WebSocket-канал уведомлений текущего пользователя."""
+    user = await _authenticate_websocket_user(websocket)
+    if not user:
+        return
+
+    await ws_manager.connect_user(user.id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect_user(user.id, websocket)
+
+
 @router.websocket("/ws/projects/{project_id}")
 async def project_ws(websocket: WebSocket, project_id: UUID) -> None:
     """WebSocket-канал проекта с авторизацией по access cookie."""

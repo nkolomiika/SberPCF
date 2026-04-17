@@ -27,14 +27,17 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import HistoryIcon from "@mui/icons-material/History";
+import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
 import type { PaletteMode } from "@mui/material";
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { listNotifications, unreadCount } from "./api";
 import type { Notification } from "./types";
 import { useAuthStore } from "./store";
+import { ForceChangePasswordPage } from "./pages/ForceChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
+import { ProfilePage } from "./pages/ProfilePage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { UsersAdminPage } from "./pages/UsersAdminPage";
@@ -45,6 +48,7 @@ type PrivateLayoutProps = {
 
 function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
   const [count, setCount] = useState<number>(0);
@@ -58,6 +62,13 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     setCount(unread);
   }, []);
 
+  const loadNotificationsList = useCallback(async () => {
+    const response = await listNotifications();
+    setNotifications(response.items);
+  }, []);
+  const notificationsOpen = Boolean(notificationsAnchorEl);
+  const profileMenuOpen = Boolean(profileAnchorEl);
+
   useEffect(() => {
     void loadUnreadNotifications();
     const intervalId = window.setInterval(() => {
@@ -68,12 +79,28 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     };
   }, [loadUnreadNotifications]);
 
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${protocol}://${window.location.host}/ws/notifications`);
+    socket.onmessage = () => {
+      void loadUnreadNotifications();
+      if (notificationsOpen) {
+        void loadNotificationsList();
+      }
+    };
+    return () => {
+      socket.close();
+    };
+  }, [loadNotificationsList, loadUnreadNotifications, notificationsOpen, user]);
+
   const openNotifications = async (event: React.MouseEvent<HTMLElement>) => {
     setNotificationsAnchorEl(event.currentTarget);
     setNotificationsLoading(true);
     try {
-      const response = await listNotifications();
-      setNotifications(response.items);
+      await loadNotificationsList();
       await loadUnreadNotifications();
     } finally {
       setNotificationsLoading(false);
@@ -83,9 +110,6 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const closeNotifications = () => {
     setNotificationsAnchorEl(null);
   };
-
-  const notificationsOpen = Boolean(notificationsAnchorEl);
-  const profileMenuOpen = Boolean(profileAnchorEl);
 
   const openProfileMenu = (event: React.MouseEvent<HTMLElement>) => {
     setProfileAnchorEl(event.currentTarget);
@@ -97,6 +121,10 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
 
   if (!user) {
     return <Navigate to="/login" replace />;
+  }
+
+  if (user.must_change_password && location.pathname !== "/force-change-password") {
+    return <Navigate to="/force-change-password" replace />;
   }
 
   const roleLabel = user.role === "admin" ? "Администратор" : user.role === "developer" ? "Разработчик" : "Пентестер";
@@ -178,10 +206,12 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
                 }}
               >
                 <Stack direction="row" spacing={1.2} alignItems="center" justifyContent="flex-end" sx={{ width: "100%" }}>
-                  <Avatar sx={{ width: 30, height: 30, bgcolor: "primary.main" }}>{user.username[0]?.toUpperCase()}</Avatar>
+                  <Avatar src={user.avatar_url ?? undefined} sx={{ width: 30, height: 30, bgcolor: "primary.main" }}>
+                    {(user.full_name || user.username)[0]?.toUpperCase()}
+                  </Avatar>
                   <Stack spacing={0} sx={{ flex: 1, minWidth: 0 }}>
                     <Typography color="text.primary" textAlign="right" noWrap>
-                      {user.username}
+                      {user.full_name || user.username}
                     </Typography>
                     <Typography variant="caption" color="text.secondary" textAlign="right" noWrap>
                       {roleLabel}
@@ -203,11 +233,23 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
         slotProps={{
           paper: {
             sx: {
-              width: 220,
+              width: profileAnchorEl?.clientWidth ?? 220,
             },
           },
         }}
       >
+        <MenuItem
+          onClick={() => {
+            navigate("/profile");
+            closeProfileMenu();
+          }}
+          sx={{ minWidth: 220 }}
+        >
+          <ListItemIcon sx={{ minWidth: 30 }}>
+            <PersonOutlineIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Профиль</ListItemText>
+        </MenuItem>
         <MenuItem
           onClick={() => {
             navigate("/");
@@ -315,6 +357,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
         }}
       >
         <Routes>
+          <Route path="/force-change-password" element={<ForceChangePasswordPage />} />
           <Route
             path="/"
             element={
@@ -329,6 +372,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
               </Paper>
             }
           />
+          <Route path="/profile" element={<ProfilePage />} />
           <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId" element={<HostDetailPage />} />
           <Route path="/users" element={user.role === "admin" ? <UsersAdminPage /> : <Navigate to="/" replace />} />
@@ -363,7 +407,7 @@ export default function App({ themeMode }: AppProps) {
 
   return (
     <Routes>
-      <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
+      <Route path="/login" element={user ? <Navigate to={user.must_change_password ? "/force-change-password" : "/"} replace /> : <LoginPage />} />
       <Route path="/*" element={<PrivateLayout themeMode={themeMode} />} />
     </Routes>
   );

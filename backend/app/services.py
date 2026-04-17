@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from uuid import UUID
@@ -26,6 +27,7 @@ from app.models import (
     Endpoint,
     File,
     Host,
+    MailJob,
     Notification,
     Port,
     Project,
@@ -37,6 +39,8 @@ from app.models import (
     Vulnerability,
     VulnerabilityAsset,
 )
+from app.mail import build_temporary_password_email
+from app.messaging import publish_mail_job
 from app.schemas import (
     CommentOut,
     ImportResult,
@@ -144,7 +148,7 @@ class AuthService:
         await self.audit.log("LOGIN", user_id=user.id, ip_address=ip_address)
         return access_token, refresh_token, user
 
-    async def refresh(self, refresh_token: str | None, ip_address: str | None = None) -> str:
+    async def refresh(self, refresh_token: str | None, ip_address: str | None = None) -> tuple[str, bool]:
         """Обновляет access-токен по валидному refresh-cookie."""
         if not refresh_token:
             raise UnauthorizedError("Refresh token отсутствует")
@@ -162,8 +166,11 @@ class AuthService:
         )
         if not token_entry:
             raise UnauthorizedError("Refresh token недействителен")
+        user = await self.db.scalar(select(User).where(User.id == user_id))
+        if not user or not user.is_active:
+            raise UnauthorizedError("Пользователь деактивирован")
         await self.audit.log("LOGIN", user_id=user_id, details={"source": "refresh"}, ip_address=ip_address)
-        return create_access_token(user_id)
+        return create_access_token(user_id), user.must_change_password
 
     async def logout(self, user_id: UUID, ip_address: str | None = None) -> None:
         """Отзывает все активные refresh-токены пользователя."""
@@ -182,6 +189,8 @@ class UserService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.audit = AuditService(db)
+        self.storage = MinioStorage()
+        self.storage.ensure_bucket()
 
     @staticmethod
     def _normalized_admin_email() -> str:
@@ -190,9 +199,92 @@ class UserService:
             return configured_email
         return "admin@example.com"
 
+    @staticmethod
+    def _normalize_tags(tags: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for tag in tags or []:
+            cleaned = tag.strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized.append(cleaned)
+        return normalized
+
+    @staticmethod
+    def _generate_temporary_password() -> str:
+        return secrets.token_urlsafe(12)
+
+    async def _ensure_unique_identity(
+        self,
+        *,
+        username: str | None = None,
+        email: str | None = None,
+        exclude_user_id: UUID | None = None,
+    ) -> None:
+        clauses = []
+        if username:
+            clauses.append(User.username == username)
+        if email:
+            clauses.append(User.email == email)
+        if not clauses:
+            return
+        query = select(User).where(or_(*clauses))
+        if exclude_user_id:
+            query = query.where(User.id != exclude_user_id)
+        exists = await self.db.scalar(query)
+        if exists:
+            raise ConflictError("username или email уже заняты")
+
+    async def _enqueue_temporary_password_mail(
+        self,
+        *,
+        user: User,
+        temporary_password: str,
+        actor_id: UUID | None,
+    ) -> MailJob:
+        subject, body = build_temporary_password_email(username=user.full_name or user.username, temporary_password=temporary_password)
+        job = MailJob(
+            user_id=user.id,
+            created_by=actor_id,
+            recipient_email=user.email,
+            subject=subject,
+            template="temporary_password",
+            payload={"username": user.username, "temporary_password": temporary_password, "body": body},
+            status="pending",
+        )
+        self.db.add(job)
+        await self.db.flush()
+        return job
+
+    async def _publish_mail_job(self, job: MailJob) -> None:
+        try:
+            await publish_mail_job(job.id)
+        except Exception as exc:
+            job.status = "pending"
+            job.last_error = str(exc)
+        else:
+            job.status = "queued"
+            job.published_at = datetime.now(UTC)
+        await self.db.commit()
+
+    async def get_user_profile(self, user_id: UUID) -> User:
+        return await self.get_user(user_id)
+
     async def bootstrap_admin(self) -> None:
         """Создаёт стартового администратора при пустой таблице users."""
         normalized_email = self._normalized_admin_email()
+        existing_admin = await self.db.scalar(
+            select(User).where(or_(User.username == settings.initial_admin_username, User.email == normalized_email))
+        )
+        if existing_admin:
+            if existing_admin.username == settings.initial_admin_username and existing_admin.email != normalized_email:
+                existing_admin.email = normalized_email
+                await self.db.commit()
+            return
         total_users = await self.db.scalar(select(func.count()).select_from(User))
         if total_users and total_users > 0:
             admin_user = await self.db.scalar(select(User).where(User.username == settings.initial_admin_username))
@@ -203,7 +295,10 @@ class UserService:
         admin = User(
             username=settings.initial_admin_username,
             email=normalized_email,
+            full_name="Administrator",
+            tags=["admin"],
             password_hash=hash_password(settings.initial_admin_password),
+            password_changed_at=datetime.now(UTC),
             role=UserRole.ADMIN,
             is_active=True,
         )
@@ -227,33 +322,75 @@ class UserService:
 
     async def create_user(self, payload: dict, actor_id: UUID, ip_address: str | None = None) -> User:
         """Создаёт нового пользователя."""
-        exists = await self.db.scalar(
-            select(User).where(or_(User.username == payload["username"], User.email == payload["email"]))
-        )
-        if exists:
-            raise ConflictError("username или email уже заняты")
+        await self._ensure_unique_identity(username=payload["username"], email=payload["email"])
+        send_invite_email = bool(payload.get("send_invite_email"))
+        temporary_password = payload.get("password")
+        if not temporary_password and not send_invite_email:
+            raise ValidationError("Нужно указать пароль или включить отправку приглашения на email")
+        generated_password = False
+        if not temporary_password:
+            temporary_password = self._generate_temporary_password()
+            generated_password = True
+        must_change_password = send_invite_email or generated_password
         user = User(
             username=payload["username"],
             email=payload["email"],
-            password_hash=hash_password(payload["password"]),
+            full_name=payload.get("full_name"),
+            tags=self._normalize_tags(payload.get("tags")),
+            password_hash=hash_password(temporary_password),
+            must_change_password=must_change_password,
+            password_changed_at=None if must_change_password else datetime.now(UTC),
             role=payload.get("role", UserRole.PENTESTER),
             is_active=True,
         )
         self.db.add(user)
+        mail_job: MailJob | None = None
+        if send_invite_email:
+            await self.db.flush()
+            mail_job = await self._enqueue_temporary_password_mail(user=user, temporary_password=temporary_password, actor_id=actor_id)
         await self.db.commit()
         await self.db.refresh(user)
-        await self.audit.log("CREATE", user_id=actor_id, entity_type="user", entity_id=user.id, ip_address=ip_address)
+        await self.audit.log(
+            "CREATE",
+            user_id=actor_id,
+            entity_type="user",
+            entity_id=user.id,
+            details={"email": user.email, "invite_sent": send_invite_email, "must_change_password": must_change_password},
+            ip_address=ip_address,
+        )
+        if mail_job:
+            await self._publish_mail_job(mail_job)
         return user
 
     async def update_user(self, user_id: UUID, payload: dict, actor_id: UUID, ip_address: str | None = None) -> User:
         """Обновляет данные пользователя."""
         user = await self.get_user(user_id)
+        username = payload.get("username", user.username)
+        email = payload.get("email", user.email)
+        await self._ensure_unique_identity(username=username, email=email, exclude_user_id=user.id)
+        if "tags" in payload:
+            payload["tags"] = self._normalize_tags(payload.get("tags"))
         for key, value in payload.items():
             if value is not None:
                 setattr(user, key, value)
         await self.db.commit()
         await self.db.refresh(user)
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="user", entity_id=user.id, ip_address=ip_address)
+        return user
+
+    async def update_own_profile(self, user_id: UUID, payload: dict, ip_address: str | None = None) -> User:
+        user = await self.get_user(user_id)
+        username = payload.get("username", user.username)
+        email = payload.get("email", user.email)
+        await self._ensure_unique_identity(username=username, email=email, exclude_user_id=user.id)
+        if "tags" in payload:
+            payload["tags"] = self._normalize_tags(payload.get("tags"))
+        for key, value in payload.items():
+            if value is not None:
+                setattr(user, key, value)
+        await self.db.commit()
+        await self.db.refresh(user)
+        await self.audit.log("UPDATE", user_id=user_id, entity_type="user_profile", entity_id=user.id, ip_address=ip_address)
         return user
 
     async def delete_user(self, user_id: UUID, actor_id: UUID, ip_address: str | None = None) -> None:
@@ -265,17 +402,102 @@ class UserService:
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="user", entity_id=user_id, ip_address=ip_address)
 
-    async def reset_password(self, user_id: UUID, new_password: str, actor_id: UUID, ip_address: str | None = None) -> None:
-        """Сбрасывает пароль пользователя и отзывает его refresh-токены."""
+    async def reset_password(self, user_id: UUID, actor_id: UUID, ip_address: str | None = None) -> User:
+        """Сбрасывает пароль пользователя, выставляет временный пароль и отправляет его по почте."""
         user = await self.get_user(user_id)
+        temporary_password = self._generate_temporary_password()
+        user.password_hash = hash_password(temporary_password)
+        user.must_change_password = True
+        user.password_changed_at = None
+        await self.db.execute(
+            update(RefreshToken)
+            .where(and_(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)))
+            .values(revoked_at=datetime.now(UTC))
+        )
+        mail_job = await self._enqueue_temporary_password_mail(user=user, temporary_password=temporary_password, actor_id=actor_id)
+        await self.db.commit()
+        await self.audit.log(
+            "UPDATE",
+            user_id=actor_id,
+            entity_type="user_password_reset",
+            entity_id=user_id,
+            details={"email": user.email, "must_change_password": True},
+            ip_address=ip_address,
+        )
+        await self._publish_mail_job(mail_job)
+        return user
+
+    async def change_own_password(
+        self,
+        user_id: UUID,
+        *,
+        current_password: str,
+        new_password: str,
+        ip_address: str | None = None,
+    ) -> User:
+        user = await self.get_user(user_id)
+        if not verify_password(current_password, user.password_hash):
+            raise UnauthorizedError("Текущий пароль указан неверно")
         user.password_hash = hash_password(new_password)
+        user.must_change_password = False
+        user.password_changed_at = datetime.now(UTC)
         await self.db.execute(
             update(RefreshToken)
             .where(and_(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)))
             .values(revoked_at=datetime.now(UTC))
         )
         await self.db.commit()
-        await self.audit.log("UPDATE", user_id=actor_id, entity_type="user", entity_id=user_id, ip_address=ip_address)
+        await self.audit.log("UPDATE", user_id=user.id, entity_type="user_password", entity_id=user.id, ip_address=ip_address)
+        await self.db.refresh(user)
+        return user
+
+    async def force_change_password(self, user_id: UUID, *, new_password: str, ip_address: str | None = None) -> User:
+        user = await self.get_user(user_id)
+        user.password_hash = hash_password(new_password)
+        user.must_change_password = False
+        user.password_changed_at = datetime.now(UTC)
+        await self.db.execute(
+            update(RefreshToken)
+            .where(and_(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)))
+            .values(revoked_at=datetime.now(UTC))
+        )
+        await self.db.commit()
+        await self.audit.log(
+            "UPDATE",
+            user_id=user.id,
+            entity_type="user_force_password_change",
+            entity_id=user.id,
+            ip_address=ip_address,
+        )
+        await self.db.refresh(user)
+        return user
+
+    async def upload_avatar(self, user_id: UUID, upload: UploadFile, ip_address: str | None = None) -> User:
+        user = await self.get_user(user_id)
+        content = await upload.read()
+        if len(content) > 5 * 1024 * 1024:
+            raise ValidationError("Размер аватара превышает 5 МБ")
+        mime_type = magic.from_buffer(content, mime=True)
+        if mime_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+            raise ValidationError("Аватар должен быть изображением PNG, JPEG, WEBP или GIF")
+        if user.avatar_minio_key:
+            await asyncio.to_thread(self.storage.delete, user.avatar_minio_key)
+        object_key = await asyncio.to_thread(self.storage.upload_bytes, content, mime_type, upload.filename or "avatar.bin")
+        user.avatar_minio_bucket = settings.minio_bucket_name
+        user.avatar_minio_key = object_key
+        user.avatar_content_type = mime_type
+        user.avatar_uploaded_at = datetime.now(UTC)
+        await self.db.commit()
+        await self.db.refresh(user)
+        await self.audit.log("FILE_UPLOAD", user_id=user.id, entity_type="user_avatar", entity_id=user.id, ip_address=ip_address)
+        return user
+
+    async def download_avatar(self, user_id: UUID) -> tuple[User, bytes]:
+        user = await self.get_user(user_id)
+        if not user.avatar_minio_key:
+            raise NotFoundError("Аватар не найден")
+        blob = await asyncio.to_thread(self.storage.download_bytes, user.avatar_minio_key)
+        return user, blob
 
 
 class ProjectService:
@@ -293,7 +515,7 @@ class ProjectService:
     @staticmethod
     def _normalize_project_folder(folder: str | None) -> str:
         normalized = (folder or "").strip()
-        return normalized or "Без папки"
+        return normalized
 
     @staticmethod
     def _normalize_folder_segment(name: str) -> str:
@@ -1126,6 +1348,23 @@ class CommentService:
             mention_models.append(MentionOut(user_id=user.id, username=user.username))
         await self.db.commit()
         await self.db.refresh(comment)
+        for user in mentioned_users:
+            await ws_manager.notify_user(
+                user.id,
+                {
+                    "event": "notification",
+                    "entity": "notification",
+                    "data": {
+                        "type": NotificationType.MENTION.value,
+                        "is_read": False,
+                        "comment_id": str(comment.id),
+                        "vulnerability_id": str(vuln.id),
+                        "vulnerability_title": vuln.title,
+                        "project_id": str(project_id),
+                        "commenter_username": actor.username,
+                    },
+                },
+            )
         await self.audit.log("CREATE", user_id=actor.id, entity_type="comment", entity_id=comment.id)
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "comment", "project_id": str(project_id), "data": {"id": str(comment.id)}})
         return CommentOut(
@@ -1158,6 +1397,22 @@ class CommentService:
             mention_models.append(MentionOut(user_id=user.id, username=user.username))
         await self.db.commit()
         await self.db.refresh(comment)
+        for user in mentioned_users:
+            await ws_manager.notify_user(
+                user.id,
+                {
+                    "event": "notification",
+                    "entity": "notification",
+                    "data": {
+                        "type": NotificationType.MENTION.value,
+                        "is_read": False,
+                        "comment_id": str(comment.id),
+                        "vulnerability_id": str(vuln_id),
+                        "project_id": str(project_id),
+                        "commenter_username": actor.username,
+                    },
+                },
+            )
         await self.audit.log("UPDATE", user_id=actor.id, entity_type="comment", entity_id=comment.id)
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "comment", "project_id": str(project_id), "data": {"id": str(comment.id)}})
         return CommentOut(

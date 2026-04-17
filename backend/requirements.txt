@@ -16,5 +16,7 @@ reportlab==4.2.5
 markdown==3.7
 httpx==0.28.0
 clickhouse-connect==0.15.1
+aio-pika==9.6.2
+aiosmtplib==5.1.0
 pytest==8.3.4
 pytest-asyncio==0.24.0

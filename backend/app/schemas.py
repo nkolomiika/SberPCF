@@ -32,42 +32,72 @@ class LoginResponse(BaseModel):
     id: UUID
     username: str
     role: UserRole
+    must_change_password: bool
 
 
 class RefreshResponse(BaseModel):
     ok: bool = True
+    must_change_password: bool = False
 
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    full_name: str | None = Field(default=None, max_length=255)
+    tags: list[str] = Field(default_factory=list)
+    password: str | None = Field(default=None, min_length=8, max_length=128)
     role: UserRole = UserRole.PENTESTER
+    send_invite_email: bool = False
 
 
 class UserUpdate(BaseModel):
     username: str | None = Field(default=None, min_length=1, max_length=100)
     email: EmailStr | None = None
+    full_name: str | None = Field(default=None, max_length=255)
+    tags: list[str] | None = None
     role: UserRole | None = None
     is_active: bool | None = None
 
 
-class PasswordResetRequest(BaseModel):
+class UserProfileUpdate(BaseModel):
+    username: str | None = Field(default=None, min_length=1, max_length=100)
+    email: EmailStr | None = None
+    full_name: str | None = Field(default=None, max_length=255)
+    tags: list[str] | None = None
+
+
+class OwnPasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class ForceChangePasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetOut(BaseModel):
+    ok: bool = True
+    email_sent_to: EmailStr
+    must_change_password: bool = True
 
 
 class UserOut(ORMBase):
     id: UUID
     username: str
     email: EmailStr
+    full_name: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    avatar_url: str | None = None
     role: UserRole
     is_active: bool
+    must_change_password: bool = False
+    password_changed_at: datetime | None = None
     created_at: datetime
 
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    folder: str = Field(default="Без папки", min_length=1, max_length=255)
+    folder: str = Field(default="", max_length=255)
     description: str | None = None
     start_date: date | None = None
     end_date: date | None = None
@@ -81,7 +111,7 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    folder: str | None = Field(default=None, min_length=1, max_length=255)
+    folder: str | None = Field(default=None, max_length=255)
     description: str | None = None
     start_date: date | None = None
     end_date: date | None = None

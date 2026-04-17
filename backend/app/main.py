@@ -87,12 +87,23 @@ async def startup() -> None:
     async with engine.begin() as conn:
         if conn.dialect.name == "postgresql":
             await conn.execute(text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'developer'"))
-            await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder VARCHAR(255) NOT NULL DEFAULT 'Без папки'"))
+            await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder VARCHAR(255) NOT NULL DEFAULT ''"))
+            await conn.execute(text("ALTER TABLE projects ALTER COLUMN folder SET DEFAULT ''"))
+            await conn.execute(text("UPDATE projects SET folder = '' WHERE folder = 'Без папки'"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255)"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS tags JSON"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_minio_bucket VARCHAR(63)"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_minio_key TEXT"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_content_type VARCHAR(127)"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_uploaded_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("UPDATE users SET tags = '[]'::json WHERE tags IS NULL"))
         elif conn.dialect.name == "sqlite":
             columns = (await conn.execute(text("PRAGMA table_info(projects)"))).fetchall()
             has_folder = any(row[1] == "folder" for row in columns)
             if not has_folder:
-                await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT 'Без папки'"))
+                await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT ''"))
         await conn.run_sync(Base.metadata.create_all)
     await audit_store.ensure_table()
     MinioStorage().ensure_bucket()

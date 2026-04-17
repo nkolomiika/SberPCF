@@ -47,8 +47,8 @@ import { useAuthStore } from "../store";
 import type { Project, ProjectFolder, User } from "../types";
 
 const DEFAULT_PROJECT_DURATION_DAYS = 14;
-const DEFAULT_FOLDER_NAME = "Без папки";
-const ROOT_FOLDER_NODE: FolderTreeNode = { id: null, name: DEFAULT_FOLDER_NAME, path: DEFAULT_FOLDER_NAME, children: [], projects: [] };
+const ROOT_FOLDER_LABEL = "Корень";
+const ROOT_FOLDER_NODE: FolderTreeNode = { id: null, name: "", path: "", children: [], projects: [] };
 
 type FolderTreeNode = {
   id: string | null;
@@ -98,8 +98,8 @@ export function ProjectsPage() {
   const [endDate, setEndDate] = useState("");
   const [usersCatalog, setUsersCatalog] = useState<User[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
-  const [selectedFolder, setSelectedFolder] = useState(DEFAULT_FOLDER_NAME);
-  const [folderPaths, setFolderPaths] = useState<string[]>([DEFAULT_FOLDER_NAME]);
+  const [selectedFolder, setSelectedFolder] = useState("");
+  const [folderPaths, setFolderPaths] = useState<string[]>([]);
   const [creatingProject, setCreatingProject] = useState(false);
   const [updatingProject, setUpdatingProject] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -118,7 +118,7 @@ export function ProjectsPage() {
   const [editingProjectStartDate, setEditingProjectStartDate] = useState("");
   const [editingProjectEndDate, setEditingProjectEndDate] = useState("");
   const [editingProjectStatus, setEditingProjectStatus] = useState<Project["status"]>("active");
-  const [editingProjectFolder, setEditingProjectFolder] = useState(DEFAULT_FOLDER_NAME);
+  const [editingProjectFolder, setEditingProjectFolder] = useState("");
   const projectListRef = useRef<HTMLUListElement | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollVelocityRef = useRef(0);
@@ -156,7 +156,6 @@ export function ProjectsPage() {
 
   useEffect(() => {
     const values = [
-      DEFAULT_FOLDER_NAME,
       ...folders.map((item) => item.path),
       ...projects.map((item) => item.folder),
     ]
@@ -181,7 +180,10 @@ export function ProjectsPage() {
     const nodeMap = new Map<string, FolderTreeNode>([["", root]]);
 
     const ensurePath = (pathValue: string) => {
-      const normalizedPath = (pathValue || DEFAULT_FOLDER_NAME).trim() || DEFAULT_FOLDER_NAME;
+      const normalizedPath = (pathValue || "").trim();
+      if (!normalizedPath) {
+        return root;
+      }
       const segments = normalizedPath.split("/").filter(Boolean);
       let currentPath = "";
       let parent = root;
@@ -257,7 +259,7 @@ export function ProjectsPage() {
     try {
       const createdProject = await createProject({
         name: name.trim(),
-        folder: selectedFolder || DEFAULT_FOLDER_NAME,
+        folder: selectedFolder || "",
         description: description.trim() || undefined,
         start_date: effectiveStartDate,
         end_date: effectiveEndDate,
@@ -271,7 +273,7 @@ export function ProjectsPage() {
       setStartDate("");
       setEndDate("");
       setSelectedMemberIds([]);
-      setSelectedFolder(DEFAULT_FOLDER_NAME);
+      setSelectedFolder("");
       await loadProjects();
     } catch {
       setError("Не удалось создать проект");
@@ -301,14 +303,14 @@ export function ProjectsPage() {
     setActionsAnchorEl(null);
   };
 
-  const openCreateProjectDialog = (folderPath = DEFAULT_FOLDER_NAME) => {
+  const openCreateProjectDialog = (folderPath = "") => {
     closeActionsMenu();
     closeFolderActions();
     const today = toDateInputValue(new Date());
     setStartDate(today);
     setEndDate(plusDays(today, DEFAULT_PROJECT_DURATION_DAYS));
     setSelectedMemberIds([]);
-    setSelectedFolder((folderPath || DEFAULT_FOLDER_NAME).trim() || DEFAULT_FOLDER_NAME);
+    setSelectedFolder((folderPath || "").trim());
     setCreateOpen(true);
   };
 
@@ -366,7 +368,7 @@ export function ProjectsPage() {
     setEditingProjectStartDate(project.start_date ?? "");
     setEditingProjectEndDate(project.end_date ?? "");
     setEditingProjectStatus(project.status);
-    setEditingProjectFolder((project.folder || DEFAULT_FOLDER_NAME).trim() || DEFAULT_FOLDER_NAME);
+    setEditingProjectFolder((project.folder || "").trim());
     setEditOpen(true);
   };
 
@@ -389,7 +391,7 @@ export function ProjectsPage() {
         start_date: normalizedStart,
         end_date: normalizedEnd,
         status: editingProjectStatus,
-        folder: editingProjectFolder || DEFAULT_FOLDER_NAME,
+        folder: editingProjectFolder || "",
       });
       setEditOpen(false);
       setEditingProjectId(null);
@@ -402,7 +404,7 @@ export function ProjectsPage() {
   };
 
   const moveProjectToFolder = async (projectId: string, folderPath: string) => {
-    const normalizedFolder = (folderPath || DEFAULT_FOLDER_NAME).trim() || DEFAULT_FOLDER_NAME;
+    const normalizedFolder = (folderPath || "").trim();
     setError(null);
     try {
       await updateProject(projectId, { folder: normalizedFolder });
@@ -418,8 +420,8 @@ export function ProjectsPage() {
 
   const moveFolderToFolder = async (folderId: string, targetNode: FolderTreeNode) => {
     const explicitTargetFolder = folders.find((item) => item.path === targetNode.path);
-    const targetParentId = targetNode.path === DEFAULT_FOLDER_NAME ? null : explicitTargetFolder?.id ?? targetNode.id;
-    if (targetNode.path !== DEFAULT_FOLDER_NAME && !targetParentId) {
+    const targetParentId = targetNode.path === "" ? null : explicitTargetFolder?.id ?? targetNode.id;
+    if (targetNode.path !== "" && !targetParentId) {
       setError("Целевая папка не найдена");
       return;
     }
@@ -558,7 +560,7 @@ export function ProjectsPage() {
     if (targetNode.path === sourcePath || targetNode.path.startsWith(`${sourcePath}/`)) {
       return false;
     }
-    if (!targetNode.id && targetNode.path !== DEFAULT_FOLDER_NAME) {
+    if (!targetNode.id && targetNode.path !== "") {
       return false;
     }
     return true;
@@ -643,9 +645,9 @@ export function ProjectsPage() {
         direction="row"
         alignItems="center"
         justifyContent="space-between"
-        draggable={Boolean(user?.role === "admin" && node.id && node.path !== DEFAULT_FOLDER_NAME)}
+        draggable={Boolean(user?.role === "admin" && node.id && node.path !== "")}
         onDragStart={(event) => {
-          if (!(user?.role === "admin" && node.id && node.path !== DEFAULT_FOLDER_NAME)) {
+          if (!(user?.role === "admin" && node.id && node.path !== "")) {
             return;
           }
           setDraggingProjectId(null);
@@ -1062,7 +1064,7 @@ export function ProjectsPage() {
           setDropLineTarget(null);
           setDragOverFolderPath(null);
           if (dragging.type === "project") {
-            void moveProjectToFolder(dragging.id, DEFAULT_FOLDER_NAME);
+            void moveProjectToFolder(dragging.id, "");
             return;
           }
           void moveFolderToFolder(dragging.id, ROOT_FOLDER_NODE);
@@ -1113,6 +1115,7 @@ export function ProjectsPage() {
               InputLabelProps={{ shrink: true }}
             />
             <TextField select label="Папка проекта" value={selectedFolder} onChange={(event) => setSelectedFolder(event.target.value)}>
+              <MenuItem value="">{ROOT_FOLDER_LABEL}</MenuItem>
               {folderPaths.map((folder) => (
                 <MenuItem key={folder} value={folder}>
                   {folder}
@@ -1153,7 +1156,7 @@ export function ProjectsPage() {
               setStartDate("");
               setEndDate("");
               setSelectedMemberIds([]);
-              setSelectedFolder(DEFAULT_FOLDER_NAME);
+              setSelectedFolder("");
             }}
           >
             Отмена
@@ -1239,6 +1242,7 @@ export function ProjectsPage() {
               value={editingProjectFolder}
               onChange={(event) => setEditingProjectFolder(event.target.value)}
             >
+              <MenuItem value="">{ROOT_FOLDER_LABEL}</MenuItem>
               {folderPaths.map((folder) => (
                 <MenuItem key={folder} value={folder}>
                   {folder}

@@ -8,8 +8,10 @@ interface AuthState {
   isInitialized: boolean;
   error: string | null;
   initialize: () => Promise<void>;
-  signIn: (username: string, password: string) => Promise<void>;
+  signIn: (username: string, password: string) => Promise<User>;
   signOut: () => Promise<void>;
+  setUser: (user: User | null) => void;
+  refreshUser: () => Promise<User | null>;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -32,6 +34,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       await login(username, password);
       const me = await getMe();
       set({ user: me, isLoading: false });
+      return me;
     } catch {
       set({ error: "Не удалось выполнить вход", isLoading: false });
       throw new Error("login failed");
@@ -40,5 +43,16 @@ export const useAuthStore = create<AuthState>((set) => ({
   signOut: async () => {
     await logout();
     set({ user: null });
+  },
+  setUser: (user) => set({ user }),
+  refreshUser: async () => {
+    try {
+      const me = await getMe();
+      set({ user: me });
+      return me;
+    } catch {
+      set({ user: null });
+      return null;
+    }
   },
 }));

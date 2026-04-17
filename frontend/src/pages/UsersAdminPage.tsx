@@ -1,26 +1,31 @@
-import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import KeyIcon from "@mui/icons-material/Key";
+import MoreVertIcon from "@mui/icons-material/MoreVert";
 import {
   Alert,
+  Avatar,
   Box,
   Button,
   Card,
   CardContent,
+  Checkbox,
   Chip,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   IconButton,
+  Menu,
   MenuItem,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import { createUser, deleteUser, getUsers, resetUserPassword, updateUser } from "../api";
 import type { User, UserRole } from "../types";
 
@@ -39,6 +44,8 @@ export function UsersAdminPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [pageActionsAnchorEl, setPageActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [userActionsAnchorEl, setUserActionsAnchorEl] = useState<HTMLElement | null>(null);
 
   const [isCreateOpen, setCreateOpen] = useState(false);
   const [isEditOpen, setEditOpen] = useState(false);
@@ -47,15 +54,18 @@ export function UsersAdminPage() {
 
   const [createUsername, setCreateUsername] = useState("");
   const [createEmail, setCreateEmail] = useState("");
+  const [createFullName, setCreateFullName] = useState("");
+  const [createTagsText, setCreateTagsText] = useState("");
   const [createPassword, setCreatePassword] = useState("");
   const [createRole, setCreateRole] = useState<UserRole>("pentester");
+  const [createSendInviteEmail, setCreateSendInviteEmail] = useState(true);
 
   const [editUsername, setEditUsername] = useState("");
   const [editEmail, setEditEmail] = useState("");
+  const [editFullName, setEditFullName] = useState("");
+  const [editTagsText, setEditTagsText] = useState("");
   const [editRole, setEditRole] = useState<UserRole>("pentester");
   const [editIsActive, setEditIsActive] = useState(true);
-
-  const [resetPasswordValue, setResetPasswordValue] = useState("");
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
@@ -80,8 +90,11 @@ export function UsersAdminPage() {
     setCreateOpen(false);
     setCreateUsername("");
     setCreateEmail("");
+    setCreateFullName("");
+    setCreateTagsText("");
     setCreatePassword("");
     setCreateRole("pentester");
+    setCreateSendInviteEmail(true);
   };
 
   const closeEditDialog = () => {
@@ -92,13 +105,23 @@ export function UsersAdminPage() {
   const closeResetDialog = () => {
     setResetOpen(false);
     setActiveUser(null);
-    setResetPasswordValue("");
   };
+
+  const closePageActions = () => setPageActionsAnchorEl(null);
+  const closeUserActions = () => setUserActionsAnchorEl(null);
+
+  const parseTags = (value: string) =>
+    value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
 
   const openEditDialog = (user: User) => {
     setActiveUser(user);
     setEditUsername(user.username);
     setEditEmail(user.email);
+    setEditFullName(user.full_name ?? "");
+    setEditTagsText(user.tags.join(", "));
     setEditRole(user.role);
     setEditIsActive(user.is_active);
     setEditOpen(true);
@@ -106,7 +129,6 @@ export function UsersAdminPage() {
 
   const openResetDialog = (user: User) => {
     setActiveUser(user);
-    setResetPasswordValue("");
     setResetOpen(true);
   };
 
@@ -115,10 +137,13 @@ export function UsersAdminPage() {
       await createUser({
         username: createUsername.trim(),
         email: createEmail.trim(),
-        password: createPassword,
+        full_name: createFullName.trim() || undefined,
+        tags: parseTags(createTagsText),
+        password: createPassword || undefined,
         role: createRole,
+        send_invite_email: createSendInviteEmail,
       });
-      setInfoMessage("Пользователь создан.");
+      setInfoMessage(createSendInviteEmail ? "Пользователь создан, письмо с временным паролем отправлено." : "Пользователь создан.");
       closeCreateDialog();
       await loadUsers();
     } catch (submitError) {
@@ -134,6 +159,8 @@ export function UsersAdminPage() {
       await updateUser(activeUser.id, {
         username: editUsername.trim(),
         email: editEmail.trim(),
+        full_name: editFullName.trim() || undefined,
+        tags: parseTags(editTagsText),
         role: editRole,
         is_active: editIsActive,
       });
@@ -150,9 +177,10 @@ export function UsersAdminPage() {
       return;
     }
     try {
-      await resetUserPassword(activeUser.id, resetPasswordValue);
-      setInfoMessage(`Пароль пользователя ${activeUser.username} сброшен.`);
+      const result = await resetUserPassword(activeUser.id);
+      setInfoMessage(`Временный пароль для ${activeUser.username} отправлен на ${result.email_sent_to}.`);
       closeResetDialog();
+      await loadUsers();
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Не удалось сбросить пароль.");
     }
@@ -194,19 +222,63 @@ export function UsersAdminPage() {
             <Chip label={`Активных: ${activeUsers}`} variant="outlined" />
           </Stack>
         </Stack>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
-          Создать пользователя
-        </Button>
+        <Tooltip title="Действия">
+          <IconButton onClick={(event) => setPageActionsAnchorEl(event.currentTarget)} sx={{ border: "1px solid rgba(126,224,255,0.18)" }}>
+            <MoreVertIcon />
+          </IconButton>
+        </Tooltip>
       </Stack>
+
+      <Menu
+        anchorEl={pageActionsAnchorEl}
+        open={Boolean(pageActionsAnchorEl)}
+        onClose={closePageActions}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            closePageActions();
+            setCreateOpen(true);
+          }}
+        >
+          Создать пользователя
+        </MenuItem>
+      </Menu>
 
       <Stack spacing={1.5}>
         {users.map((user) => (
-          <Card key={user.id} sx={{ border: "1px solid rgba(126,224,255,0.14)", backgroundColor: "rgba(15,27,45,0.72)" }}>
+          <Card
+            key={user.id}
+            sx={{
+              border: "1px solid rgba(126,224,255,0.14)",
+              backgroundColor: "rgba(15,27,45,0.72)",
+              "& .user-actions-trigger": {
+                opacity: 0,
+                pointerEvents: "none",
+                transition: "opacity 0.18s ease",
+              },
+              "&:hover .user-actions-trigger": {
+                opacity: 1,
+                pointerEvents: "auto",
+              },
+            }}
+          >
             <CardContent sx={{ p: 2 }}>
               <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={1.5}>
-                <Stack spacing={0.8}>
+                <Stack spacing={0.8} sx={{ minWidth: 0 }}>
+                  <Stack direction="row" spacing={1.2} alignItems="center">
+                    <Avatar src={user.avatar_url ?? undefined}>{(user.full_name || user.username)[0]?.toUpperCase()}</Avatar>
+                    <Stack spacing={0.3} sx={{ minWidth: 0 }}>
+                      <Typography variant="h6" noWrap>
+                        {user.full_name || user.username}
+                      </Typography>
+                      <Typography color="text.secondary" noWrap>
+                        @{user.username}
+                      </Typography>
+                    </Stack>
+                  </Stack>
                   <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                    <Typography variant="h6">{user.username}</Typography>
                     <Chip size="small" label={roleLabel(user.role)} />
                     <Chip
                       size="small"
@@ -214,6 +286,10 @@ export function UsersAdminPage() {
                       color={user.is_active ? "success" : "default"}
                       variant={user.is_active ? "filled" : "outlined"}
                     />
+                    {user.must_change_password && <Chip size="small" color="warning" label="Требуется смена пароля" />}
+                    {user.tags.map((tag) => (
+                      <Chip key={`${user.id}-${tag}`} size="small" variant="outlined" label={tag} />
+                    ))}
                   </Stack>
                   <Typography color="text.secondary">{user.email}</Typography>
                   <Typography variant="body2" color="text.secondary">
@@ -221,14 +297,15 @@ export function UsersAdminPage() {
                   </Typography>
                 </Stack>
                 <Stack direction="row" spacing={0.5} alignItems="flex-start">
-                  <IconButton size="small" onClick={() => openEditDialog(user)}>
-                    <EditIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton size="small" onClick={() => openResetDialog(user)}>
-                    <KeyIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton size="small" onClick={() => void handleDeleteUser(user)}>
-                    <DeleteIcon fontSize="small" />
+                  <IconButton
+                    className="user-actions-trigger"
+                    size="small"
+                    onClick={(event: MouseEvent<HTMLElement>) => {
+                      setActiveUser(user);
+                      setUserActionsAnchorEl(event.currentTarget);
+                    }}
+                  >
+                    <MoreVertIcon fontSize="small" />
                   </IconButton>
                 </Stack>
               </Stack>
@@ -237,17 +314,72 @@ export function UsersAdminPage() {
         ))}
       </Stack>
 
+      <Menu
+        anchorEl={userActionsAnchorEl}
+        open={Boolean(userActionsAnchorEl)}
+        onClose={closeUserActions}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            if (activeUser) {
+              openEditDialog(activeUser);
+            }
+            closeUserActions();
+          }}
+        >
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Редактировать
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (activeUser) {
+              openResetDialog(activeUser);
+            }
+            closeUserActions();
+          }}
+        >
+          <KeyIcon fontSize="small" sx={{ mr: 1 }} />
+          Сбросить пароль
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (activeUser) {
+              void handleDeleteUser(activeUser);
+            }
+            closeUserActions();
+          }}
+        >
+          <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
+          Удалить
+        </MenuItem>
+      </Menu>
+
       <Dialog open={isCreateOpen} onClose={closeCreateDialog} fullWidth maxWidth="sm">
         <DialogTitle>Создать пользователя</DialogTitle>
         <DialogContent sx={{ display: "grid", gap: 2, pt: 2 }}>
           <TextField label="Логин" value={createUsername} onChange={(event) => setCreateUsername(event.target.value)} fullWidth />
           <TextField label="Email" value={createEmail} onChange={(event) => setCreateEmail(event.target.value)} fullWidth />
+          <TextField label="Имя" value={createFullName} onChange={(event) => setCreateFullName(event.target.value)} fullWidth />
+          <TextField
+            label="Теги"
+            value={createTagsText}
+            onChange={(event) => setCreateTagsText(event.target.value)}
+            helperText="Через запятую"
+            fullWidth
+          />
           <TextField
             label="Пароль"
             type="password"
             value={createPassword}
             onChange={(event) => setCreatePassword(event.target.value)}
+            helperText={createSendInviteEmail ? "Можно оставить пустым: система сгенерирует временный пароль." : "Минимум 8 символов."}
             fullWidth
+          />
+          <FormControlLabel
+            control={<Checkbox checked={createSendInviteEmail} onChange={(event) => setCreateSendInviteEmail(event.target.checked)} />}
+            label="Отправить приглашение и временный пароль на email"
           />
           <TextField select label="Роль" value={createRole} onChange={(event) => setCreateRole(event.target.value as UserRole)} fullWidth>
             {ROLE_OPTIONS.map((option) => (
@@ -262,7 +394,7 @@ export function UsersAdminPage() {
           <Button
             variant="contained"
             onClick={() => void handleCreateUser()}
-            disabled={!createUsername.trim() || !createEmail.trim() || createPassword.length < 8}
+            disabled={!createUsername.trim() || !createEmail.trim() || (!createSendInviteEmail && createPassword.length < 8)}
           >
             Создать
           </Button>
@@ -274,6 +406,8 @@ export function UsersAdminPage() {
         <DialogContent sx={{ display: "grid", gap: 2, pt: 2 }}>
           <TextField label="Логин" value={editUsername} onChange={(event) => setEditUsername(event.target.value)} fullWidth />
           <TextField label="Email" value={editEmail} onChange={(event) => setEditEmail(event.target.value)} fullWidth />
+          <TextField label="Имя" value={editFullName} onChange={(event) => setEditFullName(event.target.value)} fullWidth />
+          <TextField label="Теги" value={editTagsText} onChange={(event) => setEditTagsText(event.target.value)} helperText="Через запятую" fullWidth />
           <TextField select label="Роль" value={editRole} onChange={(event) => setEditRole(event.target.value as UserRole)} fullWidth>
             {ROLE_OPTIONS.map((option) => (
               <MenuItem key={option.value} value={option.value}>
@@ -304,19 +438,14 @@ export function UsersAdminPage() {
         <DialogTitle>Сбросить пароль</DialogTitle>
         <DialogContent sx={{ display: "grid", gap: 2, pt: 2 }}>
           <Typography color="text.secondary">
-            {activeUser ? `Новый пароль для ${activeUser.username}` : "Новый пароль"}
+            {activeUser
+              ? `Система сгенерирует временный пароль для ${activeUser.username} и отправит его на ${activeUser.email}. При первом входе пользователь должен будет сменить пароль.`
+              : "Система отправит временный пароль на email пользователя."}
           </Typography>
-          <TextField
-            label="Новый пароль"
-            type="password"
-            value={resetPasswordValue}
-            onChange={(event) => setResetPasswordValue(event.target.value)}
-            fullWidth
-          />
         </DialogContent>
         <DialogActions>
           <Button onClick={closeResetDialog}>Отмена</Button>
-          <Button variant="contained" onClick={() => void handleResetPassword()} disabled={resetPasswordValue.length < 8}>
+          <Button variant="contained" onClick={() => void handleResetPassword()} disabled={!activeUser}>
             Сбросить пароль
           </Button>
         </DialogActions>

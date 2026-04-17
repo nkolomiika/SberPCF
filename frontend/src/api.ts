@@ -1,5 +1,6 @@
 import axios from "axios";
 import type {
+  AuthLoginResponse,
   VulnerabilityComment,
   VulnerabilityDetails,
   VulnerabilityFile,
@@ -15,6 +16,7 @@ import type {
   Project,
   ProjectFolder,
   ProjectMember,
+  PasswordResetResult,
   User,
   Vulnerability,
   VulnerabilityAsset,
@@ -57,8 +59,9 @@ api.interceptors.response.use(
   }
 );
 
-export async function login(username: string, password: string): Promise<void> {
-  await api.post("/auth/login", { username, password });
+export async function login(username: string, password: string): Promise<AuthLoginResponse> {
+  const { data } = await api.post<AuthLoginResponse>("/auth/login", { username, password });
+  return data;
 }
 
 export async function logout(): Promise<void> {
@@ -78,8 +81,11 @@ export async function getUsers(page = 1, size = 200): Promise<PaginatedResponse<
 export async function createUser(payload: {
   username: string;
   email: string;
-  password: string;
+  full_name?: string;
+  tags?: string[];
+  password?: string;
   role: User["role"];
+  send_invite_email?: boolean;
 }): Promise<User> {
   const { data } = await api.post<User>("/users", payload);
   return data;
@@ -90,6 +96,8 @@ export async function updateUser(
   payload: {
     username?: string;
     email?: string;
+    full_name?: string;
+    tags?: string[];
     role?: User["role"];
     is_active?: boolean;
   }
@@ -98,12 +106,42 @@ export async function updateUser(
   return data;
 }
 
-export async function resetUserPassword(userId: string, newPassword: string): Promise<void> {
-  await api.patch(`/users/${userId}/password`, { new_password: newPassword });
+export async function resetUserPassword(userId: string): Promise<PasswordResetResult> {
+  const { data } = await api.patch<PasswordResetResult>(`/users/${userId}/password`);
+  return data;
 }
 
 export async function deleteUser(userId: string): Promise<void> {
   await api.delete(`/users/${userId}`);
+}
+
+export async function updateMyProfile(payload: {
+  username?: string;
+  email?: string;
+  full_name?: string;
+  tags?: string[];
+}): Promise<User> {
+  const { data } = await api.patch<User>("/users/me", payload);
+  return data;
+}
+
+export async function changeMyPassword(payload: { current_password: string; new_password: string }): Promise<User> {
+  const { data } = await api.patch<User>("/users/me/password", payload);
+  return data;
+}
+
+export async function forceChangePassword(newPassword: string): Promise<User> {
+  const { data } = await api.post<User>("/auth/force-change-password", { new_password: newPassword });
+  return data;
+}
+
+export async function uploadMyAvatar(file: File): Promise<User> {
+  const formData = new FormData();
+  formData.append("avatar", file);
+  const { data } = await api.post<User>("/users/me/avatar", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
 }
 
 export async function getProjects(page = 1, size = 20, status?: Project["status"]): Promise<PaginatedResponse<Project>> {

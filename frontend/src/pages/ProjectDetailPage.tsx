@@ -128,6 +128,7 @@ export function ProjectDetailPage() {
   const [extendDialogOpen, setExtendDialogOpen] = useState(false);
   const [extendEndDate, setExtendEndDate] = useState("");
   const [extendingProject, setExtendingProject] = useState(false);
+  const storagePrefix = projectId ? `project-detail:${projectId}` : null;
 
   const [hostOpen, setHostOpen] = useState(false);
   const [hostIp, setHostIp] = useState("");
@@ -172,15 +173,19 @@ export function ProjectDetailPage() {
       setProjectStartDate(projectResp.start_date);
       setProjectEndDate(projectResp.end_date);
       setSelectedHostId((previousHostId) => {
+        const storedHostId = storagePrefix ? window.localStorage.getItem(`${storagePrefix}:selectedHostId`) : null;
         if (previousHostId && hostsResp.items.some((host) => host.id === previousHostId)) {
           return previousHostId;
+        }
+        if (storedHostId && hostsResp.items.some((host) => host.id === storedHostId)) {
+          return storedHostId;
         }
         return hostsResp.items[0]?.id ?? null;
       });
     } catch {
       setError("Не удалось загрузить данные проекта");
     }
-  }, [projectId]);
+  }, [projectId, storagePrefix]);
 
   const loadHostAssets = useCallback(async () => {
     if (!projectId || !selectedHostId) {
@@ -275,6 +280,41 @@ export function ProjectDetailPage() {
     };
     return () => ws.close();
   }, [projectId, loadHostAssets, loadProjectData]);
+
+  useEffect(() => {
+    if (!storagePrefix) {
+      return;
+    }
+    const storedSection = window.localStorage.getItem(`${storagePrefix}:selectedSection`) as DetailSection | null;
+    const storedCollapsed = window.localStorage.getItem(`${storagePrefix}:sidebarCollapsed`);
+    if (storedSection) {
+      setSelectedSection(storedSection);
+    }
+    if (storedCollapsed) {
+      setSidebarCollapsed(storedCollapsed === "1");
+    }
+  }, [storagePrefix]);
+
+  useEffect(() => {
+    if (!storagePrefix) {
+      return;
+    }
+    window.localStorage.setItem(`${storagePrefix}:selectedSection`, selectedSection);
+  }, [selectedSection, storagePrefix]);
+
+  useEffect(() => {
+    if (!storagePrefix) {
+      return;
+    }
+    window.localStorage.setItem(`${storagePrefix}:sidebarCollapsed`, isSidebarCollapsed ? "1" : "0");
+  }, [isSidebarCollapsed, storagePrefix]);
+
+  useEffect(() => {
+    if (!storagePrefix || !selectedHostId) {
+      return;
+    }
+    window.localStorage.setItem(`${storagePrefix}:selectedHostId`, selectedHostId);
+  }, [selectedHostId, storagePrefix]);
 
   const severityStats = useMemo(() => {
     const stats = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
@@ -403,8 +443,41 @@ export function ProjectDetailPage() {
   const selectedHost = hosts.find((host) => host.id === selectedHostId) ?? null;
   const hostLabel = selectedHost ? selectedHost.hostname || selectedHost.ip_address || "unknown-host" : "Хост не выбран";
 
+  useEffect(() => {
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+      body: JSON.stringify({
+        sessionId: "a74592",
+        runId: "vuln-card-pre",
+        hypothesisId: "H4",
+        location: "ProjectDetailPage.tsx:vuln-dialog-state",
+        message: "Project vulnerability dialog state changed",
+        data: { vulnDetailOpen, activeVulnId: activeVuln?.id ?? null, selectedHostId: selectedHostId ?? null },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [vulnDetailOpen, activeVuln?.id, selectedHostId]);
+
   const loadHostAssetsCatalog = async () => {
     if (!projectId || !selectedHostId || !selectedHost) {
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "vuln-card-pre",
+          hypothesisId: "H3",
+          location: "ProjectDetailPage.tsx:loadHostAssetsCatalog:empty",
+          message: "Project host assets catalog skipped due to missing host context",
+          data: { projectId: projectId ?? null, selectedHostId: selectedHostId ?? null, hasSelectedHost: Boolean(selectedHost) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       setAssetHosts([]);
       setAssetPorts([]);
       setAssetEndpoints([]);
@@ -413,6 +486,21 @@ export function ProjectDetailPage() {
     }
     const [hostPorts, hostEndpoints] = await Promise.all([getPorts(projectId, selectedHostId), getEndpoints(projectId, selectedHostId)]);
     const hostServices = (await Promise.all(hostPorts.map(async (port) => await getServices(projectId, selectedHostId, port.id)))).flat();
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+      body: JSON.stringify({
+        sessionId: "a74592",
+        runId: "vuln-card-pre",
+        hypothesisId: "H3",
+        location: "ProjectDetailPage.tsx:loadHostAssetsCatalog:success",
+        message: "Project host assets catalog loaded",
+        data: { selectedHostId, portsCount: hostPorts.length, endpointsCount: hostEndpoints.length, servicesCount: hostServices.length },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     setAssetHosts([selectedHost]);
     setAssetPorts(hostPorts);
     setAssetEndpoints(hostEndpoints);
@@ -426,6 +514,21 @@ export function ProjectDetailPage() {
     setVulnBusy(true);
     setError(null);
     try {
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "vuln-card-pre",
+          hypothesisId: "H2",
+          location: "ProjectDetailPage.tsx:loadVulnerabilityDetails:start",
+          message: "Project vulnerability details load started",
+          data: { projectId, vulnerabilityId, selectedHostId: selectedHostId ?? null },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       const [vulnDetail, files, commentsPage] = await Promise.all([
         getVulnerability(projectId, vulnerabilityId),
         listVulnerabilityFiles(projectId, vulnerabilityId),
@@ -435,8 +538,45 @@ export function ProjectDetailPage() {
       setVulnFiles(files);
       setVulnComments(commentsPage.items);
       await loadHostAssetsCatalog();
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "vuln-card-pre",
+          hypothesisId: "H4",
+          location: "ProjectDetailPage.tsx:loadVulnerabilityDetails:success",
+          message: "Project vulnerability details loaded",
+          data: { vulnerabilityId, filesCount: files.length, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       setVulnDetailOpen(true);
-    } catch {
+    } catch (error) {
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "vuln-card-pre",
+          hypothesisId: "H2",
+          location: "ProjectDetailPage.tsx:loadVulnerabilityDetails:error",
+          message: "Project vulnerability details load failed",
+          data: {
+            vulnerabilityId,
+            errorMessage: error instanceof Error ? error.message : "unknown",
+            responseStatus:
+              typeof error === "object" && error !== null && "response" in error
+                ? ((error as { response?: { status?: number } }).response?.status ?? null)
+                : null,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       setError("Не удалось загрузить карточку уязвимости");
     } finally {
       setVulnBusy(false);

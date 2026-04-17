@@ -4,9 +4,27 @@ export interface User {
   id: string;
   username: string;
   email: string;
+  full_name: string | null;
+  tags: string[];
+  avatar_url: string | null;
   role: UserRole;
   is_active: boolean;
+  must_change_password: boolean;
+  password_changed_at: string | null;
   created_at: string;
+}
+
+export interface AuthLoginResponse {
+  id: string;
+  username: string;
+  role: UserRole;
+  must_change_password: boolean;
+}
+
+export interface PasswordResetResult {
+  ok: boolean;
+  email_sent_to: string;
+  must_change_password: boolean;
 }
 
 export interface PaginatedResponse<T> {

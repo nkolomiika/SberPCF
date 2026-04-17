@@ -1,13 +1,14 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, File as FastAPIFile, Query, Request, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import enforce_csrf, get_client_ip, get_current_user, require_admin
 from app.models import User
 from app.pagination import PageParams, to_paginated_response
-from app.schemas import PasswordResetRequest, UserCreate, UserOut, UserUpdate
+from app.schemas import OwnPasswordChangeRequest, PasswordResetOut, UserCreate, UserOut, UserProfileUpdate, UserUpdate
 from app.services import UserService
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -17,6 +18,56 @@ router = APIRouter(prefix="/users", tags=["users"])
 async def me(current_user: User = Depends(get_current_user)) -> User:
     """Возвращает профиль текущего пользователя."""
     return current_user
+
+
+@router.get("/me/profile", response_model=UserOut)
+async def my_profile(current_user: User = Depends(get_current_user)) -> User:
+    """Возвращает расширенный профиль текущего пользователя."""
+    return current_user
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_my_profile(
+    payload: UserProfileUpdate,
+    request: Request,
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserOut:
+    """Обновляет профиль текущего пользователя."""
+    user = await UserService(db).update_own_profile(current_user.id, payload.model_dump(exclude_unset=True), get_client_ip(request))
+    return UserOut.model_validate(user)
+
+
+@router.patch("/me/password", response_model=UserOut)
+async def change_my_password(
+    payload: OwnPasswordChangeRequest,
+    request: Request,
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserOut:
+    """Меняет пароль текущего пользователя."""
+    user = await UserService(db).change_own_password(
+        current_user.id,
+        current_password=payload.current_password,
+        new_password=payload.new_password,
+        ip_address=get_client_ip(request),
+    )
+    return UserOut.model_validate(user)
+
+
+@router.post("/me/avatar", response_model=UserOut)
+async def upload_my_avatar(
+    request: Request,
+    avatar: UploadFile = FastAPIFile(...),
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserOut:
+    """Загружает новый аватар текущего пользователя."""
+    user = await UserService(db).upload_avatar(current_user.id, avatar, get_client_ip(request))
+    return UserOut.model_validate(user)
 
 
 @router.get("", response_model=dict)
@@ -55,6 +106,17 @@ async def get_user(
     return UserOut.model_validate(user)
 
 
+@router.get("/{user_id}/avatar")
+async def get_user_avatar(
+    user_id: UUID,
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Возвращает аватар пользователя."""
+    user, content = await UserService(db).download_avatar(user_id)
+    return Response(content=content, media_type=user.avatar_content_type or "application/octet-stream")
+
+
 @router.put("/{user_id}", response_model=UserOut)
 async def update_user(
     user_id: UUID,
@@ -81,14 +143,14 @@ async def delete_user(
     await UserService(db).delete_user(user_id, admin.id, get_client_ip(request))
 
 
-@router.patch("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
+@router.patch("/{user_id}/password", response_model=PasswordResetOut, status_code=status.HTTP_200_OK)
 async def reset_password(
     user_id: UUID,
-    payload: PasswordResetRequest,
     request: Request,
     _: None = Depends(enforce_csrf),
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-) -> None:
+) -> PasswordResetOut:
     """Сбрасывает пароль пользователя."""
-    await UserService(db).reset_password(user_id, payload.new_password, admin.id, get_client_ip(request))
+    user = await UserService(db).reset_password(user_id, admin.id, get_client_ip(request))
+    return PasswordResetOut(email_sent_to=user.email, must_change_password=True)

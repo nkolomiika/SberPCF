@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     clickhouse_password: str = ""
     clickhouse_secure: bool = False
 
+    rabbitmq_url: str = "amqp://guest:guest@rabbitmq/"
+    mail_queue_name: str = "pcf.mail"
+    mail_enabled: bool = True
+    smtp_host: str = "mailpit"
+    smtp_port: int = 1025
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = False
+    smtp_from_email: str = "noreply@example.com"
+    smtp_from_name: str = "PCF"
+
     @field_validator("jwt_secret_key")
     @classmethod
     def validate_secret_key(cls, value: str) -> str:

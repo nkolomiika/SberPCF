@@ -1,8 +1,11 @@
+import AttachFileIcon from "@mui/icons-material/AttachFile";
 import DeleteIcon from "@mui/icons-material/Delete";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditIcon from "@mui/icons-material/Edit";
 import AddIcon from "@mui/icons-material/Add";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import {
   Alert,
@@ -17,8 +20,12 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
   Grid2 as Grid,
   IconButton,
+  List,
+  ListItem,
+  ListItemText,
   Menu,
   MenuItem,
   Stack,
@@ -26,37 +33,61 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { load as parseYaml } from "js-yaml";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  addVulnerabilityAsset,
   createHost,
+  createVulnerabilityComment,
   createEndpoint,
   createPort,
   createService,
   createVulnerability,
+  deleteVulnerabilityAsset,
+  deleteVulnerabilityComment,
+  deleteVulnerabilityFile,
   deleteEndpoint,
   deleteHost,
   deletePort,
   deleteService,
   deleteVulnerability,
+  getVulnerability,
   getServices,
   getHost,
   getHosts,
   getHostVulnerabilities,
+  listVulnerabilityComments,
+  listVulnerabilityFiles,
   updateEndpoint,
   updateHost,
   updatePort,
   updateService,
+  updateVulnerabilityComment,
   updateVulnerability,
+  uploadVulnerabilityFile,
 } from "../api";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
-import type { Endpoint, Host, HostDetails, HostTreeStats, Port, Service, Vulnerability } from "../types";
+import { useAuthStore } from "../store";
+import type {
+  Endpoint,
+  Host,
+  HostDetails,
+  HostTreeStats,
+  Port,
+  Service,
+  Vulnerability,
+  VulnerabilityComment,
+  VulnerabilityDetails,
+  VulnerabilityFile,
+} from "../types";
 
 export function HostDetailPage() {
   const { projectId, hostId } = useParams<{ projectId: string; hostId: string }>();
   const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
+  const storagePrefix = projectId && hostId ? `host-detail:${projectId}:${hostId}` : null;
 
   const [host, setHost] = useState<HostDetails | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -112,6 +143,13 @@ export function HostDetailPage() {
   const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
   const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
   const [creatingVulnerabilityStatus, setCreatingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
+  const [creatingVulnerabilityCvssVersion, setCreatingVulnerabilityCvssVersion] = useState<"3.1" | "4.0" | "">("");
+  const [creatingVulnerabilityCvssScore, setCreatingVulnerabilityCvssScore] = useState("");
+  const [creatingVulnerabilityCvssVector, setCreatingVulnerabilityCvssVector] = useState("");
+  const [creatingVulnerabilityCweId, setCreatingVulnerabilityCweId] = useState("");
+  const [creatingVulnerabilitySteps, setCreatingVulnerabilitySteps] = useState("");
+  const [creatingVulnerabilityImpact, setCreatingVulnerabilityImpact] = useState("");
+  const [creatingVulnerabilityRecommendations, setCreatingVulnerabilityRecommendations] = useState("");
   const [hostActionsAnchorEl, setHostActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [isEditHostOpen, setEditHostOpen] = useState(false);
   const [editingHostIp, setEditingHostIp] = useState("");
@@ -127,6 +165,17 @@ export function HostDetailPage() {
   const [expandedPortIds, setExpandedPortIds] = useState<string[]>([]);
   const [expandedEndpointIds, setExpandedEndpointIds] = useState<string[]>([]);
   const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<string[]>([]);
+  const [vulnDetailOpen, setVulnDetailOpen] = useState(false);
+  const [activeVulnDetails, setActiveVulnDetails] = useState<VulnerabilityDetails | null>(null);
+  const [vulnFiles, setVulnFiles] = useState<VulnerabilityFile[]>([]);
+  const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
+  const [linkAssetType, setLinkAssetType] = useState<"host" | "port" | "service" | "endpoint">("host");
+  const [linkAssetId, setLinkAssetId] = useState("");
+  const [newComment, setNewComment] = useState("");
+  const [vulnBusy, setVulnBusy] = useState(false);
+  const [editCommentOpen, setEditCommentOpen] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentContent, setEditingCommentContent] = useState("");
 
   const loadHost = useCallback(async () => {
     if (!projectId || !hostId) {
@@ -201,6 +250,34 @@ export function HostDetailPage() {
       socket.close();
     };
   }, [loadHost, projectId]);
+
+  useEffect(() => {
+    if (!storagePrefix) {
+      return;
+    }
+    const storedSection = window.localStorage.getItem(`${storagePrefix}:selectedSection`) as DetailSection | null;
+    const storedCollapsed = window.localStorage.getItem(`${storagePrefix}:sidebarCollapsed`);
+    if (storedSection) {
+      setSelectedSection(storedSection);
+    }
+    if (storedCollapsed) {
+      setSidebarCollapsed(storedCollapsed === "1");
+    }
+  }, [storagePrefix]);
+
+  useEffect(() => {
+    if (!storagePrefix) {
+      return;
+    }
+    window.localStorage.setItem(`${storagePrefix}:selectedSection`, selectedSection);
+  }, [selectedSection, storagePrefix]);
+
+  useEffect(() => {
+    if (!storagePrefix) {
+      return;
+    }
+    window.localStorage.setItem(`${storagePrefix}:sidebarCollapsed`, isSidebarCollapsed ? "1" : "0");
+  }, [isSidebarCollapsed, storagePrefix]);
 
   useEffect(() => {
     const loadServices = async () => {
@@ -853,13 +930,333 @@ export function HostDetailPage() {
       description: creatingVulnerabilityDescription.trim() || undefined,
       severity: creatingVulnerabilitySeverity,
       status: creatingVulnerabilityStatus,
+      cvss_version: creatingVulnerabilityCvssVersion || undefined,
+      cvss_score: creatingVulnerabilityCvssScore === "" ? undefined : Number(creatingVulnerabilityCvssScore),
+      cvss_vector: creatingVulnerabilityCvssVector.trim() || undefined,
+      cwe_id: creatingVulnerabilityCweId.trim() || undefined,
+      steps_to_reproduce: creatingVulnerabilitySteps.trim() || undefined,
+      impact: creatingVulnerabilityImpact.trim() || undefined,
+      recommendations: creatingVulnerabilityRecommendations.trim() || undefined,
     });
     setCreateVulnerabilityOpen(false);
     setCreatingVulnerabilityTitle("");
     setCreatingVulnerabilityDescription("");
     setCreatingVulnerabilitySeverity("medium");
     setCreatingVulnerabilityStatus("open");
+    setCreatingVulnerabilityCvssVersion("");
+    setCreatingVulnerabilityCvssScore("");
+    setCreatingVulnerabilityCvssVector("");
+    setCreatingVulnerabilityCweId("");
+    setCreatingVulnerabilitySteps("");
+    setCreatingVulnerabilityImpact("");
+    setCreatingVulnerabilityRecommendations("");
     await loadHost();
+  };
+
+  const hostServices = useMemo(() => Object.values(servicesByPortId).flat(), [servicesByPortId]);
+
+  const linkAssetOptions = useMemo(() => {
+    if (linkAssetType === "host") {
+      return host ? [{ id: host.id, label: `Host: ${host.hostname || host.ip_address || host.id}` }] : [];
+    }
+    if (linkAssetType === "port") {
+      return (host?.ports ?? []).map((port) => ({
+        id: port.id,
+        label: `Port: ${port.port_number}/${port.protocol}`,
+      }));
+    }
+    if (linkAssetType === "service") {
+      return hostServices.map((service) => ({
+        id: service.id,
+        label: `Service: ${service.name}${service.version ? ` ${service.version}` : ""}`,
+      }));
+    }
+    return (host?.endpoints ?? []).map((endpoint) => ({
+      id: endpoint.id,
+      label: `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}`,
+    }));
+  }, [host, hostServices, linkAssetType]);
+
+  const resolveAssetLabel = (assetType: string, assetId: string) => {
+    if (assetType === "host") {
+      return `Host: ${host?.hostname || host?.ip_address || assetId}`;
+    }
+    if (assetType === "port") {
+      const port = host?.ports.find((item) => item.id === assetId);
+      return port ? `Port: ${port.port_number}/${port.protocol}` : `port:${assetId}`;
+    }
+    if (assetType === "service") {
+      const service = hostServices.find((item) => item.id === assetId);
+      return service ? `Service: ${service.name}${service.version ? ` ${service.version}` : ""}` : `service:${assetId}`;
+    }
+    const endpoint = host?.endpoints.find((item) => item.id === assetId);
+    return endpoint ? `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}` : `endpoint:${assetId}`;
+  };
+
+  useEffect(() => {
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+      body: JSON.stringify({
+        sessionId: "a74592",
+        runId: "vuln-card-pre",
+        hypothesisId: "H4",
+        location: "HostDetailPage.tsx:vuln-dialog-state",
+        message: "Host vulnerability dialog state changed",
+        data: { vulnDetailOpen, activeVulnId: activeVulnDetails?.id ?? null },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [vulnDetailOpen, activeVulnDetails?.id]);
+
+  const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
+    if (!projectId) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "vuln-card-pre",
+          hypothesisId: "H2",
+          location: "HostDetailPage.tsx:loadVulnerabilityDetails:start",
+          message: "Host vulnerability details load started",
+          data: { projectId, hostId: hostId ?? null, vulnerabilityId },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      const [vulnDetail, files, commentsPage] = await Promise.all([
+        getVulnerability(projectId, vulnerabilityId),
+        listVulnerabilityFiles(projectId, vulnerabilityId),
+        listVulnerabilityComments(projectId, vulnerabilityId),
+      ]);
+      setActiveVulnDetails(vulnDetail);
+      setVulnFiles(files);
+      setVulnComments(commentsPage.items);
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "vuln-card-pre",
+          hypothesisId: "H4",
+          location: "HostDetailPage.tsx:loadVulnerabilityDetails:success",
+          message: "Host vulnerability details loaded",
+          data: { vulnerabilityId, filesCount: files.length, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      setVulnDetailOpen(true);
+    } catch (error) {
+      // #region agent log
+      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+        body: JSON.stringify({
+          sessionId: "a74592",
+          runId: "vuln-card-pre",
+          hypothesisId: "H2",
+          location: "HostDetailPage.tsx:loadVulnerabilityDetails:error",
+          message: "Host vulnerability details load failed",
+          data: {
+            vulnerabilityId,
+            errorMessage: error instanceof Error ? error.message : "unknown",
+            responseStatus:
+              typeof error === "object" && error !== null && "response" in error
+                ? ((error as { response?: { status?: number } }).response?.status ?? null)
+                : null,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      setError("Не удалось загрузить карточку уязвимости.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const saveActiveVulnerability = async () => {
+    if (!projectId || !activeVulnDetails) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      const updated = await updateVulnerability(projectId, activeVulnDetails.id, {
+        title: activeVulnDetails.title,
+        description: activeVulnDetails.description || undefined,
+        severity: activeVulnDetails.severity,
+        status: activeVulnDetails.status,
+        cvss_version: activeVulnDetails.cvss_version || undefined,
+        cvss_score: activeVulnDetails.cvss_score ?? undefined,
+        cvss_vector: activeVulnDetails.cvss_vector || undefined,
+        cwe_id: activeVulnDetails.cwe_id || undefined,
+        steps_to_reproduce: activeVulnDetails.steps_to_reproduce || undefined,
+        impact: activeVulnDetails.impact || undefined,
+        recommendations: activeVulnDetails.recommendations || undefined,
+      });
+      setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated } : prev));
+      await loadHost();
+    } catch {
+      setError("Не удалось сохранить уязвимость.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeActiveVulnerability = async () => {
+    if (!projectId || !activeVulnDetails) {
+      return;
+    }
+    setVulnBusy(true);
+    setError(null);
+    try {
+      await deleteVulnerability(projectId, activeVulnDetails.id);
+      setVulnDetailOpen(false);
+      setActiveVulnDetails(null);
+      await loadHost();
+    } catch {
+      setError("Не удалось удалить уязвимость.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const uploadFileToActiveVuln = async (file: File | null) => {
+    if (!projectId || !activeVulnDetails || !file) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await uploadVulnerabilityFile(projectId, activeVulnDetails.id, file);
+      const files = await listVulnerabilityFiles(projectId, activeVulnDetails.id);
+      setVulnFiles(files);
+    } catch {
+      setError("Не удалось загрузить файл.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeVulnerabilityFile = async (fileId: string) => {
+    if (!projectId || !activeVulnDetails) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await deleteVulnerabilityFile(projectId, activeVulnDetails.id, fileId);
+      const files = await listVulnerabilityFiles(projectId, activeVulnDetails.id);
+      setVulnFiles(files);
+    } catch {
+      setError("Не удалось удалить файл.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const addAssetLinkToActiveVuln = async () => {
+    if (!projectId || !activeVulnDetails || !linkAssetId) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await addVulnerabilityAsset(projectId, activeVulnDetails.id, {
+        asset_type: linkAssetType,
+        asset_id: linkAssetId,
+      });
+      await loadVulnerabilityDetails(activeVulnDetails.id);
+      await loadHost();
+      setLinkAssetId("");
+    } catch {
+      setError("Не удалось привязать актив к уязвимости.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeAssetLinkFromActiveVuln = async (assetLinkId: string) => {
+    if (!projectId || !activeVulnDetails) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await deleteVulnerabilityAsset(projectId, activeVulnDetails.id, assetLinkId);
+      await loadVulnerabilityDetails(activeVulnDetails.id);
+      await loadHost();
+    } catch {
+      setError("Не удалось удалить привязку актива.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const addCommentToActiveVuln = async () => {
+    if (!projectId || !activeVulnDetails || !newComment.trim()) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await createVulnerabilityComment(projectId, activeVulnDetails.id, newComment.trim());
+      const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
+      setVulnComments(commentsPage.items);
+      setNewComment("");
+    } catch {
+      setError("Не удалось добавить комментарий.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const removeCommentFromActiveVuln = async (commentId: string) => {
+    if (!projectId || !activeVulnDetails) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await deleteVulnerabilityComment(projectId, activeVulnDetails.id, commentId);
+      const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
+      setVulnComments(commentsPage.items);
+    } catch {
+      setError("Не удалось удалить комментарий.");
+    } finally {
+      setVulnBusy(false);
+    }
+  };
+
+  const openCommentEdit = (comment: VulnerabilityComment) => {
+    setEditingCommentId(comment.id);
+    setEditingCommentContent(comment.content);
+    setEditCommentOpen(true);
+  };
+
+  const saveCommentEdit = async () => {
+    if (!projectId || !activeVulnDetails || !editingCommentId || !editingCommentContent.trim()) {
+      return;
+    }
+    setVulnBusy(true);
+    try {
+      await updateVulnerabilityComment(projectId, activeVulnDetails.id, editingCommentId, editingCommentContent.trim());
+      const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
+      setVulnComments(commentsPage.items);
+      setEditCommentOpen(false);
+      setEditingCommentId(null);
+      setEditingCommentContent("");
+    } catch {
+      setError("Не удалось обновить комментарий.");
+    } finally {
+      setVulnBusy(false);
+    }
   };
 
   const hostTitle = host?.hostname || host?.ip_address || "unknown-host";
@@ -1362,9 +1759,42 @@ export function HostDetailPage() {
                         </Stack>
                       </Stack>
                       <Collapse in={expandedVulnerabilityIds.includes(item.id)} timeout="auto" unmountOnExit>
-                        <Typography mt={0.8} color="text.secondary" variant="body2">
-                          {item.description || "Описание не указано"}
-                        </Typography>
+                        <Stack spacing={1} mt={0.8}>
+                          <Typography color="text.secondary" variant="body2">
+                            {item.description || "Описание не указано"}
+                          </Typography>
+                          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                            {item.cvss_version && <Chip size="small" variant="outlined" label={`CVSS ${item.cvss_version} ${item.cvss_score ?? "-"}`} />}
+                            {item.cwe_id && <Chip size="small" variant="outlined" label={item.cwe_id} />}
+                          </Stack>
+                          <Box>
+                            <Button
+                              size="small"
+                              variant="text"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                // #region agent log
+                                fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+                                  body: JSON.stringify({
+                                    sessionId: "a74592",
+                                    runId: "vuln-card-pre",
+                                    hypothesisId: "H1",
+                                    location: "HostDetailPage.tsx:open-card-button",
+                                    message: "Host vulnerability card button clicked",
+                                    data: { vulnerabilityId: item.id, expanded: expandedVulnerabilityIds.includes(item.id) },
+                                    timestamp: Date.now(),
+                                  }),
+                                }).catch(() => {});
+                                // #endregion
+                                void loadVulnerabilityDetails(item.id);
+                              }}
+                            >
+                              Открыть карточку
+                            </Button>
+                          </Box>
+                        </Stack>
                       </Collapse>
                     </Box>
                   ))}
@@ -1377,6 +1807,17 @@ export function HostDetailPage() {
                   anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
                   transformOrigin={{ vertical: "top", horizontal: "right" }}
                 >
+                  <MenuItem
+                    onClick={() => {
+                      if (activeVulnerability) {
+                        void loadVulnerabilityDetails(activeVulnerability.id);
+                      }
+                      closeVulnerabilityActions();
+                    }}
+                  >
+                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
+                    Карточка
+                  </MenuItem>
                   <MenuItem
                     onClick={() => {
                       if (activeVulnerability) {
@@ -1616,6 +2057,300 @@ export function HostDetailPage() {
         </DialogActions>
       </Dialog>
 
+      <Dialog open={vulnDetailOpen} onClose={() => setVulnDetailOpen(false)} fullWidth maxWidth="lg">
+        <DialogTitle>Карточка уязвимости</DialogTitle>
+        <DialogContent>
+          {!activeVulnDetails ? (
+            <Typography color="text.secondary">Уязвимость не выбрана.</Typography>
+          ) : (
+            <Stack spacing={2} sx={{ mt: 0.5 }}>
+              <Grid container spacing={2}>
+                <Grid size={{ xs: 12, md: 8 }}>
+                  <TextField
+                    label="Название"
+                    fullWidth
+                    value={activeVulnDetails.title}
+                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, title: event.target.value } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12, md: 2 }}>
+                  <TextField
+                    select
+                    label="Критичность"
+                    fullWidth
+                    value={activeVulnDetails.severity}
+                    onChange={(event) =>
+                      setActiveVulnDetails((prev) => (prev ? { ...prev, severity: event.target.value as Vulnerability["severity"] } : prev))
+                    }
+                  >
+                    <MenuItem value="critical">critical</MenuItem>
+                    <MenuItem value="high">high</MenuItem>
+                    <MenuItem value="medium">medium</MenuItem>
+                    <MenuItem value="low">low</MenuItem>
+                    <MenuItem value="info">info</MenuItem>
+                  </TextField>
+                </Grid>
+                <Grid size={{ xs: 12, md: 2 }}>
+                  <TextField
+                    select
+                    label="Статус"
+                    fullWidth
+                    value={activeVulnDetails.status}
+                    onChange={(event) =>
+                      setActiveVulnDetails((prev) => (prev ? { ...prev, status: event.target.value as Vulnerability["status"] } : prev))
+                    }
+                  >
+                    <MenuItem value="open">open</MenuItem>
+                    <MenuItem value="in_progress">in_progress</MenuItem>
+                    <MenuItem value="fixed">fixed</MenuItem>
+                    <MenuItem value="wont_fix">wont_fix</MenuItem>
+                    <MenuItem value="accepted_risk">accepted_risk</MenuItem>
+                  </TextField>
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Описание"
+                    fullWidth
+                    multiline
+                    minRows={3}
+                    value={activeVulnDetails.description || ""}
+                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, description: event.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12, md: 3 }}>
+                  <TextField
+                    select
+                    label="CVSS версия"
+                    fullWidth
+                    value={activeVulnDetails.cvss_version || ""}
+                    onChange={(event) =>
+                      setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_version: (event.target.value as "3.1" | "4.0" | "") || null } : prev))
+                    }
+                  >
+                    <MenuItem value="">-</MenuItem>
+                    <MenuItem value="3.1">3.1</MenuItem>
+                    <MenuItem value="4.0">4.0</MenuItem>
+                  </TextField>
+                </Grid>
+                <Grid size={{ xs: 12, md: 3 }}>
+                  <TextField
+                    label="CVSS score"
+                    type="number"
+                    fullWidth
+                    value={activeVulnDetails.cvss_score ?? ""}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_score: value === "" ? null : Number(value) } : prev));
+                    }}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12, md: 6 }}>
+                  <TextField
+                    label="CVSS vector"
+                    fullWidth
+                    value={activeVulnDetails.cvss_vector || ""}
+                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_vector: event.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="CWE ID"
+                    fullWidth
+                    value={activeVulnDetails.cwe_id || ""}
+                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cwe_id: event.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Шаги воспроизведения"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    value={activeVulnDetails.steps_to_reproduce || ""}
+                    onChange={(event) =>
+                      setActiveVulnDetails((prev) => (prev ? { ...prev, steps_to_reproduce: event.target.value || null } : prev))
+                    }
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Влияние"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    value={activeVulnDetails.impact || ""}
+                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <TextField
+                    label="Рекомендации"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    value={activeVulnDetails.recommendations || ""}
+                    onChange={(event) =>
+                      setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: event.target.value || null } : prev))
+                    }
+                  />
+                </Grid>
+              </Grid>
+
+              <Divider />
+              <Stack spacing={1}>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Привязанные активы ({activeVulnDetails.assets.length})
+                </Typography>
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+                  <TextField
+                    select
+                    label="Тип актива"
+                    value={linkAssetType}
+                    onChange={(event) => {
+                      setLinkAssetType(event.target.value as "host" | "port" | "service" | "endpoint");
+                      setLinkAssetId("");
+                    }}
+                    sx={{ minWidth: 180 }}
+                  >
+                    <MenuItem value="host">host</MenuItem>
+                    <MenuItem value="port">port</MenuItem>
+                    <MenuItem value="service">service</MenuItem>
+                    <MenuItem value="endpoint">endpoint</MenuItem>
+                  </TextField>
+                  <TextField
+                    select
+                    label="Актив"
+                    value={linkAssetId}
+                    onChange={(event) => setLinkAssetId(event.target.value)}
+                    fullWidth
+                    disabled={linkAssetOptions.length === 0}
+                  >
+                    {linkAssetOptions.map((option) => (
+                      <MenuItem key={option.id} value={option.id}>
+                        {option.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <Button variant="outlined" disabled={!linkAssetId || vulnBusy} onClick={() => void addAssetLinkToActiveVuln()}>
+                    Привязать
+                  </Button>
+                </Stack>
+                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                  {activeVulnDetails.assets.map((assetLink) => (
+                    <Chip
+                      key={assetLink.id}
+                      label={resolveAssetLabel(assetLink.asset_type, assetLink.asset_id)}
+                      onDelete={() => void removeAssetLinkFromActiveVuln(assetLink.id)}
+                    />
+                  ))}
+                  {activeVulnDetails.assets.length === 0 && <Typography color="text.secondary">Связанные активы пока не добавлены.</Typography>}
+                </Stack>
+              </Stack>
+
+              <Divider />
+              <Stack spacing={1}>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Файлы ({vulnFiles.length})
+                </Typography>
+                <Button component="label" variant="outlined" startIcon={<AttachFileIcon />}>
+                  Загрузить файл
+                  <input hidden type="file" onChange={(event) => void uploadFileToActiveVuln(event.target.files?.[0] ?? null)} />
+                </Button>
+                <List dense disablePadding>
+                  {vulnFiles.map((file) => (
+                    <ListItem
+                      key={file.id}
+                      secondaryAction={
+                        <Stack direction="row" spacing={0.5}>
+                          <IconButton size="small" component="a" href={`/api/v1/files/${file.id}/download`} target="_blank" rel="noreferrer">
+                            <OpenInNewIcon fontSize="small" />
+                          </IconButton>
+                          <IconButton size="small" onClick={() => void removeVulnerabilityFile(file.id)}>
+                            <DeleteOutlineIcon fontSize="small" />
+                          </IconButton>
+                        </Stack>
+                      }
+                    >
+                      <ListItemText primary={file.original_name} secondary={`${file.content_type} • ${Math.round(file.size_bytes / 1024)} KB`} />
+                    </ListItem>
+                  ))}
+                  {vulnFiles.length === 0 && <Typography color="text.secondary">Файлы не загружены.</Typography>}
+                </List>
+              </Stack>
+
+              <Divider />
+              <Stack spacing={1}>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Комментарии ({vulnComments.length})
+                </Typography>
+                <TextField
+                  label="Новый комментарий (поддержка @username)"
+                  multiline
+                  minRows={2}
+                  value={newComment}
+                  onChange={(event) => setNewComment(event.target.value)}
+                />
+                <Button variant="contained" disabled={!newComment.trim() || vulnBusy} onClick={() => void addCommentToActiveVuln()}>
+                  Добавить комментарий
+                </Button>
+                <List dense disablePadding>
+                  {vulnComments.map((comment) => (
+                    <ListItem
+                      key={comment.id}
+                      alignItems="flex-start"
+                      secondaryAction={
+                        user?.role === "admin" || user?.id === comment.user_id ? (
+                          <Stack direction="row" spacing={0.5}>
+                            <IconButton size="small" onClick={() => openCommentEdit(comment)}>
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
+                              <DeleteOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Stack>
+                        ) : null
+                      }
+                    >
+                      <ListItemText primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`} secondary={comment.content} />
+                    </ListItem>
+                  ))}
+                  {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
+                </List>
+              </Stack>
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setVulnDetailOpen(false)}>Закрыть</Button>
+          <Button color="error" variant="outlined" onClick={() => void removeActiveVulnerability()} disabled={!activeVulnDetails || vulnBusy}>
+            Удалить
+          </Button>
+          <Button variant="contained" onClick={() => void saveActiveVulnerability()} disabled={!activeVulnDetails || vulnBusy}>
+            Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={editCommentOpen} onClose={() => setEditCommentOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Редактировать комментарий</DialogTitle>
+        <DialogContent>
+          <TextField
+            fullWidth
+            multiline
+            minRows={4}
+            sx={{ mt: 1 }}
+            value={editingCommentContent}
+            onChange={(event) => setEditingCommentContent(event.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditCommentOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void saveCommentEdit()} disabled={!editingCommentContent.trim() || vulnBusy}>
+            Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={isEditVulnerabilityOpen} onClose={() => setEditVulnerabilityOpen(false)} fullWidth>
         <DialogTitle>Редактировать уязвимость</DialogTitle>
         <DialogContent>
@@ -1702,6 +2437,44 @@ export function HostDetailPage() {
               <MenuItem value="wont_fix">wont_fix</MenuItem>
               <MenuItem value="accepted_risk">accepted_risk</MenuItem>
             </TextField>
+            <TextField
+              select
+              label="CVSS версия"
+              value={creatingVulnerabilityCvssVersion}
+              onChange={(event) => setCreatingVulnerabilityCvssVersion(event.target.value as "3.1" | "4.0" | "")}
+            >
+              <MenuItem value="">-</MenuItem>
+              <MenuItem value="3.1">3.1</MenuItem>
+              <MenuItem value="4.0">4.0</MenuItem>
+            </TextField>
+            <TextField
+              label="CVSS score"
+              type="number"
+              inputProps={{ min: 0, max: 10, step: 0.1 }}
+              value={creatingVulnerabilityCvssScore}
+              onChange={(event) => setCreatingVulnerabilityCvssScore(event.target.value)}
+            />
+            <TextField
+              label="CVSS vector"
+              value={creatingVulnerabilityCvssVector}
+              onChange={(event) => setCreatingVulnerabilityCvssVector(event.target.value)}
+            />
+            <TextField label="CWE ID" value={creatingVulnerabilityCweId} onChange={(event) => setCreatingVulnerabilityCweId(event.target.value)} />
+            <TextField
+              multiline
+              minRows={3}
+              label="Шаги воспроизведения"
+              value={creatingVulnerabilitySteps}
+              onChange={(event) => setCreatingVulnerabilitySteps(event.target.value)}
+            />
+            <TextField multiline minRows={3} label="Влияние" value={creatingVulnerabilityImpact} onChange={(event) => setCreatingVulnerabilityImpact(event.target.value)} />
+            <TextField
+              multiline
+              minRows={3}
+              label="Рекомендации"
+              value={creatingVulnerabilityRecommendations}
+              onChange={(event) => setCreatingVulnerabilityRecommendations(event.target.value)}
+            />
           </Stack>
         </DialogContent>
         <DialogActions>

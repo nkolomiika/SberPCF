@@ -8,8 +8,22 @@ services:
       - db
       - minio
       - clickhouse
+      - rabbitmq
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend:/app
+
+  mail-worker:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    command: python -m app.worker.mail_worker
+    depends_on:
+      - db
+      - rabbitmq
+      - mailpit
     volumes:
       - ./backend:/app
 
@@ -58,6 +72,15 @@ services:
       - "8123:8123"
     volumes:
       - clickhousedata:/var/lib/clickhouse
+
+  rabbitmq:
+    image: rabbitmq:3-management
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
 
 volumes:
   pgdata:

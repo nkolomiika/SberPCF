@@ -10,6 +10,7 @@ class ConnectionManager:
     def __init__(self) -> None:
         self.rooms: dict[UUID, set[WebSocket]] = defaultdict(set)
         self.projects_index_sockets: set[WebSocket] = set()
+        self.user_sockets: dict[UUID, set[WebSocket]] = defaultdict(set)
 
     async def connect(self, project_id: UUID, websocket: WebSocket) -> None:
         """Принимает соединение и регистрирует его в комнате проекта."""
@@ -31,6 +32,17 @@ class ConnectionManager:
         """Удаляет сокет из общего канала списка проектов."""
         self.projects_index_sockets.discard(websocket)
 
+    async def connect_user(self, user_id: UUID, websocket: WebSocket) -> None:
+        """Подключает сокет к персональному каналу уведомлений пользователя."""
+        await websocket.accept()
+        self.user_sockets[user_id].add(websocket)
+
+    def disconnect_user(self, user_id: UUID, websocket: WebSocket) -> None:
+        """Удаляет сокет из персонального канала пользователя."""
+        self.user_sockets[user_id].discard(websocket)
+        if not self.user_sockets[user_id]:
+            self.user_sockets.pop(user_id, None)
+
     async def broadcast(self, project_id: UUID, payload: dict) -> None:
         """Рассылает событие всем активным подключениям комнаты."""
         stale: list[WebSocket] = []
@@ -44,7 +56,16 @@ class ConnectionManager:
             self.disconnect(project_id, ws)
 
     async def notify_user(self, user_id: UUID, payload: dict) -> None:
-        """Рассылает персональное уведомление по всем комнатам пользователя."""
+        """Рассылает персональное уведомление в персональный и проектные каналы пользователя."""
+        stale_user_sockets: list[WebSocket] = []
+        for ws in self.user_sockets.get(user_id, set()):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                stale_user_sockets.append(ws)
+        for ws in stale_user_sockets:
+            self.disconnect_user(user_id, ws)
+
         for room_id, sockets in list(self.rooms.items()):
             stale: list[WebSocket] = []
             for ws in sockets:
