@@ -46,6 +46,20 @@ export async function getUsers(page = 1, size = 200) {
     const { data } = await api.get("/users", { params: { page, size } });
     return data;
 }
+export async function createUser(payload) {
+    const { data } = await api.post("/users", payload);
+    return data;
+}
+export async function updateUser(userId, payload) {
+    const { data } = await api.put(`/users/${userId}`, payload);
+    return data;
+}
+export async function resetUserPassword(userId, newPassword) {
+    await api.patch(`/users/${userId}/password`, { new_password: newPassword });
+}
+export async function deleteUser(userId) {
+    await api.delete(`/users/${userId}`);
+}
 export async function getProjects(page = 1, size = 20, status) {
     const { data } = await api.get("/projects", { params: { page, size, status } });
     return data;

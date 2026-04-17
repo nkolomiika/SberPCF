@@ -1,7 +1,8 @@
 # Схема базы данных PCF
 ## Pentest Collaboration Framework
 
-> СУБД: **PostgreSQL**  
+> СУБД (основная): **PostgreSQL**  
+> Хранилище аудит-логов: **ClickHouse** (отдельная БД, append-only)  
 > Удаление: **физическое** (hard delete)  
 > Аудит: CRUD-операции + события аутентификации + изменения статусов
 
@@ -16,7 +17,6 @@ erDiagram
     users ||--o{ vulnerabilities : "создаёт"
     users ||--o{ comments : "пишет"
     users ||--o{ files : "загружает"
-    users ||--o{ audit_logs : "генерирует"
     users ||--o{ notifications : "получает"
 
     projects ||--o{ project_members : "содержит"
@@ -35,6 +35,8 @@ erDiagram
     comments ||--o{ notifications : "порождает"
     users ||--o{ comment_mentions : "упомянут в"
 ```
+
+> **Примечание:** таблица `audit_logs` хранится в **ClickHouse**, а не в PostgreSQL, поэтому не отображается в ERD выше. Схема ClickHouse описана в отдельном разделе ниже.
 
 ---
 
@@ -275,25 +277,6 @@ erDiagram
 **Индексы:** `user_id`, `(user_id, is_read)` (для счётчика непрочитанных)
 
 ---
-
-### `audit_logs` — Журнал действий
-
-| Колонка     | Тип          | Ограничения              | Описание                                                     |
-|-------------|--------------|--------------------------|--------------------------------------------------------------|
-| id          | UUID         | PK                       | Первичный ключ                                               |
-| user_id     | UUID         | NULLABLE, FK → users.id  | Пользователь (NULL для системных событий)                    |
-| action      | VARCHAR(100) | NOT NULL                 | Код действия (LOGIN, LOGOUT, CREATE, UPDATE, DELETE, STATUS_CHANGE) |
-| entity_type | VARCHAR(50)  | NULLABLE                 | Тип сущности (project, vulnerability, host и т.д.)           |
-| entity_id   | UUID         | NULLABLE                 | ID изменённой сущности                                       |
-| details     | JSONB        | NULLABLE                 | Дополнительная информация (например, старый и новый статус)  |
-| ip_address  | VARCHAR(45)  | NULLABLE                 | IP-адрес клиента                                             |
-| created_at  | TIMESTAMPTZ  | NOT NULL, DEFAULT now()  | Время события                                                |
-
-**Индексы:** `user_id`, `entity_type + entity_id`, `created_at`  
-**Примечание:** Таблица только для записи (append-only). Удаление строк не предусмотрено.
-
----
-
 ## Иерархия активов
 
 ```
@@ -340,7 +323,7 @@ Vulnerability ──► vulnerability_assets (asset_type + asset_id)
 
 ---
 
-## Коды событий аудита (`audit_logs.action`)
+## Коды событий аудита (`audit_logs.action` в ClickHouse)
 
 | Код           | Когда фиксируется                              |
 |---------------|------------------------------------------------|
@@ -389,10 +372,96 @@ WebSocket-подключение авторизуется access-токеном.
 3. Все ENUM-типы создавать через `CREATE TYPE` в PostgreSQL до создания таблиц.
 4. Таблица `vulnerability_assets` — полиморфная. Целостность `asset_id` гарантируется приложением, а не FK-ограничением БД.
 5. Файлы: при удалении записи из `files` приложение обязано также удалить объект из MinIO.
-6. `audit_logs.details` — тип `JSONB`, позволяет хранить произвольный контекст (например, `{"old_status": "open", "new_status": "fixed"}`).
+6. `audit_logs.details` в ClickHouse хранится как `String` (сериализованный JSON). Парсинг на стороне приложения при чтении.
 7. Для полей `updated_at` рекомендуется использовать триггер `BEFORE UPDATE` для автоматического обновления.
 8. Миграции вести через Alembic (стандарт для Python/SQLAlchemy).
 9. `refresh_tokens`: сам токен в БД не хранится — только его SHA-256 хэш. При валидации входящий токен хэшируется и сравнивается с `token_hash`.
 10. `notifications`: при создании уведомления рекомендуется также отправлять WebSocket-push получателю (если он онлайн), чтобы счётчик непрочитанных обновился без перезагрузки.
 11. Импорт данных использует **собственный JSON-формат PCF**. Схема фиксируется в документации API. Сторонние форматы (Nmap, Burp) не поддерживаются.
 12. Регистрация пользователей закрыта — эндпоинт создания аккаунта доступен только с ролью `admin`.
+13. Аудит-логи пишутся в ClickHouse асинхронно. Недоступность ClickHouse не должна прерывать основные операции — рекомендуется fire-and-forget с логированием ошибки записи.
+
+---
+
+## ClickHouse Schema — Аудит-логи
+
+> **СУБД:** ClickHouse  
+> **Движок:** MergeTree (append-only, колоночное хранилище)  
+> **База данных:** `pcf_logs`
+
+### Таблица `audit_logs`
+
+```sql
+CREATE DATABASE IF NOT EXISTS pcf_logs;
+
+CREATE TABLE pcf_logs.audit_logs
+(
+    id          UUID,
+    user_id     Nullable(UUID),
+    action      String,          -- LOGIN, LOGOUT, LOGIN_FAILED, CREATE, UPDATE, DELETE, STATUS_CHANGE, FILE_UPLOAD, FILE_DELETE
+    entity_type Nullable(String),-- project, vulnerability, host, port, service, endpoint, comment, file
+    entity_id   Nullable(UUID),
+    details     String,          -- JSON-строка (например, '{"old_status":"open","new_status":"fixed"}')
+    ip_address  Nullable(String),
+    created_at  DateTime64(3, 'UTC')
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (created_at, action)
+SETTINGS index_granularity = 8192;
+```
+
+### Особенности хранения
+
+| Аспект | Решение |
+|--------|---------|
+| Первичный ключ | `id` (UUID) — уникальность на уровне приложения, ClickHouse не enforces PK |
+| Партиционирование | По месяцу (`toYYYYMM(created_at)`) — эффективная очистка старых данных |
+| Сортировка | `(created_at, action)` — ускоряет запросы по времени и типу события |
+| `details` | `String` (JSON) вместо JSONB — ClickHouse не имеет native JSON-типа с индексацией |
+| Удаление строк | Не предусмотрено. При необходимости TTL: `TTL created_at + INTERVAL 1 YEAR` |
+| FK | Отсутствуют — ClickHouse не поддерживает внешние ключи |
+
+### Подключение из Python
+
+Используется библиотека `clickhouse-connect` (официальный Python-клиент ClickHouse, поддерживает asyncio).
+
+```python
+# infrastructure/clickhouse_client.py
+import clickhouse_connect
+from app.config import settings
+
+def get_clickhouse_client():
+    return clickhouse_connect.get_client(
+        host=settings.CLICKHOUSE_HOST,
+        port=settings.CLICKHOUSE_PORT,
+        username=settings.CLICKHOUSE_USER,
+        password=settings.CLICKHOUSE_PASSWORD,
+        database="pcf_logs",
+    )
+```
+
+### Переменные окружения
+
+```env
+CLICKHOUSE_HOST=clickhouse
+CLICKHOUSE_PORT=8123
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=
+```
+
+### Docker Compose сервис
+
+```yaml
+clickhouse:
+  image: clickhouse/clickhouse-server:24-alpine
+  environment:
+    CLICKHOUSE_DB: pcf_logs
+    CLICKHOUSE_USER: default
+    CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+  ports:
+    - "8123:8123"   # HTTP interface (clickhouse-connect)
+    - "9009:9000"   # Native protocol (внешний 9009, т.к. 9000 занят MinIO)
+  volumes:
+    - chdata:/var/lib/clickhouse
+```

@@ -86,16 +86,17 @@ Pentest Collaboration Framework (PCF)
 ## 4.3 Технологический стек
 
 
-| Компонент               | Технология                         |
-| ----------------------- | ---------------------------------- |
-| Backend                 | Python (REST API, префикс /api/v1/)|
-| Frontend                | React + TypeScript                 |
-| СУБД                    | PostgreSQL                         |
-| Файловое хранилище      | MinIO                              |
-| Real-time синхронизация | WebSocket                          |
-| Аутентификация          | JWT в httpOnly cookie (access + refresh) |
-| Контейнеризация         | Docker Compose                     |
-| Пагинация               | Offset (?page=1&size=20)           |
+| Компонент               | Технология                              |
+| ----------------------- | --------------------------------------- |
+| Backend                 | Python (REST API, префикс /api/v1/)     |
+| Frontend                | React + TypeScript                      |
+| СУБД                    | PostgreSQL                              |
+| Хранилище аудит-логов   | ClickHouse                              |
+| Файловое хранилище      | MinIO                                   |
+| Real-time синхронизация | WebSocket                               |
+| Аутентификация          | JWT в httpOnly cookie (access + refresh)|
+| Контейнеризация         | Docker Compose                          |
+| Пагинация               | Offset (?page=1&size=20)                |
 
 
 ---
@@ -249,6 +250,8 @@ Pentest Collaboration Framework (PCF)
 - фиксацию действий пользователей
 - доступ к журналу только для пользователей с соответствующими правами
 
+Записи журнала хранятся в **ClickHouse** (не в PostgreSQL). ClickHouse используется как колоночное append-only хранилище, оптимальное для аналитических запросов по большим объёмам событий. Администратор может фильтровать журнал по пользователю, типу действия, типу сущности и диапазону дат.
+
 ---
 
 ## 5.11 Совместная работа
@@ -312,12 +315,13 @@ Pentest Collaboration Framework (PCF)
 Состав контейнеров Docker Compose:
 
 
-| Контейнер | Назначение                         |
-| --------- | ---------------------------------- |
-| backend   | Python REST API + WebSocket сервер |
-| frontend  | React + TypeScript SPA             |
-| db        | PostgreSQL — основная СУБД         |
-| minio     | MinIO — объектное хранилище файлов |
+| Контейнер  | Назначение                                     |
+| ---------- | ---------------------------------------------- |
+| backend    | Python REST API + WebSocket сервер             |
+| frontend   | React + TypeScript SPA                         |
+| db         | PostgreSQL — основная СУБД                     |
+| minio      | MinIO — объектное хранилище файлов             |
+| clickhouse | ClickHouse — хранилище аудит-логов             |
 
 
 ---

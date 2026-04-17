@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { load as parseYaml } from "js-yaml";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
-import { addVulnerabilityAsset, createHost, createEndpoint, createPort, createService, createVulnerability, deleteEndpoint, deleteHost, deletePort, deleteService, deleteVulnerability, getServices, getHost, getHosts, getHostVulnerabilities, updateEndpoint, updateHost, updatePort, updateService, updateVulnerability, } from "../api";
+import { createHost, createEndpoint, createPort, createService, createVulnerability, deleteEndpoint, deleteHost, deletePort, deleteService, deleteVulnerability, getServices, getHost, getHosts, getHostVulnerabilities, updateEndpoint, updateHost, updatePort, updateService, updateVulnerability, } from "../api";
 import { ProjectTreeNav } from "../components/ProjectTreeNav";
 export function HostDetailPage() {
     const { projectId, hostId } = useParams();
@@ -142,6 +142,19 @@ export function HostDetailPage() {
     useEffect(() => {
         void loadHost();
     }, [loadHost]);
+    useEffect(() => {
+        if (!projectId) {
+            return;
+        }
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        const socket = new WebSocket(`${protocol}://${window.location.host}/ws/projects/${projectId}`);
+        socket.onmessage = () => {
+            void loadHost();
+        };
+        return () => {
+            socket.close();
+        };
+    }, [loadHost, projectId]);
     useEffect(() => {
         const loadServices = async () => {
             if (!projectId || !hostId || !host?.ports.length) {
@@ -738,15 +751,12 @@ export function HostDetailPage() {
         if (!projectId || !hostId) {
             return;
         }
-        const vulnerability = await createVulnerability(projectId, {
+        await createVulnerability(projectId, {
+            host_id: hostId,
             title: creatingVulnerabilityTitle.trim(),
             description: creatingVulnerabilityDescription.trim() || undefined,
             severity: creatingVulnerabilitySeverity,
             status: creatingVulnerabilityStatus,
-        });
-        await addVulnerabilityAsset(projectId, vulnerability.id, {
-            asset_type: "host",
-            asset_id: hostId,
         });
         setCreateVulnerabilityOpen(false);
         setCreatingVulnerabilityTitle("");
@@ -776,22 +786,22 @@ export function HostDetailPage() {
     if (loading) {
         return (_jsx(Box, { display: "flex", justifyContent: "center", py: 6, children: _jsx(CircularProgress, {}) }));
     }
-    return (_jsxs(Stack, { spacing: 2.5, children: [error && _jsx(Alert, { severity: "error", children: error }), infoMessage && _jsx(Alert, { severity: "success", children: infoMessage }), _jsx(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1, children: _jsxs(Stack, { spacing: 0.2, children: [_jsx(Typography, { variant: "overline", color: "primary.main", sx: { letterSpacing: 1.4, fontWeight: 700 }, children: "Host Workspace" }), _jsxs(Typography, { variant: "h4", fontWeight: 700, children: ["\u0425\u043E\u0441\u0442: ", hostTitle] }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { maxWidth: 760 }, children: "\u0414\u0435\u0442\u0430\u043B\u0438 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E \u0430\u043A\u0442\u0438\u0432\u0430, \u0441\u0435\u0442\u0435\u0432\u044B\u0435 \u0442\u043E\u0447\u043A\u0438, endpoint-\u0441\u0442\u0440\u0443\u043A\u0442\u0443\u0440\u0430 \u0438 \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0435 \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438." })] }) }), _jsxs(Menu, { anchorEl: hostActionsAnchorEl, open: hostActionsOpen, onClose: closeHostActionsMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: [_jsxs(MenuItem, { onClick: openHostEdit, children: [_jsx(EditIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442"] }), _jsxs(MenuItem, { onClick: () => {
+    return (_jsxs(Stack, { spacing: 2.5, children: [error && _jsx(Alert, { severity: "error", children: error }), infoMessage && _jsx(Alert, { severity: "success", children: infoMessage }), _jsx(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1, children: _jsx(Stack, { spacing: 0.2, children: _jsxs(Typography, { variant: "h4", fontWeight: 700, children: ["\u0425\u043E\u0441\u0442: ", hostTitle] }) }) }), _jsxs(Menu, { anchorEl: hostActionsAnchorEl, open: hostActionsOpen, onClose: closeHostActionsMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: [_jsxs(MenuItem, { onClick: openHostEdit, children: [_jsx(EditIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442"] }), _jsxs(MenuItem, { onClick: () => {
                             closeHostActionsMenu();
                             void removeHost();
                         }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0445\u043E\u0441\u0442"] })] }), _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 2, children: [_jsx(ProjectTreeNav, { hosts: hosts, selectedHostId: hostId ?? null, selectedSection: selectedSection, isCollapsed: isSidebarCollapsed, portsCount: portsCount, endpointsCount: endpointsCount, vulnerabilitiesCount: vulnerabilitiesCount, hostStatsById: hostStatsById, onToggleCollapsed: () => setSidebarCollapsed((v) => !v), onSelectSection: setSelectedSection, onSelectProjectOverview: () => navigate(`/projects/${projectId}`), onSelectHost: (nextHostId) => navigate(`/projects/${projectId}/hosts/${nextHostId}`), onOpenHost: (nextHostId) => navigate(`/projects/${projectId}/hosts/${nextHostId}`) }), _jsxs(Stack, { flex: 1, spacing: 2, children: [_jsxs(Grid, { container: true, spacing: 2, children: [_jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("ports"), sx: {
                                                 cursor: "pointer",
                                                 border: selectedSection === "ports" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
                                                 backgroundColor: selectedSection === "ports" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
-                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u041F\u043E\u0440\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: portsCount }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { mt: 0.6 }, children: "\u0421\u0435\u0442\u0435\u0432\u044B\u0435 \u0432\u0445\u043E\u0434\u044B \u0438 \u043E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u043D\u044B\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044B." })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("endpoints"), sx: {
+                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u041F\u043E\u0440\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: portsCount })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("endpoints"), sx: {
                                                 cursor: "pointer",
                                                 border: selectedSection === "endpoints" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
                                                 backgroundColor: selectedSection === "endpoints" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
-                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: endpointsCount }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { mt: 0.6 }, children: "HTTP-\u043C\u0430\u0440\u0448\u0440\u0443\u0442\u044B \u0438 \u0438\u043C\u043F\u043E\u0440\u0442 \u0438\u0437 Swagger/OpenAPI." })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("vulns"), sx: {
+                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u042D\u043D\u0434\u043F\u043E\u0438\u043D\u0442\u043E\u0432 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: endpointsCount })] }) }) }), _jsx(Grid, { size: { xs: 12, md: 4 }, children: _jsx(Card, { onClick: () => setSelectedSection("vulns"), sx: {
                                                 cursor: "pointer",
                                                 border: selectedSection === "vulns" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
                                                 backgroundColor: selectedSection === "vulns" ? "rgba(17,38,62,0.88)" : "rgba(15,27,45,0.82)",
-                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0435\u0439 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: vulnerabilitiesCount }), _jsx(Typography, { variant: "body2", color: "text.secondary", sx: { mt: 0.6 }, children: "\u041D\u0430\u0439\u0434\u0435\u043D\u043D\u044B\u0435 \u043F\u0440\u043E\u0431\u043B\u0435\u043C\u044B \u0438 \u0440\u0430\u0431\u043E\u0447\u0438\u0435 \u043A\u0430\u0440\u0442\u043E\u0447\u043A\u0438 \u0438\u0441\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u044F." })] }) }) })] }), selectedSection === "overview" && (_jsx(Stack, { spacing: 2, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0445\u043E\u0441\u0442\u0430" }), _jsx(IconButton, { size: "small", onClick: openHostActionsMenu, sx: { border: "1px solid rgba(126,224,255,0.2)", backgroundColor: "rgba(15,27,45,0.6)" }, children: _jsx(MoreVertIcon, { fontSize: "small" }) })] }), _jsx(Box, { sx: { border: "1px solid rgba(126,224,255,0.12)", p: 2, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }, children: _jsx(ReactMarkdown, { children: host?.notes || "_Описание хоста не заполнено_" }) })] }) }) })), selectedSection === "ports" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u041F\u043E\u0440\u0442\u044B" }), _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(Tooltip, { title: "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u0440\u0442\u044B \u0438\u0437 Nmap", children: _jsxs(IconButton, { size: "small", component: "label", disabled: nmapImporting, children: [_jsx(UploadFileIcon, { fontSize: "small" }), _jsx("input", { hidden: true, type: "file", accept: ".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml", onChange: (event) => {
+                                            }, children: _jsxs(CardContent, { children: [_jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0435\u0439 \u0445\u043E\u0441\u0442\u0430" }), _jsx(Typography, { variant: "h4", fontWeight: 700, children: vulnerabilitiesCount })] }) }) })] }), selectedSection === "overview" && (_jsx(Stack, { spacing: 2, children: _jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0445\u043E\u0441\u0442\u0430" }), _jsx(IconButton, { size: "small", onClick: openHostActionsMenu, sx: { border: "1px solid rgba(126,224,255,0.2)", backgroundColor: "rgba(15,27,45,0.6)" }, children: _jsx(MoreVertIcon, { fontSize: "small" }) })] }), _jsx(Box, { sx: { border: "1px solid rgba(126,224,255,0.12)", p: 2, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }, children: _jsx(ReactMarkdown, { children: host?.notes || "_Описание хоста не заполнено_" }) })] }) }) })), selectedSection === "ports" && (_jsx(Card, { sx: { border: "1px solid rgba(126,224,255,0.14)" }, children: _jsxs(CardContent, { children: [_jsxs(Stack, { direction: "row", alignItems: "center", justifyContent: "space-between", mb: 1, children: [_jsx(Typography, { variant: "h6", fontWeight: 700, children: "\u041F\u043E\u0440\u0442\u044B" }), _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(Tooltip, { title: "\u0418\u043C\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u0440\u0442\u044B \u0438\u0437 Nmap", children: _jsxs(IconButton, { size: "small", component: "label", disabled: nmapImporting, children: [_jsx(UploadFileIcon, { fontSize: "small" }), _jsx("input", { hidden: true, type: "file", accept: ".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml", onChange: (event) => {
                                                                             const selectedFile = event.target.files?.[0] ?? null;
                                                                             void importPortsFromNmapFile(selectedFile);
                                                                             event.target.value = "";

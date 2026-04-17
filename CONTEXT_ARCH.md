@@ -45,6 +45,8 @@
 | HTTP-клиент (тесты) | httpx | 0.28.0 |
 | Тесты | pytest + pytest-asyncio | 8.3.4 / 0.24.0 |
 | База данных | PostgreSQL | 16-alpine |
+| **Хранилище аудит-логов** | **ClickHouse** | 24-alpine |
+| ClickHouse Python-клиент | clickhouse-connect | (добавить в requirements.txt) |
 | Хранилище файлов | MinIO | latest |
 | Frontend | React + TypeScript | (Vite, см. frontend/) |
 | HTTP-клиент FE | Axios | withCredentials: true |
@@ -156,17 +158,20 @@ SberPCF/
 
 ```yaml
 services:
-  backend:   # FastAPI, порт 8000
-  frontend:  # React/Vite, порт 3000
-  db:        # PostgreSQL 16, порт 5433:5432 (внешний 5433)
-  minio:     # MinIO, порт 9000 (API) + 9001 (Console)
+  backend:    # FastAPI, порт 8000
+  frontend:   # React/Vite, порт 3000
+  db:         # PostgreSQL 16, порт 5433:5432 (внешний 5433)
+  minio:      # MinIO, порт 9000 (API) + 9001 (Console)
+  clickhouse: # ClickHouse 24, порт 8123 (HTTP) + 9009:9000 (Native)
 ```
 
-**Volumes:** `pgdata` (PostgreSQL), `miniodata` (MinIO)
+**Volumes:** `pgdata` (PostgreSQL), `miniodata` (MinIO), `chdata` (ClickHouse)
 
 ---
 
 ## 6. База данных — все таблицы
+
+### PostgreSQL таблицы
 
 | Таблица | Назначение |
 |---------|-----------|
@@ -184,7 +189,15 @@ services:
 | `comments` | Комментарии к уязвимостям (редактируемые/удаляемые автором) |
 | `comment_mentions` | M2M: комментарии ↔ упомянутые пользователи |
 | `notifications` | In-app уведомления при @-упоминании |
-| `audit_logs` | Журнал действий (JSON details) |
+
+### ClickHouse таблицы (`pcf_logs`)
+
+| Таблица | Назначение |
+|---------|-----------|
+| `audit_logs` | Журнал действий пользователей (append-only, MergeTree, партиционирование по месяцу) |
+
+**Ключевые поля:** `id` (UUID), `user_id`, `action`, `entity_type`, `entity_id`, `details` (JSON-строка), `ip_address`, `created_at` (DateTime64)  
+**Движок:** `MergeTree() PARTITION BY toYYYYMM(created_at) ORDER BY (created_at, action)`
 
 ### Ключевые enum-типы (из `enums.py`)
 
@@ -338,7 +351,12 @@ services:
 
 - [ ] Запустить и проверить стек через `docker compose up --build`  
       (ранее была ошибка: Docker Desktop не был запущен)
-- [ ] Настроить Alembic миграции и применить к БД
+- [ ] Настроить Alembic миграции и применить к PostgreSQL БД
+- [ ] Инициализировать ClickHouse: создать БД `pcf_logs` и таблицу `audit_logs` (DDL-скрипт в `backend/infrastructure/clickhouse_init.sql`)
+- [ ] Добавить `clickhouse-connect` в `requirements.txt`
+- [ ] Добавить `CLICKHOUSE_*` переменные в `.env` и `.env.example`
+- [ ] Обновить `docker-compose.yml` — добавить сервис `clickhouse` и volume `chdata`
+- [ ] Реализовать `backend/app/infrastructure/clickhouse_client.py`
 - [ ] Дописать реализацию сервисного слоя (`services.py`)
 - [ ] Дописать frontend-страницы (уязвимости, файлы, комментарии, отчёты)
 - [ ] Добавить e2e тесты
@@ -364,4 +382,11 @@ MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET=pcf-files
 MINIO_SECURE=false
+
+# ClickHouse
+CLICKHOUSE_HOST=clickhouse
+CLICKHOUSE_PORT=8123
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=
+CLICKHOUSE_DB=pcf_logs
 ```

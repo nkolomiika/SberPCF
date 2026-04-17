@@ -1,9 +1,10 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppBar, Avatar, Badge, Button, Box, CircularProgress, Container, Divider, ListItemIcon, List, ListItemButton, ListItemText, IconButton, Menu, MenuItem, Popover, Paper, Stack, Toolbar, Typography, } from "@mui/material";
 import HomeIcon from "@mui/icons-material/Home";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
+import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import HistoryIcon from "@mui/icons-material/History";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
@@ -14,6 +15,7 @@ import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
+import { UsersAdminPage } from "./pages/UsersAdminPage";
 function PrivateLayout({ themeMode }) {
     const navigate = useNavigate();
     const user = useAuthStore((s) => s.user);
@@ -23,19 +25,26 @@ function PrivateLayout({ themeMode }) {
     const [notificationsLoading, setNotificationsLoading] = useState(false);
     const [notificationsAnchorEl, setNotificationsAnchorEl] = useState(null);
     const [profileAnchorEl, setProfileAnchorEl] = useState(null);
-    useEffect(() => {
-        const load = async () => {
-            const unread = await unreadCount();
-            setCount(unread);
-        };
-        void load();
+    const loadUnreadNotifications = useCallback(async () => {
+        const unread = await unreadCount();
+        setCount(unread);
     }, []);
+    useEffect(() => {
+        void loadUnreadNotifications();
+        const intervalId = window.setInterval(() => {
+            void loadUnreadNotifications();
+        }, 30000);
+        return () => {
+            window.clearInterval(intervalId);
+        };
+    }, [loadUnreadNotifications]);
     const openNotifications = async (event) => {
         setNotificationsAnchorEl(event.currentTarget);
         setNotificationsLoading(true);
         try {
             const response = await listNotifications();
             setNotifications(response.items);
+            await loadUnreadNotifications();
         }
         finally {
             setNotificationsLoading(false);
@@ -76,7 +85,7 @@ function PrivateLayout({ themeMode }) {
                             alignItems: "center",
                             px: { xs: 2, md: 3 },
                             maxWidth: "min(1800px, 100vw)",
-                        }, children: [_jsxs(Stack, { spacing: 0.3, children: [_jsx(Typography, { variant: "overline", color: "primary.main", sx: { letterSpacing: 1.6, fontWeight: 700 }, children: "Pentest Workspace" }), _jsx(Typography, { variant: "h5", fontWeight: 700, children: "Pentest Collaboration Framework" }), _jsx(Typography, { variant: "body2", color: "text.secondary", children: "\u041F\u0440\u043E\u0435\u043A\u0442\u044B, \u0430\u043A\u0442\u0438\u0432\u044B, \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438 \u0438 \u043E\u0442\u0447\u0435\u0442\u044B \u0432 \u043E\u0434\u043D\u043E\u043C \u0440\u0430\u0431\u043E\u0447\u0435\u043C \u043A\u043E\u043D\u0442\u0443\u0440\u0435" })] }), _jsxs(Stack, { direction: "row", spacing: 1.5, alignItems: "center", children: [_jsx(IconButton, { color: "inherit", onClick: openNotifications, sx: {
+                        }, children: [_jsx(Stack, { spacing: 0.3, children: _jsx(Typography, { variant: "h5", fontWeight: 700, children: "Pentest Collaboration Framework" }) }), _jsxs(Stack, { direction: "row", spacing: 1.5, alignItems: "center", children: [_jsx(IconButton, { color: "inherit", onClick: openNotifications, sx: {
                                             border: "1px solid rgba(126,224,255,0.18)",
                                             width: 44,
                                             height: 44,
@@ -107,6 +116,9 @@ function PrivateLayout({ themeMode }) {
                             navigate("/");
                             closeProfileMenu();
                         }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(HomeIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0414\u043E\u043C\u043E\u0439" })] }), user.role === "admin" && (_jsxs(MenuItem, { onClick: () => {
+                            navigate("/users");
+                            closeProfileMenu();
+                        }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(ManageAccountsIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u0438" })] })), user.role === "admin" && (_jsxs(MenuItem, { onClick: () => {
                             navigate("/audit-logs");
                             closeProfileMenu();
                         }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(HistoryIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0416\u0443\u0440\u043D\u0430\u043B \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439" })] })), _jsxs(MenuItem, { onClick: () => {
@@ -122,7 +134,7 @@ function PrivateLayout({ themeMode }) {
                                     p: { xs: 2, md: 3 },
                                     borderRadius: 0,
                                     backgroundColor: themeMode === "dark" ? "rgba(15,27,45,0.78)" : "rgba(255,255,255,0.8)",
-                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/audit-logs", element: user.role === "admin" ? _jsx(AuditLogsPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
+                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/users", element: user.role === "admin" ? _jsx(UsersAdminPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "/audit-logs", element: user.role === "admin" ? _jsx(AuditLogsPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
 }
 export default function App({ themeMode }) {
     const initialize = useAuthStore((s) => s.initialize);

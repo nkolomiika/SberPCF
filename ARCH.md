@@ -8,21 +8,21 @@
 ## 1.1 Общая схема
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Docker Compose                           │
-│                                                                 │
-│  ┌──────────────┐    HTTP/WS    ┌──────────────────────────┐   │
-│  │   frontend   │◄────────────►│        backend           │   │
-│  │ React + TS   │              │  Python REST API + WS     │   │
-│  └──────────────┘              └──────────┬───────────────┘   │
-│                                           │                     │
-│                              ┌────────────┼────────────┐       │
-│                              │            │            │       │
-│                     ┌────────▼──┐  ┌──────▼──────┐    │       │
-│                     │    db     │  │    minio    │    │       │
-│                     │PostgreSQL │  │  File Store │    │       │
-│                     └───────────┘  └─────────────┘    │       │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                           Docker Compose                             │
+│                                                                      │
+│  ┌──────────────┐    HTTP/WS    ┌──────────────────────────────┐    │
+│  │   frontend   │◄────────────►│           backend             │    │
+│  │ React + TS   │              │   Python REST API + WS        │    │
+│  └──────────────┘              └────────────┬──────────────────┘    │
+│                                             │                        │
+│                         ┌───────────────────┼──────────────┐        │
+│                         │                   │              │        │
+│                ┌────────▼──┐  ┌─────────────▼──┐  ┌───────▼─────┐  │
+│                │    db     │  │    clickhouse  │  │    minio    │  │
+│                │PostgreSQL │  │   Audit Logs   │  │ File Store  │  │
+│                └───────────┘  └────────────────┘  └─────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 1.2 Архитектура бэкенда (Layered Architecture)
@@ -39,7 +39,7 @@
 ├─────────────────────────────────────────────┤
 │              Models (ORM)                   │  ← SQLAlchemy-модели
 ├─────────────────────────────────────────────┤
-│         PostgreSQL        MinIO             │  ← Хранилища данных
+│    PostgreSQL    MinIO    ClickHouse        │  ← Хранилища данных
 └─────────────────────────────────────────────┘
 ```
 
@@ -65,8 +65,7 @@ backend/
 │   │   ├── file.py
 │   │   ├── comment.py
 │   │   ├── notification.py
-│   │   ├── refresh_token.py
-│   │   └── audit_log.py
+│   │   └── refresh_token.py
 │   │
 │   ├── schemas/                 # Pydantic-схемы (request/response)
 │   │   ├── auth.py
@@ -131,6 +130,9 @@ backend/
 │   │
 │   ├── storage/
 │   │   └── minio_client.py      # Клиент MinIO: upload/download/delete
+│   │
+│   ├── infrastructure/
+│   │   └── clickhouse_client.py # Клиент ClickHouse: запись и чтение audit_logs
 │   │
 │   └── utils/
 │       ├── jwt.py               # Генерация и валидация JWT
@@ -290,7 +292,7 @@ class ReportFactory:
 ```
 
 ### Decorator Pattern — аудит
-Декоратор автоматически записывает действие в `audit_logs` после выполнения сервисного метода.
+Декоратор автоматически записывает действие в `audit_logs` (ClickHouse) после выполнения сервисного метода. Запись производится асинхронно (fire-and-forget): ошибка записи в ClickHouse логируется, но не прерывает основную операцию.
 
 ```python
 # utils/audit.py
@@ -298,7 +300,11 @@ def audit_action(action: str, entity_type: str):
     def decorator(func):
         async def wrapper(*args, **kwargs):
             result = await func(*args, **kwargs)
-            await audit_repo.create(action=action, entity_type=entity_type, ...)
+            # Пишем в ClickHouse асинхронно, не блокируя ответ
+            try:
+                await audit_repo.create(action=action, entity_type=entity_type, ...)
+            except Exception:
+                logger.exception("Ошибка записи аудита в ClickHouse")
             return result
         return wrapper
     return decorator
@@ -1518,6 +1524,8 @@ Set-Cookie: refresh_token=; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth
 
 ## 3.15 Audit Logs — Журнал действий
 
+> Данные читаются из **ClickHouse** (`pcf_logs.audit_logs`). API-интерфейс не меняется — формат запросов и ответов идентичен.
+
 ### GET /api/v1/audit-logs
 Список записей журнала действий.
 
@@ -1648,6 +1656,13 @@ MINIO_USE_SSL=false
 # App
 DEBUG=false
 CORS_ORIGINS=http://localhost:3000
+
+# ClickHouse
+CLICKHOUSE_HOST=clickhouse
+CLICKHOUSE_PORT=8123
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=
+CLICKHOUSE_DB=pcf_logs
 ```
 
 ## docker-compose.yml (структура)
@@ -1687,7 +1702,20 @@ services:
       - "9000:9000"
       - "9001:9001"
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    environment:
+      CLICKHOUSE_DB: pcf_logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"   # HTTP interface (clickhouse-connect)
+      - "9009:9000"   # Native protocol (внешний 9009, т.к. 9000 занят MinIO)
+    volumes:
+      - chdata:/var/lib/clickhouse
+
 volumes:
   pgdata:
   miniodata:
+  chdata:
 ```
