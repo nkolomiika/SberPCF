@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models  # noqa: F401
+from app.audit_store import audit_store
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, PCFError, UnauthorizedError, ValidationError
@@ -93,6 +94,7 @@ async def startup() -> None:
             if not has_folder:
                 await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT 'Без папки'"))
         await conn.run_sync(Base.metadata.create_all)
+    await audit_store.ensure_table()
     MinioStorage().ensure_bucket()
     async with SessionLocal() as db:
         service = UserService(db)

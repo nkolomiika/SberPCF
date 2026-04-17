@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AppBar,
   Avatar,
@@ -24,6 +24,7 @@ import {
 import HomeIcon from "@mui/icons-material/Home";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
+import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import HistoryIcon from "@mui/icons-material/History";
 import type { PaletteMode } from "@mui/material";
@@ -36,6 +37,7 @@ import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
+import { UsersAdminPage } from "./pages/UsersAdminPage";
 
 type PrivateLayoutProps = {
   themeMode: PaletteMode;
@@ -51,13 +53,20 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const [notificationsAnchorEl, setNotificationsAnchorEl] = useState<HTMLElement | null>(null);
   const [profileAnchorEl, setProfileAnchorEl] = useState<HTMLElement | null>(null);
 
-  useEffect(() => {
-    const load = async () => {
-      const unread = await unreadCount();
-      setCount(unread);
-    };
-    void load();
+  const loadUnreadNotifications = useCallback(async () => {
+    const unread = await unreadCount();
+    setCount(unread);
   }, []);
+
+  useEffect(() => {
+    void loadUnreadNotifications();
+    const intervalId = window.setInterval(() => {
+      void loadUnreadNotifications();
+    }, 30000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [loadUnreadNotifications]);
 
   const openNotifications = async (event: React.MouseEvent<HTMLElement>) => {
     setNotificationsAnchorEl(event.currentTarget);
@@ -65,6 +74,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     try {
       const response = await listNotifications();
       setNotifications(response.items);
+      await loadUnreadNotifications();
     } finally {
       setNotificationsLoading(false);
     }
@@ -127,14 +137,8 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             }}
           >
             <Stack spacing={0.3}>
-              <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.6, fontWeight: 700 }}>
-                Pentest Workspace
-              </Typography>
               <Typography variant="h5" fontWeight={700}>
                 Pentest Collaboration Framework
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Проекты, активы, уязвимости и отчеты в одном рабочем контуре
               </Typography>
             </Stack>
             <Stack direction="row" spacing={1.5} alignItems="center">
@@ -216,6 +220,20 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
           </ListItemIcon>
           <ListItemText>Домой</ListItemText>
         </MenuItem>
+        {user.role === "admin" && (
+          <MenuItem
+            onClick={() => {
+              navigate("/users");
+              closeProfileMenu();
+            }}
+            sx={{ minWidth: 220 }}
+          >
+            <ListItemIcon sx={{ minWidth: 30 }}>
+              <ManageAccountsIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Пользователи</ListItemText>
+          </MenuItem>
+        )}
         {user.role === "admin" && (
           <MenuItem
             onClick={() => {
@@ -313,6 +331,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
           />
           <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId" element={<HostDetailPage />} />
+          <Route path="/users" element={user.role === "admin" ? <UsersAdminPage /> : <Navigate to="/" replace />} />
           <Route path="/audit-logs" element={user.role === "admin" ? <AuditLogsPage /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -15,6 +15,7 @@ from reportlab.pdfgen import canvas
 from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit_store import audit_store
 from app.config import get_settings
 from app.enums import AssetType, NotificationType, UserRole
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError
@@ -89,6 +90,10 @@ class AuditService:
         ip_address: str | None = None,
     ) -> None:
         """Создаёт запись аудита."""
+        username: str | None = None
+        if user_id:
+            username = await self.db.scalar(select(User.username).where(User.id == user_id))
+        created_at = datetime.now(UTC)
         self.db.add(
             AuditLog(
                 user_id=user_id,
@@ -97,9 +102,20 @@ class AuditService:
                 entity_id=entity_id,
                 details=details,
                 ip_address=ip_address,
+                created_at=created_at,
             )
         )
         await self.db.commit()
+        await audit_store.insert(
+            user_id=user_id,
+            username=username,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details,
+            ip_address=ip_address,
+            created_at=created_at,
+        )
 
 
 class AuthService:
@@ -819,11 +835,23 @@ class VulnerabilityService:
         return list(items), total
 
     async def create(self, project_id: UUID, payload: dict, actor_id: UUID) -> Vulnerability:
+        host_id = payload.pop("host_id", None)
+        if not host_id:
+            raise ValidationError("Уязвимость должна быть привязана к конкретному хосту")
+        await self._assert_asset_in_project(project_id, AssetType.HOST, host_id)
         vuln = Vulnerability(project_id=project_id, created_by=actor_id, **payload)
         self.db.add(vuln)
+        await self.db.flush()
+        self.db.add(VulnerabilityAsset(vulnerability_id=vuln.id, asset_type=AssetType.HOST, asset_id=host_id))
         await self.db.commit()
         await self.db.refresh(vuln)
-        await self.audit.log("CREATE", user_id=actor_id, entity_type="vulnerability", entity_id=vuln.id)
+        await self.audit.log(
+            "CREATE",
+            user_id=actor_id,
+            entity_type="vulnerability",
+            entity_id=vuln.id,
+            details={"host_id": str(host_id)},
+        )
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "vulnerability", "project_id": str(project_id), "data": {"id": str(vuln.id)}})
         return vuln
 
@@ -912,6 +940,15 @@ class VulnerabilityService:
         await self.db.commit()
         await self.db.refresh(link)
         await self.audit.log("CREATE", user_id=actor_id, entity_type="vulnerability_asset", entity_id=link.id)
+        await ws_manager.broadcast(
+            project_id,
+            {
+                "event": "updated",
+                "entity": "vulnerability",
+                "project_id": str(project_id),
+                "data": {"id": str(vuln_id), "asset_link_id": str(link.id)},
+            },
+        )
         return link
 
     async def delete_asset(self, project_id: UUID, vuln_id: UUID, link_id: UUID, actor_id: UUID) -> None:
@@ -921,9 +958,26 @@ class VulnerabilityService:
         )
         if not link:
             raise NotFoundError("Связь не найдена")
+        if link.asset_type == AssetType.HOST:
+            host_links_count = await self.db.scalar(
+                select(func.count())
+                .select_from(VulnerabilityAsset)
+                .where(and_(VulnerabilityAsset.vulnerability_id == vuln_id, VulnerabilityAsset.asset_type == AssetType.HOST))
+            )
+            if (host_links_count or 0) <= 1:
+                raise ValidationError("Уязвимость должна оставаться привязанной хотя бы к одному хосту")
         await self.db.delete(link)
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="vulnerability_asset", entity_id=link_id)
+        await ws_manager.broadcast(
+            project_id,
+            {
+                "event": "updated",
+                "entity": "vulnerability",
+                "project_id": str(project_id),
+                "data": {"id": str(vuln_id), "asset_link_id": str(link_id)},
+            },
+        )
 
 
 class FileService:
@@ -1314,12 +1368,28 @@ class ReportService:
         ports = (
             await self.db.scalars(select(Port).join(Host, Port.host_id == Host.id).where(Host.project_id == project_id))
         ).all()
+        vulnerability_ids = [vulnerability.id for vulnerability in vulnerabilities]
+        host_ids = [host.id for host in hosts]
+        vulnerability_assets = []
+        files = []
+        if vulnerability_ids:
+            vulnerability_assets = list(
+                (
+                    await self.db.scalars(
+                        select(VulnerabilityAsset).where(VulnerabilityAsset.vulnerability_id.in_(vulnerability_ids))
+                    )
+                ).all()
+            )
+            files = list((await self.db.scalars(select(File).where(File.vulnerability_id.in_(vulnerability_ids)))).all())
         return {
             "project": project,
             "members": [m[0] for m in members],
             "vulnerabilities": list(vulnerabilities),
             "hosts": list(hosts),
             "ports": list(ports),
+            "host_ids": host_ids,
+            "vulnerability_assets": vulnerability_assets,
+            "files": files,
         }
 
     async def generate_markdown(self, project_id: UUID) -> bytes:
@@ -1327,6 +1397,20 @@ class ReportService:
         data = await self._collect_project_data(project_id)
         project: Project = data["project"]
         vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
+        hosts: list[Host] = data["hosts"]
+        ports: list[Port] = data["ports"]
+        vulnerability_assets: list[VulnerabilityAsset] = data["vulnerability_assets"]
+        files: list[File] = data["files"]
+        host_by_id = {host.id: host for host in hosts}
+        ports_by_host_id: dict[UUID, list[Port]] = {}
+        for port in ports:
+            ports_by_host_id.setdefault(port.host_id, []).append(port)
+        assets_by_vuln_id: dict[UUID, list[VulnerabilityAsset]] = {}
+        for asset in vulnerability_assets:
+            assets_by_vuln_id.setdefault(asset.vulnerability_id, []).append(asset)
+        files_by_vuln_id: dict[UUID, list[File]] = {}
+        for file_meta in files:
+            files_by_vuln_id.setdefault(file_meta.vulnerability_id, []).append(file_meta)
         severity_stats: dict[str, int] = {}
         status_stats: dict[str, int] = {}
         for vuln in vulnerabilities:
@@ -1348,14 +1432,36 @@ class ReportService:
         lines += ["", "## Статистика уязвимостей по статусу"]
         for key, value in status_stats.items():
             lines.append(f"- {key}: {value}")
-        lines += ["", "## Активы", f"- Хосты: {len(data['hosts'])}", f"- Порты: {len(data['ports'])}", "", "## Уязвимости"]
+        lines += ["", "## Активы", f"- Хосты: {len(hosts)}", f"- Порты: {len(ports)}", ""]
+        if hosts:
+            lines += ["### Сводка по хостам", "", "| Хост | IP/Hostname | Порты |", "| --- | --- | --- |"]
+            for host in hosts:
+                host_label = host.hostname or host.ip_address or str(host.id)
+                target_value = host.ip_address or host.hostname or "-"
+                host_ports = ports_by_host_id.get(host.id, [])
+                ports_summary = ", ".join(
+                    f"{port.port_number}/{port.protocol.value if hasattr(port.protocol, 'value') else port.protocol}" for port in host_ports
+                )
+                lines.append(f"| {host_label} | {target_value} | {ports_summary or '-'} |")
+        lines += ["", "## Уязвимости"]
         for vuln in vulnerabilities:
+            linked_assets: list[str] = []
+            for asset in assets_by_vuln_id.get(vuln.id, []):
+                if asset.asset_type == AssetType.HOST:
+                    host = host_by_id.get(asset.asset_id)
+                    linked_assets.append(host.hostname or host.ip_address if host else f"host:{asset.asset_id}")
+                else:
+                    linked_assets.append(f"{asset.asset_type.value}:{asset.asset_id}")
+            attachment_names = [file_meta.original_name for file_meta in files_by_vuln_id.get(vuln.id, [])]
             lines += [
                 f"### {vuln.title}",
                 f"- Severity: {vuln.severity.value}",
                 f"- Status: {vuln.status.value}",
                 f"- CVSS: {vuln.cvss_version.value if vuln.cvss_version else '-'} {vuln.cvss_score if vuln.cvss_score else '-'}",
+                f"- CVSS Vector: {vuln.cvss_vector or '-'}",
                 f"- CWE: {vuln.cwe_id or '-'}",
+                f"- Активы: {', '.join(linked_assets) if linked_assets else '-'}",
+                f"- Вложения: {', '.join(attachment_names) if attachment_names else '-'}",
                 "",
                 "**Описание**",
                 vuln.description or "-",

@@ -882,9 +882,6 @@ export function ProjectsPage() {
           <Typography variant="h4" fontWeight={700}>
             Проекты
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6, maxWidth: 760 }}>
-            Рабочее пространство с древовидной структурой папок, проектами и drag&drop управлением как в файловом навигаторе.
-          </Typography>
         </Box>
         {user?.role === "admin" && (
           <IconButton
@@ -1009,9 +1006,6 @@ export function ProjectsPage() {
               <Chip label={`Папок: ${treeStats.totalFolders}`} variant="outlined" />
               <Chip label={`Вложенных папок: ${treeStats.nestedFolders}`} variant="outlined" />
             </Stack>
-            <Typography variant="caption" color="text.secondary">
-              Подсветка папки означает вложение внутрь, линия между элементами означает перенос на этот уровень.
-            </Typography>
           </Stack>
           <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
             <TextField

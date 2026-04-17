@@ -1,10 +1,11 @@
+import CableIcon from "@mui/icons-material/Cable";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import DnsIcon from "@mui/icons-material/Dns";
+import AltRouteIcon from "@mui/icons-material/AltRoute";
 import HubIcon from "@mui/icons-material/Hub";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowRightIcon from "@mui/icons-material/KeyboardArrowRight";
-import LanIcon from "@mui/icons-material/Lan";
 import ReportProblemIcon from "@mui/icons-material/ReportProblem";
 import {
   Box,
@@ -156,7 +157,7 @@ export function ProjectTreeNav({
               {isExpanded && !isCollapsed && (
                 <Stack sx={{ pl: 5, pr: 1, pb: 1 }} spacing={0.5}>
                   <ListItemButton sx={{ borderRadius: 0 }} selected={isActiveHost && selectedSection === "ports"} onClick={() => selectHostAndSection(host.id, "ports")}>
-                    <LanIcon fontSize="small" />
+                    <CableIcon fontSize="small" />
                     <ListItemText sx={{ ml: 1 }} primary={`Порты (${hostPortsCount})`} />
                   </ListItemButton>
                   <ListItemButton
@@ -164,7 +165,7 @@ export function ProjectTreeNav({
                     selected={isActiveHost && selectedSection === "endpoints"}
                     onClick={() => selectHostAndSection(host.id, "endpoints")}
                   >
-                    <HubIcon fontSize="small" />
+                    <AltRouteIcon fontSize="small" />
                     <ListItemText sx={{ ml: 1 }} primary={`Эндпоинты (${hostEndpointsCount})`} />
                   </ListItemButton>
                   <ListItemButton sx={{ borderRadius: 0 }} selected={isActiveHost && selectedSection === "vulns"} onClick={() => selectHostAndSection(host.id, "vulns")}>

@@ -75,6 +75,37 @@ export async function getUsers(page = 1, size = 200): Promise<PaginatedResponse<
   return data;
 }
 
+export async function createUser(payload: {
+  username: string;
+  email: string;
+  password: string;
+  role: User["role"];
+}): Promise<User> {
+  const { data } = await api.post<User>("/users", payload);
+  return data;
+}
+
+export async function updateUser(
+  userId: string,
+  payload: {
+    username?: string;
+    email?: string;
+    role?: User["role"];
+    is_active?: boolean;
+  }
+): Promise<User> {
+  const { data } = await api.put<User>(`/users/${userId}`, payload);
+  return data;
+}
+
+export async function resetUserPassword(userId: string, newPassword: string): Promise<void> {
+  await api.patch(`/users/${userId}/password`, { new_password: newPassword });
+}
+
+export async function deleteUser(userId: string): Promise<void> {
+  await api.delete(`/users/${userId}`);
+}
+
 export async function getProjects(page = 1, size = 20, status?: Project["status"]): Promise<PaginatedResponse<Project>> {
   const { data } = await api.get<PaginatedResponse<Project>>("/projects", { params: { page, size, status } });
   return data;
@@ -300,6 +331,7 @@ export async function getVulnerabilities(projectId: string): Promise<PaginatedRe
 export async function createVulnerability(
   projectId: string,
   payload: {
+    host_id: string;
     title: string;
     description?: string;
     severity: "critical" | "high" | "medium" | "low" | "info";
@@ -444,7 +476,17 @@ export async function unreadCount(): Promise<number> {
 export async function getAuditLogs(
   page = 1,
   size = 50,
-  filters?: { user_id?: string; username?: string; action?: string; entity_type?: string }
+  filters?: {
+    user_id?: string;
+    username?: string;
+    action?: string;
+    entity_type?: string;
+    entity_id?: string;
+    ip_address?: string;
+    query?: string;
+    created_from?: string;
+    created_to?: string;
+  }
 ): Promise<PaginatedResponse<AuditLog>> {
   const { data } = await api.get<PaginatedResponse<AuditLog>>("/audit-logs", {
     params: { page, size, ...filters },

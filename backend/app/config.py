@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     initial_admin_email: str = "admin@example.com"
     initial_admin_password: str = "admin"
 
+    audit_log_backend: str = "clickhouse"
+    clickhouse_host: str = "clickhouse"
+    clickhouse_port: int = 8123
+    clickhouse_database: str = "pcf"
+    clickhouse_username: str = "default"
+    clickhouse_password: str = ""
+    clickhouse_secure: bool = False
+
     @field_validator("jwt_secret_key")
     @classmethod
     def validate_secret_key(cls, value: str) -> str:

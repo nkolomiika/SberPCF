@@ -31,7 +31,6 @@ import { load as parseYaml } from "js-yaml";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  addVulnerabilityAsset,
   createHost,
   createEndpoint,
   createPort,
@@ -188,6 +187,20 @@ export function HostDetailPage() {
   useEffect(() => {
     void loadHost();
   }, [loadHost]);
+
+  useEffect(() => {
+    if (!projectId) {
+      return;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${protocol}://${window.location.host}/ws/projects/${projectId}`);
+    socket.onmessage = () => {
+      void loadHost();
+    };
+    return () => {
+      socket.close();
+    };
+  }, [loadHost, projectId]);
 
   useEffect(() => {
     const loadServices = async () => {
@@ -834,15 +847,12 @@ export function HostDetailPage() {
     if (!projectId || !hostId) {
       return;
     }
-    const vulnerability = await createVulnerability(projectId, {
+    await createVulnerability(projectId, {
+      host_id: hostId,
       title: creatingVulnerabilityTitle.trim(),
       description: creatingVulnerabilityDescription.trim() || undefined,
       severity: creatingVulnerabilitySeverity,
       status: creatingVulnerabilityStatus,
-    });
-    await addVulnerabilityAsset(projectId, vulnerability.id, {
-      asset_type: "host",
-      asset_id: hostId,
     });
     setCreateVulnerabilityOpen(false);
     setCreatingVulnerabilityTitle("");
@@ -886,14 +896,8 @@ export function HostDetailPage() {
 
       <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
         <Stack spacing={0.2}>
-          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.4, fontWeight: 700 }}>
-            Host Workspace
-          </Typography>
           <Typography variant="h4" fontWeight={700}>
             Хост: {hostTitle}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 760 }}>
-            Детали выбранного актива, сетевые точки, endpoint-структура и привязанные уязвимости.
           </Typography>
         </Stack>
       </Stack>
@@ -953,9 +957,6 @@ export function HostDetailPage() {
                   <Typography variant="h4" fontWeight={700}>
                     {portsCount}
                   </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6 }}>
-                    Сетевые входы и обнаруженные сервисы.
-                  </Typography>
                 </CardContent>
               </Card>
             </Grid>
@@ -973,9 +974,6 @@ export function HostDetailPage() {
                   <Typography variant="h4" fontWeight={700}>
                     {endpointsCount}
                   </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6 }}>
-                    HTTP-маршруты и импорт из Swagger/OpenAPI.
-                  </Typography>
                 </CardContent>
               </Card>
             </Grid>
@@ -992,9 +990,6 @@ export function HostDetailPage() {
                   <Typography color="text.secondary">Уязвимостей хоста</Typography>
                   <Typography variant="h4" fontWeight={700}>
                     {vulnerabilitiesCount}
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6 }}>
-                    Найденные проблемы и рабочие карточки исправления.
                   </Typography>
                 </CardContent>
               </Card>

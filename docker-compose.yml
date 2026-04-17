@@ -7,6 +7,7 @@ services:
     depends_on:
       - db
       - minio
+      - clickhouse
     ports:
       - "8000:8000"
     volumes:
@@ -47,6 +48,18 @@ services:
     volumes:
       - miniodata:/data
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_DB: pcf
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhousedata:/var/lib/clickhouse
+
 volumes:
   pgdata:
   miniodata:
+  clickhousedata:

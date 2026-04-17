@@ -1,9 +1,11 @@
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit_store import audit_store
 from app.database import get_db
 from app.dependencies import require_admin
 from app.models import AuditLog, User
@@ -21,10 +23,36 @@ async def list_audit_logs(
     username: str | None = None,
     action: str | None = None,
     entity_type: str | None = None,
+    entity_id: UUID | None = None,
+    ip_address: str | None = None,
+    query: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
     _admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Возвращает журнал действий с фильтрацией."""
+    if audit_store.enabled:
+        clickhouse_result = await audit_store.list_logs(
+            page,
+            size,
+            {
+                "user_id": user_id,
+                "username": username,
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "ip_address": ip_address,
+                "query": query,
+                "created_from": created_from,
+                "created_to": created_to,
+            },
+        )
+        if clickhouse_result is not None:
+            items, total = clickhouse_result
+            payload = [AuditLogOut.model_validate(item) for item in items]
+            return to_paginated_response(payload, total, PageParams(page=page, size=size)).model_dump()
+
     query = select(AuditLog, User.username).outerjoin(User, User.id == AuditLog.user_id)
     conditions = []
     if user_id:
@@ -35,6 +63,29 @@ async def list_audit_logs(
         conditions.append(AuditLog.action.ilike(f"%{action.strip()}%"))
     if entity_type:
         conditions.append(AuditLog.entity_type.ilike(f"%{entity_type.strip()}%"))
+    if entity_id:
+        conditions.append(AuditLog.entity_id == entity_id)
+    if ip_address:
+        conditions.append(AuditLog.ip_address.ilike(f"%{ip_address.strip()}%"))
+    if query:
+        query_value = f"%{query.strip()}%"
+        conditions.append(
+            (
+                AuditLog.action.ilike(query_value)
+                | AuditLog.entity_type.ilike(query_value)
+                | AuditLog.ip_address.ilike(query_value)
+            )
+        )
+    if created_from:
+        try:
+            conditions.append(AuditLog.created_at >= datetime.fromisoformat(created_from.replace("Z", "+00:00")))
+        except ValueError:
+            pass
+    if created_to:
+        try:
+            conditions.append(AuditLog.created_at <= datetime.fromisoformat(created_to.replace("Z", "+00:00")))
+        except ValueError:
+            pass
     if conditions:
         query = query.where(and_(*conditions))
     total = await db.scalar(select(func.count()).select_from(query.subquery()))

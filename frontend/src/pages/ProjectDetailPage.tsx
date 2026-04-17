@@ -6,7 +6,6 @@ import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
-import GroupIcon from "@mui/icons-material/Group";
 import PersonAddAlt1Icon from "@mui/icons-material/PersonAddAlt1";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import {
@@ -808,9 +807,6 @@ export function ProjectDetailPage() {
           <Typography variant="h4" fontWeight={700}>
             {projectName ? `Проект: ${projectName}` : "Проект"}
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.6, maxWidth: 760 }}>
-            Управление сроками, участниками, активами и уязвимостями в одном контексте проекта.
-          </Typography>
         </Box>
         <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", width: 42, height: 42, backgroundColor: "rgba(15,27,45,0.72)" }}>
           <MoreVertIcon />
@@ -824,15 +820,6 @@ export function ProjectDetailPage() {
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
       >
-        <MenuItem
-          onClick={() => {
-            closeActionsMenu();
-            setHostOpen(true);
-          }}
-        >
-          <AddIcon fontSize="small" sx={{ mr: 1 }} />
-          Добавить хост
-        </MenuItem>
         <MenuItem
           onClick={() => {
             closeActionsMenu();
@@ -850,15 +837,6 @@ export function ProjectDetailPage() {
         >
           <DownloadIcon fontSize="small" sx={{ mr: 1 }} />
           Экспорт
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            closeActionsMenu();
-            void openMembersDialog();
-          }}
-        >
-          <GroupIcon fontSize="small" sx={{ mr: 1 }} />
-          Участники проекта
         </MenuItem>
         {user?.role === "admin" && (
           <MenuItem
@@ -900,9 +878,6 @@ export function ProjectDetailPage() {
                   {selectedSection === "ports" && `Порты хоста: ${hostLabel}`}
                   {selectedSection === "endpoints" && `Эндпоинты хоста: ${hostLabel}`}
                   {selectedSection === "vulns" && `Уязвимости хоста: ${hostLabel}`}
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Выбранный раздел открыт в рабочей области, а навигация слева сохраняет структуру проекта и хостов.
                 </Typography>
               </CardContent>
             </Card>
@@ -984,16 +959,42 @@ export function ProjectDetailPage() {
               </Card>
               <Grid container spacing={2}>
                 <Grid size={{ xs: 12, md: 6 }}>
-                  <Card sx={{ border: "1px solid rgba(126,224,255,0.14)", height: "100%" }}>
+                  <Card
+                    sx={{
+                      position: "relative",
+                      border: "1px solid rgba(126,224,255,0.14)",
+                      height: "100%",
+                      "& .overview-card-action": {
+                        opacity: 0,
+                        pointerEvents: "none",
+                        transition: "opacity 0.18s ease",
+                      },
+                      "&:hover .overview-card-action": {
+                        opacity: 1,
+                        pointerEvents: "auto",
+                      },
+                    }}
+                  >
+                    <IconButton
+                      size="small"
+                      className="overview-card-action"
+                      onClick={() => setHostOpen(true)}
+                      sx={{
+                        position: "absolute",
+                        top: 10,
+                        right: 10,
+                        border: "1px solid rgba(126,224,255,0.18)",
+                        backgroundColor: "rgba(15,27,45,0.88)",
+                      }}
+                    >
+                      <AddIcon fontSize="small" />
+                    </IconButton>
                     <CardContent>
                       <Typography color="text.secondary" mb={1}>
                         Хосты проекта
                       </Typography>
                       <Typography variant="h4" fontWeight={700}>
                         {hosts.length}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.2 }}>
-                        Активные хосты и инфраструктурные узлы проекта.
                       </Typography>
                       <Stack spacing={0.8} mt={1} sx={{ maxHeight: 160, overflowY: "auto", pr: 0.5 }}>
                         {hosts.length > 0 ? (
@@ -1012,16 +1013,44 @@ export function ProjectDetailPage() {
                   </Card>
                 </Grid>
                 <Grid size={{ xs: 12, md: 6 }}>
-                  <Card sx={{ border: "1px solid rgba(126,224,255,0.14)", height: "100%" }}>
+                  <Card
+                    sx={{
+                      position: "relative",
+                      border: "1px solid rgba(126,224,255,0.14)",
+                      height: "100%",
+                      "& .overview-card-action": {
+                        opacity: 0,
+                        pointerEvents: "none",
+                        transition: "opacity 0.18s ease",
+                      },
+                      "&:hover .overview-card-action": {
+                        opacity: 1,
+                        pointerEvents: "auto",
+                      },
+                    }}
+                  >
+                    {user?.role === "admin" && (
+                      <IconButton
+                        size="small"
+                        className="overview-card-action"
+                        onClick={() => void openMembersDialog()}
+                        sx={{
+                          position: "absolute",
+                          top: 10,
+                          right: 10,
+                          border: "1px solid rgba(126,224,255,0.18)",
+                          backgroundColor: "rgba(15,27,45,0.88)",
+                        }}
+                      >
+                        <AddIcon fontSize="small" />
+                      </IconButton>
+                    )}
                     <CardContent sx={{ height: "100%" }}>
                       <Typography color="text.secondary" mb={1}>
                         Участники проекта
                       </Typography>
                       <Typography variant="h4" fontWeight={700} mb={1}>
                         {projectMembers.length}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.2 }}>
-                        Люди, подключенные к работе по этому проекту.
                       </Typography>
                       <Stack spacing={0.8} sx={{ maxHeight: 160, overflowY: "auto", pr: 0.5 }}>
                         {projectMembers.length > 0 ? (

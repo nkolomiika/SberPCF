@@ -29,14 +29,8 @@ export function LoginPage() {
       }}
     >
       <Paper elevation={6} sx={{ width: 460, maxWidth: "100%", p: 4.5, borderRadius: 0 }}>
-        <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.8, fontWeight: 700 }}>
-          Pentest Workspace
-        </Typography>
         <Typography variant="h4" fontWeight={700} gutterBottom>
           Вход в PCF
-        </Typography>
-        <Typography color="text.secondary" sx={{ mb: 3 }}>
-          Открой проекты, активы и рабочие заметки команды в едином интерфейсе.
         </Typography>
         <Stack component="form" spacing={2} onSubmit={handleSubmit}>
           {error && <Alert severity="error">{error}</Alert>}

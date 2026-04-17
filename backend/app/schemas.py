@@ -244,6 +244,7 @@ class EndpointOut(ORMBase):
 
 
 class VulnerabilityCreate(BaseModel):
+    host_id: UUID
     title: str = Field(min_length=1, max_length=500)
     description: str | None = None
     severity: Severity
