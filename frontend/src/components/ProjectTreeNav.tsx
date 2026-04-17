@@ -36,7 +36,7 @@ interface ProjectTreeNavProps {
   onToggleCollapsed: () => void;
   onSelectSection: (section: DetailSection) => void;
   onSelectHost: (hostId: string) => void;
-  onOpenHost?: (hostId: string) => void;
+  onOpenHost?: (hostId: string, section: DetailSection) => void;
 }
 
 export function ProjectTreeNav({
@@ -90,7 +90,7 @@ export function ProjectTreeNav({
     onSelectHost(hostId);
     onSelectSection(section);
     if (onOpenHost) {
-      onOpenHost(hostId);
+      onOpenHost(hostId, section);
     }
   };
 
