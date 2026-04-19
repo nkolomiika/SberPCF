@@ -4,15 +4,18 @@ import EditIcon from "@mui/icons-material/Edit";
 import AddIcon from "@mui/icons-material/Add";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DownloadIcon from "@mui/icons-material/Download";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import {
   Alert,
+  Avatar,
   Box,
   Button,
   Card,
   CardContent,
+  Checkbox,
   Chip,
   Collapse,
   CircularProgress,
@@ -25,7 +28,6 @@ import {
   IconButton,
   List,
   ListItem,
-  ListItemText,
   Menu,
   MenuItem,
   Paper,
@@ -40,7 +42,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
@@ -51,7 +53,6 @@ import {
   createService,
   createVulnerability,
   deleteVulnerabilityComment,
-  deleteVulnerabilityFile,
   deleteEndpoint,
   deleteHost,
   deletePort,
@@ -63,6 +64,7 @@ import {
   getHost,
   getHosts,
   getHostVulnerabilities,
+  exportOpenApiFile,
   importOpenApiFile,
   listVulnerabilityComments,
   updateEndpoint,
@@ -73,7 +75,7 @@ import {
   updateVulnerability,
   uploadVulnerabilityFile,
 } from "../api";
-import { calculateCvssScore } from "../cvss";
+import { calculateCvssScore, severityFromCvssScore } from "../cvss";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
 import { useAuthStore } from "../store";
@@ -90,6 +92,7 @@ import type {
   VulnerabilityComment,
   VulnerabilityDetails,
 } from "../types";
+import { useErrorToast, useToastMessage } from "../useErrorToast";
 
 /** Swagger UI–style colors for HTTP methods */
 const SWAGGER_METHOD_COLORS: Record<string, { main: string; contrast: string }> = {
@@ -102,6 +105,8 @@ const SWAGGER_METHOD_COLORS: Record<string, { main: string; contrast: string }> 
   OPTIONS: { main: "#0d5aa7", contrast: "#fff" },
 };
 const CVSS_VERSION = "4.0" as const;
+const UUID_PATH_SEGMENT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ENDPOINT_TABLE_NAME_COLUMN_WIDTH = "32%";
 
 function swaggerMethodColors(method: string | null | undefined): { main: string; contrast: string } {
   const key = (method || "GET").toUpperCase();
@@ -207,20 +212,25 @@ function hostTokensMismatch(sourceHost: string | null | undefined, assetHost: st
 
 function parsePathAndQueryFromToken(pathToken: string): { path: string; queryParams: EndpointQueryParam[] } {
   const t = pathToken.trim();
-  const toParams = (searchParams: URLSearchParams): EndpointQueryParam[] =>
-    Array.from(searchParams.entries()).map(([name, value]) => ({
-      name,
-      value,
-      required: false,
-      description: "",
-    }));
+  const toParams = (searchParams: URLSearchParams): EndpointQueryParam[] => {
+    const params: EndpointQueryParam[] = [];
+    searchParams.forEach((value, name) => {
+      params.push({
+        name,
+        value,
+        required: false,
+        description: "",
+      });
+    });
+    return params;
+  };
   if (t.startsWith("http://") || t.startsWith("https://")) {
     const u = new URL(t);
-    return { path: u.pathname || "/", queryParams: toParams(u.searchParams) };
+    return { path: normalizeUriPathForTree(u.pathname || "/"), queryParams: toParams(u.searchParams) };
   }
   const fake = `http://stub.local${t.startsWith("/") ? t : `/${t}`}`;
   const u = new URL(fake);
-  return { path: u.pathname || "/", queryParams: toParams(u.searchParams) };
+  return { path: normalizeUriPathForTree(u.pathname || "/"), queryParams: toParams(u.searchParams) };
 }
 
 function sanitizeEndpointHeaderPairs(pairs: { name: string; value: string }[]): EndpointRequestHeader[] {
@@ -393,10 +403,12 @@ function normalizeUriPathForTree(p: string): string {
     return "/";
   }
   const withSlash = raw.startsWith("/") ? raw : `/${raw}`;
-  if (withSlash.length > 1 && withSlash.endsWith("/")) {
-    return withSlash.slice(0, -1) || "/";
-  }
-  return withSlash;
+  const trimmed = withSlash.length > 1 && withSlash.endsWith("/") ? withSlash.slice(0, -1) || "/" : withSlash;
+  const normalizedSegments = trimmed
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => (UUID_PATH_SEGMENT_RE.test(segment) ? "{UUID}" : segment));
+  return normalizedSegments.length ? `/${normalizedSegments.join("/")}` : "/";
 }
 
 function endpointPathToSegments(p: string): string[] {
@@ -405,6 +417,30 @@ function endpointPathToSegments(p: string): string[] {
     return [];
   }
   return n.slice(1).split("/").filter(Boolean);
+}
+
+function mergeEndpointForDisplay(base: Endpoint, next: Endpoint): Endpoint {
+  return {
+    ...base,
+    description: base.description || next.description,
+    query_params: base.query_params?.length ? base.query_params : next.query_params,
+    request_body: base.request_body || next.request_body,
+    request_content_type: base.request_content_type || next.request_content_type,
+    request_headers: base.request_headers?.length ? base.request_headers : next.request_headers,
+    path: normalizeUriPathForTree(base.path || next.path),
+  };
+}
+
+function dedupeEndpointsByNormalizedPath(endpoints: Endpoint[]): Endpoint[] {
+  const deduped = new Map<string, Endpoint>();
+  for (const endpoint of endpoints) {
+    const normalizedPath = normalizeUriPathForTree(endpoint.path);
+    const key = `${(endpoint.method || "GET").toUpperCase()} ${normalizedPath}`;
+    const candidate = { ...endpoint, path: normalizedPath };
+    const existing = deduped.get(key);
+    deduped.set(key, existing ? mergeEndpointForDisplay(existing, candidate) : candidate);
+  }
+  return Array.from(deduped.values());
 }
 
 function buildEndpointPathTree(endpoints: Endpoint[]): EndpointPathTreeNode {
@@ -452,6 +488,22 @@ function collectExpandableFolderKeys(node: EndpointPathTreeNode): string[] {
     keys.push(...collectExpandableFolderKeys(c));
   }
   return keys;
+}
+
+function postEndpointDeleteModeDebugLog(location: string, message: string, data: Record<string, unknown>, hypothesisId: string) {
+  fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
+    body: JSON.stringify({ sessionId: "755228", runId: "endpoint-delete-mode", hypothesisId, location, message, data, timestamp: Date.now() }),
+  }).catch(() => {});
+}
+
+function postHostDetailReloadDebugLog(location: string, message: string, data: Record<string, unknown>, hypothesisId: string) {
+  fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
+    body: JSON.stringify({ sessionId: "755228", runId: "host-detail-reload", hypothesisId, location, message, data, timestamp: Date.now() }),
+  }).catch(() => {});
 }
 
 export function HostDetailPage() {
@@ -519,11 +571,15 @@ export function HostDetailPage() {
   const [creatingEndpointRequestBody, setCreatingEndpointRequestBody] = useState("");
   const [creatingEndpointRequestContentType, setCreatingEndpointRequestContentType] = useState("application/json");
   const [swaggerImporting, setSwaggerImporting] = useState(false);
+  const [swaggerExporting, setSwaggerExporting] = useState(false);
+  const [endpointsMenuAnchorEl, setEndpointsMenuAnchorEl] = useState<HTMLElement | null>(null);
+  const endpointsMenuOpen = Boolean(endpointsMenuAnchorEl);
+  const swaggerImportInputRef = useRef<HTMLInputElement | null>(null);
+  const closeEndpointsMenu = () => setEndpointsMenuAnchorEl(null);
   const [nmapImporting, setNmapImporting] = useState(false);
   const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
   const [creatingVulnerabilityTitle, setCreatingVulnerabilityTitle] = useState("");
-  const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
-  const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
+  const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("info");
   const [creatingVulnerabilityStatus, setCreatingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
   const [creatingVulnerabilityCvssScore, setCreatingVulnerabilityCvssScore] = useState("");
   const [creatingVulnerabilityCvssVector, setCreatingVulnerabilityCvssVector] = useState("");
@@ -538,24 +594,129 @@ export function HostDetailPage() {
   const [editingHostNotes, setEditingHostNotes] = useState("");
   const [portActionsAnchorEl, setPortActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activePort, setActivePort] = useState<Port | null>(null);
+  const [serviceActionsAnchorEl, setServiceActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [activeService, setActiveService] = useState<Service | null>(null);
+  const [activeServicePortId, setActiveServicePortId] = useState<string | null>(null);
   const [endpointActionsAnchorEl, setEndpointActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activeEndpoint, setActiveEndpoint] = useState<Endpoint | null>(null);
+  const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeletingEndpoints, setBulkDeletingEndpoints] = useState(false);
+  const [endpointBulkDeleteMode, setEndpointBulkDeleteMode] = useState(false);
   const [vulnerabilityActionsAnchorEl, setVulnerabilityActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activeVulnerability, setActiveVulnerability] = useState<Vulnerability | null>(null);
   const [expandedPortIds, setExpandedPortIds] = useState<string[]>([]);
   const [expandedEndpointIds, setExpandedEndpointIds] = useState<string[]>([]);
   const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<string[]>([]);
-  const endpointPathTree = useMemo(() => buildEndpointPathTree(host?.endpoints ?? []), [host?.endpoints]);
+  const normalizedHostEndpoints = useMemo(() => dedupeEndpointsByNormalizedPath(host?.endpoints ?? []), [host?.endpoints]);
+  const endpointPathTree = useMemo(() => buildEndpointPathTree(normalizedHostEndpoints), [normalizedHostEndpoints]);
+
+  useEffect(() => {
+    setSelectedEndpointIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const valid = new Set(normalizedHostEndpoints.map((ep) => ep.id));
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (valid.has(id)) {
+          next.add(id);
+        }
+      });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [normalizedHostEndpoints]);
+
+  useEffect(() => {
+    if (selectedSection !== "endpoints") {
+      setEndpointBulkDeleteMode(false);
+      setSelectedEndpointIds(new Set());
+    }
+  }, [selectedSection]);
+
+  useEffect(() => {
+    setEndpointBulkDeleteMode(false);
+    setSelectedEndpointIds(new Set());
+  }, [hostId]);
+
+  useEffect(() => {
+    // #region agent log
+    postHostDetailReloadDebugLog(
+      "frontend/src/pages/HostDetailPage.tsx:mount",
+      "Host detail mounted",
+      { hostId, projectId, path: location.pathname, section: selectedSection },
+      "R1"
+    );
+    // #endregion
+    return () => {
+      // #region agent log
+      postHostDetailReloadDebugLog(
+        "frontend/src/pages/HostDetailPage.tsx:unmount",
+        "Host detail unmounted",
+        { hostId, projectId, path: location.pathname, section: selectedSection },
+        "R1"
+      );
+      // #endregion
+    };
+  }, [hostId, location.pathname, projectId, selectedSection]);
+  useEffect(() => {
+    if (selectedSection !== "endpoints") {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const visibleDeleteCheckboxes = document.querySelectorAll('[data-endpoint-delete-checkbox="true"]').length;
+      const visibleBulkDeleteButtons = document.querySelectorAll('[data-endpoint-bulk-delete="true"]').length;
+      // #region agent log
+      postEndpointDeleteModeDebugLog(
+        "frontend/src/pages/HostDetailPage.tsx:endpoints_view",
+        "Endpoints section rendered",
+        {
+          endpointCount: normalizedHostEndpoints.length,
+          selectedCount: selectedEndpointIds.size,
+          visibleDeleteCheckboxes,
+          visibleBulkDeleteButtons,
+        },
+        "H1"
+      );
+      // #endregion
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [endpointBulkDeleteMode, normalizedHostEndpoints.length, selectedEndpointIds.size, selectedSection]);
+  useEffect(() => {
+    if (!endpointsMenuOpen) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const deleteModeMenuItems = document.querySelectorAll('[data-endpoint-delete-mode-item="true"]').length;
+      // #region agent log
+      postEndpointDeleteModeDebugLog(
+        "frontend/src/pages/HostDetailPage.tsx:endpoints_menu",
+        "Endpoints actions menu opened",
+        {
+          selectedCount: selectedEndpointIds.size,
+          deleteModeMenuItems,
+        },
+        "H3"
+      );
+      // #endregion
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [endpointsMenuOpen, selectedEndpointIds.size]);
   const [endpointTreeExpandedKeys, setEndpointTreeExpandedKeys] = useState<Set<string>>(() => new Set());
   const [vulnDetailOpen, setVulnDetailOpen] = useState(false);
   const [activeVulnDetails, setActiveVulnDetails] = useState<VulnerabilityDetails | null>(null);
   const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [vulnBusy, setVulnBusy] = useState(false);
+  const [vulnEditMode, setVulnEditMode] = useState(false);
   const [editCommentOpen, setEditCommentOpen] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingCommentContent, setEditingCommentContent] = useState("");
+  const [commentActionsAnchorEl, setCommentActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [activeComment, setActiveComment] = useState<VulnerabilityComment | null>(null);
   const pendingSection = (location.state as { section?: DetailSection } | null)?.section;
+
+  useErrorToast(error);
+  useToastMessage(infoMessage, "success");
 
   const openHostSection = useCallback(
     (section: DetailSection) => {
@@ -584,11 +745,22 @@ export function HostDetailPage() {
     [hostId, navigate, projectId]
   );
 
-  const loadHost = useCallback(async () => {
+  const loadHost = useCallback(async (options?: { silent?: boolean }) => {
     if (!projectId || !hostId) {
       return;
     }
-    setLoading(true);
+    const silent = Boolean(options?.silent);
+    // #region agent log
+    postHostDetailReloadDebugLog(
+      "frontend/src/pages/HostDetailPage.tsx:loadHost:start",
+      "loadHost started",
+      { hostId, projectId, path: location.pathname, section: selectedSection, silent },
+      "R2"
+    );
+    // #endregion
+    if (!silent) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [hostResponse, hostsResponse, hostVulnsResponse] = await Promise.all([
@@ -633,12 +805,56 @@ export function HostDetailPage() {
         }
       });
       setHostStatsById(mappedStats);
+      // #region agent log
+      postHostDetailReloadDebugLog(
+        "frontend/src/pages/HostDetailPage.tsx:loadHost:success",
+        "loadHost finished",
+        {
+          hostId,
+          projectId,
+          path: location.pathname,
+          section: selectedSection,
+          endpointCount: hostResponse.endpoints.length,
+          hostCount: hostsResponse.items.length,
+        },
+        "R2"
+      );
+      // #endregion
     } catch (error) {
       setError(getApiErrorMessage(error, "Не удалось загрузить страницу хоста."));
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
-  }, [hostId, projectId]);
+  }, [hostId, location.pathname, projectId, selectedSection]);
+
+  const applyRemovedEndpointsLocally = useCallback(
+    (removedIds: Set<string>) => {
+      if (!hostId || removedIds.size === 0) {
+        return;
+      }
+      setExpandedEndpointIds((prev) => prev.filter((id) => !removedIds.has(id)));
+      setHost((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        const nextEndpoints = prev.endpoints.filter((ep) => !removedIds.has(ep.id));
+        setHostStatsById((stats) => {
+          const entry = stats[hostId];
+          if (!entry) {
+            return stats;
+          }
+          return {
+            ...stats,
+            [hostId]: { ...entry, endpointsCount: nextEndpoints.length },
+          };
+        });
+        return { ...prev, endpoints: nextEndpoints };
+      });
+    },
+    [hostId]
+  );
 
   useEffect(() => {
     void loadHost();
@@ -651,7 +867,7 @@ export function HostDetailPage() {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${window.location.host}/ws/projects/${projectId}`);
     socket.onmessage = () => {
-      void loadHost();
+      void loadHost({ silent: true });
     };
     return () => {
       socket.close();
@@ -720,6 +936,7 @@ export function HostDetailPage() {
 
   const hostActionsOpen = Boolean(hostActionsAnchorEl);
   const portActionsOpen = Boolean(portActionsAnchorEl);
+  const serviceActionsOpen = Boolean(serviceActionsAnchorEl);
   const endpointActionsOpen = Boolean(endpointActionsAnchorEl);
   const vulnerabilityActionsOpen = Boolean(vulnerabilityActionsAnchorEl);
 
@@ -740,6 +957,19 @@ export function HostDetailPage() {
   const closePortActions = () => {
     setPortActionsAnchorEl(null);
     setActivePort(null);
+  };
+
+  const openServiceActions = (event: React.MouseEvent<HTMLElement>, portId: string, service: Service) => {
+    event.stopPropagation();
+    setServiceActionsAnchorEl(event.currentTarget);
+    setActiveService(service);
+    setActiveServicePortId(portId);
+  };
+
+  const closeServiceActions = () => {
+    setServiceActionsAnchorEl(null);
+    setActiveService(null);
+    setActiveServicePortId(null);
   };
 
   const openHostEdit = () => {
@@ -1171,13 +1401,12 @@ export function HostDetailPage() {
     [editingEndpointHeadersText]
   );
 
-  const applyParsedRequestToCreateEndpoint = () => {
-    const parsed = parseRawHttpRequest(creatingEndpointImportRaw);
+  const applyParsedRequestToCreateEndpoint = (rawRequest: string) => {
+    const parsed = parseRawHttpRequest(rawRequest);
     if (!parsed) {
-      setError("Не удалось разобрать Raw HTTP. Первая строка должна быть вида: GET /path HTTP/1.1");
+      setCreatingEndpointImportHostWarn(false);
       return;
     }
-    setError(null);
     setCreatingEndpointMethod(parsed.method);
     setCreatingEndpointPath(parsed.path);
     setCreatingEndpointRequestBody(parsed.requestBody);
@@ -1190,16 +1419,14 @@ export function HostDetailPage() {
     } else {
       setCreatingEndpointQueryString(queryParamsToQueryString(parsed.queryParams));
     }
-    setInfoMessage("Поля заполнены из Raw HTTP.");
   };
 
-  const applyParsedRequestToEditEndpoint = () => {
-    const parsed = parseRawHttpRequest(editingEndpointImportRaw);
+  const applyParsedRequestToEditEndpoint = (rawRequest: string) => {
+    const parsed = parseRawHttpRequest(rawRequest);
     if (!parsed) {
-      setError("Не удалось разобрать Raw HTTP. Первая строка должна быть вида: GET /path HTTP/1.1");
+      setEditingEndpointImportHostWarn(false);
       return;
     }
-    setError(null);
     setEditingEndpointMethod(parsed.method);
     setEditingEndpointPath(parsed.path);
     setEditingEndpointRequestBody(parsed.requestBody);
@@ -1212,8 +1439,25 @@ export function HostDetailPage() {
     } else {
       setEditingEndpointQueryString(queryParamsToQueryString(parsed.queryParams));
     }
-    setInfoMessage("Поля заполнены из Raw HTTP.");
   };
+
+  useEffect(() => {
+    const rawRequest = creatingEndpointImportRaw.trim();
+    if (!rawRequest) {
+      setCreatingEndpointImportHostWarn(false);
+      return;
+    }
+    applyParsedRequestToCreateEndpoint(creatingEndpointImportRaw);
+  }, [creatingEndpointImportRaw, host?.hostname, host?.ip_address]);
+
+  useEffect(() => {
+    const rawRequest = editingEndpointImportRaw.trim();
+    if (!rawRequest) {
+      setEditingEndpointImportHostWarn(false);
+      return;
+    }
+    applyParsedRequestToEditEndpoint(editingEndpointImportRaw);
+  }, [editingEndpointImportRaw, host?.hostname, host?.ip_address]);
 
   const editingEndpointPreviewRequest = useMemo(
     () =>
@@ -1357,8 +1601,121 @@ export function HostDetailPage() {
     if (!window.confirm("Удалить эндпоинт?")) {
       return;
     }
-    await deleteEndpoint(projectId, hostId, endpointId);
-    await loadHost();
+    // #region agent log
+    postHostDetailReloadDebugLog(
+      "frontend/src/pages/HostDetailPage.tsx:removeEndpoint:start",
+      "Endpoint deletion requested",
+      { hostId, projectId, endpointId, selectedCount: selectedEndpointIds.size, path: location.pathname },
+      "R3"
+    );
+    // #endregion
+    try {
+      await deleteEndpoint(projectId, hostId, endpointId);
+      applyRemovedEndpointsLocally(new Set([endpointId]));
+      setEndpointBulkDeleteMode(false);
+      setSelectedEndpointIds(new Set());
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить эндпоинт."));
+    }
+  };
+
+  const collectEndpointIdsInTreeNode = useCallback((node: EndpointPathTreeNode): string[] => {
+    const ids: string[] = node.endpointsAtNode.map((ep) => ep.id);
+    for (const child of node.children) {
+      ids.push(...collectEndpointIdsInTreeNode(child));
+    }
+    return ids;
+  }, []);
+
+  const getNodeSelectionState = useCallback(
+    (node: EndpointPathTreeNode): { checked: boolean; indeterminate: boolean; total: number } => {
+      const ids = collectEndpointIdsInTreeNode(node);
+      if (ids.length === 0) {
+        return { checked: false, indeterminate: false, total: 0 };
+      }
+      let selected = 0;
+      for (const id of ids) {
+        if (selectedEndpointIds.has(id)) {
+          selected += 1;
+        }
+      }
+      return { checked: selected === ids.length, indeterminate: selected > 0 && selected < ids.length, total: ids.length };
+    },
+    [collectEndpointIdsInTreeNode, selectedEndpointIds]
+  );
+
+  const toggleEndpointSelection = useCallback((endpointId: string) => {
+    setSelectedEndpointIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(endpointId)) {
+        next.delete(endpointId);
+      } else {
+        next.add(endpointId);
+      }
+      // #region agent log
+      postEndpointDeleteModeDebugLog(
+        "frontend/src/pages/HostDetailPage.tsx:toggle_endpoint_selection",
+        "Endpoint selection toggled",
+        {
+          endpointId,
+          nextSelectedCount: next.size,
+        },
+        "H2"
+      );
+      // #endregion
+      return next;
+    });
+  }, []);
+
+  const setNodeSelectionChecked = useCallback(
+    (node: EndpointPathTreeNode, checked: boolean) => {
+      const ids = collectEndpointIdsInTreeNode(node);
+      setSelectedEndpointIds((prev) => {
+        const next = new Set(prev);
+        for (const id of ids) {
+          if (checked) {
+            next.add(id);
+          } else {
+            next.delete(id);
+          }
+        }
+        return next;
+      });
+    },
+    [collectEndpointIdsInTreeNode]
+  );
+
+  const removeSelectedEndpoints = async () => {
+    if (!projectId || !hostId || selectedEndpointIds.size === 0) {
+      return;
+    }
+    if (!window.confirm(`Удалить выбранные эндпоинты (${selectedEndpointIds.size})?`)) {
+      return;
+    }
+    setBulkDeletingEndpoints(true);
+    setError(null);
+    const failures: string[] = [];
+    const removedOk = new Set<string>();
+    try {
+      for (const endpointId of Array.from(selectedEndpointIds)) {
+        try {
+          await deleteEndpoint(projectId, hostId, endpointId);
+          removedOk.add(endpointId);
+        } catch (deleteError) {
+          failures.push(getApiErrorMessage(deleteError, "Не удалось удалить эндпоинт."));
+        }
+      }
+      setSelectedEndpointIds(new Set());
+      applyRemovedEndpointsLocally(removedOk);
+      setEndpointBulkDeleteMode(false);
+      if (failures.length) {
+        setError(failures.join("\n"));
+      } else {
+        setInfoMessage("Выбранные эндпоинты удалены.");
+      }
+    } finally {
+      setBulkDeletingEndpoints(false);
+    }
   };
 
   const createHostEndpoint = async () => {
@@ -1413,6 +1770,31 @@ export function HostDetailPage() {
     }
   };
 
+  const exportEndpointsToSwaggerFile = async () => {
+    if (!projectId || !hostId) {
+      return;
+    }
+    setSwaggerExporting(true);
+    setError(null);
+    try {
+      const blob = await exportOpenApiFile(projectId, hostId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const safeHost = (host?.hostname || host?.ip_address || hostId).replace(/[^a-zA-Z0-9._-]+/g, "_");
+      link.download = `swagger-${safeHost}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setInfoMessage("Swagger экспортирован.");
+    } catch (exportError) {
+      setError(getApiErrorMessage(exportError, "Не удалось экспортировать Swagger/OpenAPI."));
+    } finally {
+      setSwaggerExporting(false);
+    }
+  };
+
   const openVulnerabilityEdit = (vulnerability: Vulnerability) => {
     setEditingVulnerabilityId(vulnerability.id);
     setEditingVulnerabilityTitle(vulnerability.title);
@@ -1454,8 +1836,11 @@ export function HostDetailPage() {
     const created = await createVulnerability(projectId, {
       host_id: hostId,
       title: creatingVulnerabilityTitle.trim(),
-      description: creatingVulnerabilityDescription.trim() || null,
-      severity: creatingVulnerabilitySeverity,
+      description: null,
+      severity: severityFromCvssScore(
+        creatingVulnerabilityCvssScore === "" ? null : Number(creatingVulnerabilityCvssScore),
+        creatingVulnerabilitySeverity
+      ),
       status: creatingVulnerabilityStatus,
       cvss_version: creatingVulnerabilityCvssVector.trim() ? CVSS_VERSION : null,
       cvss_score: creatingVulnerabilityCvssScore === "" ? null : Number(creatingVulnerabilityCvssScore),
@@ -1467,8 +1852,7 @@ export function HostDetailPage() {
     });
     setCreateVulnerabilityOpen(false);
     setCreatingVulnerabilityTitle("");
-    setCreatingVulnerabilityDescription("");
-    setCreatingVulnerabilitySeverity("medium");
+    setCreatingVulnerabilitySeverity("info");
     setCreatingVulnerabilityStatus("open");
     setCreatingVulnerabilityCvssScore("");
     setCreatingVulnerabilityCvssVector("");
@@ -1488,29 +1872,12 @@ export function HostDetailPage() {
     const normalizedVersion = vector?.trim() ? CVSS_VERSION : null;
     const { score } = calculateCvssScore(normalizedVersion, vector);
     return {
+      severity: severityFromCvssScore(score),
       cvss_version: normalizedVersion,
       cvss_vector: vector,
       cvss_score: score,
     };
   };
-
-  useEffect(() => {
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-      body: JSON.stringify({
-        sessionId: "a74592",
-        runId: "vuln-card-pre",
-        hypothesisId: "H4",
-        location: "HostDetailPage.tsx:vuln-dialog-state",
-        message: "Host vulnerability dialog state changed",
-        data: { vulnDetailOpen, activeVulnId: activeVulnDetails?.id ?? null },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-  }, [vulnDetailOpen, activeVulnDetails?.id]);
 
   const loadVulnerabilityDetails = useCallback(async (vulnerabilityId: string) => {
     if (!projectId) {
@@ -1519,66 +1886,15 @@ export function HostDetailPage() {
     setVulnBusy(true);
     setError(null);
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "vuln-card-pre",
-          hypothesisId: "H2",
-          location: "HostDetailPage.tsx:loadVulnerabilityDetails:start",
-          message: "Host vulnerability details load started",
-          data: { projectId, hostId: hostId ?? null, vulnerabilityId },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       const [vulnDetail, commentsPage] = await Promise.all([
         getVulnerability(projectId, vulnerabilityId),
         listVulnerabilityComments(projectId, vulnerabilityId),
       ]);
       setActiveVulnDetails(vulnDetail);
       setVulnComments(commentsPage.items);
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "vuln-card-pre",
-          hypothesisId: "H4",
-          location: "HostDetailPage.tsx:loadVulnerabilityDetails:success",
-          message: "Host vulnerability details loaded",
-          data: { vulnerabilityId, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
+      setVulnEditMode(false);
       setVulnDetailOpen(true);
     } catch (error) {
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "vuln-card-pre",
-          hypothesisId: "H2",
-          location: "HostDetailPage.tsx:loadVulnerabilityDetails:error",
-          message: "Host vulnerability details load failed",
-          data: {
-            vulnerabilityId,
-            errorMessage: error instanceof Error ? error.message : "unknown",
-            responseStatus:
-              typeof error === "object" && error !== null && "response" in error
-                ? ((error as { response?: { status?: number } }).response?.status ?? null)
-                : null,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       setError(getApiErrorMessage(error, "Не удалось загрузить карточку уязвимости."));
     } finally {
       setVulnBusy(false);
@@ -1596,8 +1912,11 @@ export function HostDetailPage() {
     void loadVulnerabilityDetails(vulnerabilityId);
   }, [loadVulnerabilityDetails, vulnerabilityId]);
 
+  const [mentionHighlightActive, setMentionHighlightActive] = useState(false);
+
   useEffect(() => {
     if (!highlightedCommentId || !activeVulnDetails || !vulnComments.some((comment) => comment.id === highlightedCommentId)) {
+      setMentionHighlightActive(false);
       return;
     }
     const element = document.getElementById(`comment-${highlightedCommentId}`);
@@ -1607,6 +1926,13 @@ export function HostDetailPage() {
     window.setTimeout(() => {
       element.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 0);
+    setMentionHighlightActive(true);
+    const timer = window.setTimeout(() => {
+      setMentionHighlightActive(false);
+    }, 5000);
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [activeVulnDetails, highlightedCommentId, vulnComments]);
 
   const saveActiveVulnerability = async () => {
@@ -1632,26 +1958,9 @@ export function HostDetailPage() {
       });
       setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated } : prev));
       await loadHost();
+      setVulnEditMode(false);
     } catch (error) {
       setError(getApiErrorMessage(error, "Не удалось сохранить уязвимость."));
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const removeActiveVulnerability = async () => {
-    if (!projectId || !activeVulnDetails) {
-      return;
-    }
-    setVulnBusy(true);
-    setError(null);
-    try {
-      await deleteVulnerability(projectId, activeVulnDetails.id);
-      closeVulnerabilityView();
-      setActiveVulnDetails(null);
-      await loadHost();
-    } catch (error) {
-      setError(getApiErrorMessage(error, "Не удалось удалить уязвимость."));
     } finally {
       setVulnBusy(false);
     }
@@ -1714,7 +2023,7 @@ export function HostDetailPage() {
 
   const hostTitle = host?.hostname || host?.ip_address || "unknown-host";
   const portsCount = host?.ports.length ?? 0;
-  const endpointsCount = host?.endpoints.length ?? 0;
+  const endpointsCount = normalizedHostEndpoints.length;
   const vulnerabilitiesCount = vulnerabilities.length;
   const severityChipSx: Record<Vulnerability["severity"], object> = {
     critical: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
@@ -1776,6 +2085,16 @@ export function HostDetailPage() {
             backgroundColor: expanded ? "rgba(126,224,255,0.06)" : "transparent",
           }}
         >
+          {endpointBulkDeleteMode ? (
+            <Checkbox
+              size="small"
+              inputProps={{ "data-endpoint-delete-checkbox": "true" }}
+              checked={selectedEndpointIds.has(endpoint.id)}
+              onClick={(event) => event.stopPropagation()}
+              onChange={() => toggleEndpointSelection(endpoint.id)}
+              sx={{ p: 0.25, mr: -0.5 }}
+            />
+          ) : null}
           <Chip
             size="small"
             label={(endpoint.method || "GET").toUpperCase()}
@@ -1839,10 +2158,10 @@ export function HostDetailPage() {
                 variant="outlined"
                 sx={{ borderColor: "rgba(126,224,255,0.14)", backgroundColor: "rgba(8,17,31,0.45)" }}
               >
-                <Table size="small">
+                <Table size="small" sx={{ tableLayout: "fixed" }}>
                   <TableHead>
                     <TableRow>
-                      <TableCell sx={{ fontWeight: 700, width: "34%", borderColor: "rgba(126,224,255,0.12)" }}>Имя</TableCell>
+                      <TableCell sx={{ fontWeight: 700, width: ENDPOINT_TABLE_NAME_COLUMN_WIDTH, borderColor: "rgba(126,224,255,0.12)" }}>Имя</TableCell>
                       <TableCell sx={{ fontWeight: 700, borderColor: "rgba(126,224,255,0.12)" }}>Описание</TableCell>
                     </TableRow>
                   </TableHead>
@@ -1864,27 +2183,18 @@ export function HostDetailPage() {
                               </Box>
                             ) : null}
                           </Box>
-                          <Typography variant="caption" display="block" color="text.secondary">
-                            string · query
-                          </Typography>
-                          <Typography variant="caption" display="block" color="text.disabled">
-                            {param.required ? "обязательный" : "необязательный"}
-                          </Typography>
                         </TableCell>
                         <TableCell sx={{ verticalAlign: "top", borderColor: "rgba(126,224,255,0.1)" }}>
-                          {param.description && (
-                            <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                          {param.description ? (
+                            <Typography variant="body2" color="text.secondary" sx={{ mb: param.value ? 0.5 : 0 }}>
                               {param.description}
                             </Typography>
-                          )}
-                          <Typography variant="body2" component="div">
-                            <Box component="span" color="text.secondary">
-                              Значение:{" "}
-                            </Box>
-                            <Box component="span" sx={{ fontFamily: "ui-monospace, monospace", wordBreak: "break-all" }}>
-                              {param.value || "—"}
-                            </Box>
-                          </Typography>
+                          ) : null}
+                          {param.value ? (
+                            <Typography variant="body2" component="div" sx={{ fontFamily: "ui-monospace, monospace", wordBreak: "break-all" }}>
+                              {param.value}
+                            </Typography>
+                          ) : null}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1904,10 +2214,10 @@ export function HostDetailPage() {
                   variant="outlined"
                   sx={{ borderColor: "rgba(126,224,255,0.14)", backgroundColor: "rgba(8,17,31,0.45)" }}
                 >
-                  <Table size="small">
+                  <Table size="small" sx={{ tableLayout: "fixed" }}>
                     <TableHead>
                       <TableRow>
-                        <TableCell sx={{ fontWeight: 700, width: "28%", borderColor: "rgba(126,224,255,0.12)" }}>Имя</TableCell>
+                        <TableCell sx={{ fontWeight: 700, width: ENDPOINT_TABLE_NAME_COLUMN_WIDTH, borderColor: "rgba(126,224,255,0.12)" }}>Имя</TableCell>
                         <TableCell sx={{ fontWeight: 700, borderColor: "rgba(126,224,255,0.12)" }}>Значение</TableCell>
                       </TableRow>
                     </TableHead>
@@ -2026,6 +2336,7 @@ export function HostDetailPage() {
         );
       }
       const expanded = endpointTreeExpandedKeys.has(node.pathKey);
+      const selectionState = getNodeSelectionState(node);
       return (
         <Box key={node.pathKey}>
           <Stack
@@ -2042,6 +2353,18 @@ export function HostDetailPage() {
               "&:hover": { backgroundColor: "rgba(126,224,255,0.06)" },
             }}
           >
+            {endpointBulkDeleteMode ? (
+              <Checkbox
+                size="small"
+                inputProps={{ "data-endpoint-delete-checkbox": "true" }}
+                checked={selectionState.checked}
+                indeterminate={selectionState.indeterminate}
+                disabled={selectionState.total === 0}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => setNodeSelectionChecked(node, event.target.checked)}
+                sx={{ p: 0.25 }}
+              />
+            ) : null}
             <ExpandMoreIcon
               fontSize="small"
               sx={{
@@ -2077,6 +2400,7 @@ export function HostDetailPage() {
   };
 
   const closeVulnerabilityView = () => {
+    setVulnEditMode(false);
     if (projectId && hostId && isVulnerabilityRoute) {
       navigate(`/projects/${projectId}/hosts/${hostId}`, { state: { section: "vulns" } });
       return;
@@ -2084,60 +2408,176 @@ export function HostDetailPage() {
     setVulnDetailOpen(false);
   };
 
+  const openCommentActionsMenu = (event: React.MouseEvent<HTMLElement>, comment: VulnerabilityComment) => {
+    setActiveComment(comment);
+    setCommentActionsAnchorEl(event.currentTarget);
+  };
+
+  const closeCommentActionsMenu = () => {
+    setCommentActionsAnchorEl(null);
+    setActiveComment(null);
+  };
+
+  const formatCommentTimestamp = (value: string): string =>
+    new Intl.DateTimeFormat("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(value));
+
   const renderCommentsSection = (): ReactNode => (
-    <Stack spacing={1.25} sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+    <Stack spacing={1.25}>
       <Typography variant="subtitle1" fontWeight={700}>
         Комментарии ({vulnComments.length})
       </Typography>
-      <TextField
-        label="Комментарий (@username только для участников проекта)"
-        multiline
-        minRows={3}
-        value={newComment}
-        onChange={(event) => setNewComment(event.target.value)}
-        helperText="Поле вынесено выше, чтобы обсуждение было видно во время редактирования карточки."
-      />
-      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1}>
-        <Typography variant="caption" color="text.secondary">
-          Упоминания отправляются только участникам текущего проекта.
-        </Typography>
-        <Button variant="contained" disabled={!newComment.trim() || vulnBusy} onClick={() => void addCommentToActiveVuln()}>
-          Добавить комментарий
-        </Button>
-      </Stack>
       <List dense disablePadding>
         {vulnComments.map((comment) => {
-          const isHighlighted = highlightedCommentId === comment.id;
+          const isHighlighted = highlightedCommentId === comment.id && mentionHighlightActive;
+          const canManageComment = user?.id === comment.user_id;
           return (
             <ListItem
               id={`comment-${comment.id}`}
               key={comment.id}
               alignItems="flex-start"
               sx={{
-                border: isHighlighted ? "1px solid rgba(76,175,80,0.65)" : undefined,
-                backgroundColor: isHighlighted ? "rgba(76,175,80,0.08)" : undefined,
+                mb: 2.5,
+                border: "1px solid transparent",
+                ...(isHighlighted
+                  ? {
+                      animation: "mentionHighlightFade 5s ease forwards",
+                      "@keyframes mentionHighlightFade": {
+                        "0%": {
+                          backgroundColor: "rgba(76,175,80,0.18)",
+                          borderColor: "rgba(76,175,80,0.65)",
+                        },
+                        "60%": {
+                          backgroundColor: "rgba(76,175,80,0.18)",
+                          borderColor: "rgba(76,175,80,0.65)",
+                        },
+                        "100%": {
+                          backgroundColor: "transparent",
+                          borderColor: "transparent",
+                        },
+                      },
+                    }
+                  : {}),
                 scrollMarginTop: 96,
+                ...(canManageComment
+                  ? {
+                      "&:hover .comment-row-actions, &:focus-within .comment-row-actions": {
+                        opacity: 1,
+                        pointerEvents: "auto",
+                      },
+                    }
+                  : {}),
               }}
-              secondaryAction={
-                user?.role === "admin" || user?.id === comment.user_id ? (
-                  <Stack direction="row" spacing={0.5}>
-                    <IconButton size="small" onClick={() => openCommentEdit(comment)}>
-                      <EditIcon fontSize="small" />
-                    </IconButton>
-                    <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
-                      <DeleteOutlineIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                ) : null
-              }
             >
-              <ListItemText primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`} secondary={comment.content} />
+              <Stack spacing={0.75} sx={{ width: "100%" }}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2}>
+                  <Stack direction="row" alignItems="center" spacing={1.25} minWidth={0}>
+                    <Avatar
+                      src={comment.avatar_url || undefined}
+                      alt={comment.username}
+                      sx={{ width: 28, height: 28, fontSize: "0.8rem", bgcolor: "rgba(126,224,255,0.18)" }}
+                    >
+                      {comment.username.slice(0, 1).toUpperCase()}
+                    </Avatar>
+                    <Typography fontWeight={700} color="text.primary" noWrap>
+                      {comment.username}
+                    </Typography>
+                  </Stack>
+                  <Stack direction="row" alignItems="center" spacing={0} sx={{ flexShrink: 0 }}>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ whiteSpace: "nowrap", textAlign: "right", minWidth: "7.75rem", pr: 0.5 }}
+                    >
+                      {formatCommentTimestamp(comment.created_at)}
+                    </Typography>
+                    <Box sx={{ width: 36, display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
+                      {canManageComment ? (
+                        <IconButton
+                          className="comment-row-actions"
+                          size="small"
+                          onClick={(event) => openCommentActionsMenu(event, comment)}
+                          sx={{
+                            mr: -0.75,
+                            opacity: 0,
+                            pointerEvents: "none",
+                            transition: "opacity 0.15s ease",
+                            color: "rgba(148,163,184,0.85)",
+                            "&:hover": {
+                              color: "rgba(148,163,184,1)",
+                              backgroundColor: "rgba(126,224,255,0.06)",
+                            },
+                          }}
+                        >
+                          <MoreVertIcon fontSize="small" />
+                        </IconButton>
+                      ) : null}
+                    </Box>
+                  </Stack>
+                </Stack>
+                <Typography variant="body2" color="rgba(235,245,255,0.92)" sx={{ whiteSpace: "pre-wrap", pr: 1 }}>
+                  {comment.content}
+                </Typography>
+              </Stack>
             </ListItem>
           );
         })}
         {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
       </List>
+      <TextField
+        label="Комментарий (@username только для участников проекта)"
+        multiline
+        minRows={3}
+        value={newComment}
+        onChange={(event) => setNewComment(event.target.value)}
+      />
+      <Stack direction="row" justifyContent="flex-end">
+        <Button variant="contained" disabled={!newComment.trim() || vulnBusy} onClick={() => void addCommentToActiveVuln()}>
+          Добавить комментарий
+        </Button>
+      </Stack>
+      <Menu
+        anchorEl={commentActionsAnchorEl}
+        open={Boolean(commentActionsAnchorEl)}
+        onClose={closeCommentActionsMenu}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            if (activeComment) {
+              openCommentEdit(activeComment);
+            }
+            closeCommentActionsMenu();
+          }}
+        >
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Редактировать
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (activeComment) {
+              void removeCommentFromActiveVuln(activeComment.id);
+            }
+            closeCommentActionsMenu();
+          }}
+        >
+          <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+          Удалить
+        </MenuItem>
+      </Menu>
     </Stack>
+  );
+
+  const renderMarkdownPreview = (value: string | null | undefined, emptyText: string): ReactNode => (
+    <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+      {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
+    </Box>
   );
 
   const renderVulnerabilityDetailsContent = (): ReactNode => {
@@ -2148,81 +2588,52 @@ export function HostDetailPage() {
     return (
       <Stack spacing={2} sx={{ mt: 0.5 }}>
         <Grid container spacing={2}>
-          <Grid size={{ xs: 12, md: 8 }}>
+          <Grid size={{ xs: 12, md: 7 }}>
             <TextField
               label="Название"
               fullWidth
               value={activeVulnDetails.title}
               onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, title: event.target.value } : prev))}
-            />
-          </Grid>
-          <Grid size={{ xs: 12, md: 2 }}>
-            <TextField
-              select
-              label="Критичность"
-              fullWidth
-              value={activeVulnDetails.severity}
-              onChange={(event) =>
-                setActiveVulnDetails((prev) => (prev ? { ...prev, severity: event.target.value as Vulnerability["severity"] } : prev))
-              }
-            >
-              <MenuItem value="critical">critical</MenuItem>
-              <MenuItem value="high">high</MenuItem>
-              <MenuItem value="medium">medium</MenuItem>
-              <MenuItem value="low">low</MenuItem>
-              <MenuItem value="info">info</MenuItem>
-            </TextField>
-          </Grid>
-          <Grid size={{ xs: 12, md: 2 }}>
-            <TextField
-              select
-              label="Статус"
-              fullWidth
-              value={activeVulnDetails.status}
-              onChange={(event) =>
-                setActiveVulnDetails((prev) => (prev ? { ...prev, status: event.target.value as Vulnerability["status"] } : prev))
-              }
-            >
-              <MenuItem value="open">open</MenuItem>
-              <MenuItem value="in_progress">in_progress</MenuItem>
-              <MenuItem value="fixed">fixed</MenuItem>
-              <MenuItem value="wont_fix">wont_fix</MenuItem>
-              <MenuItem value="accepted_risk">accepted_risk</MenuItem>
-            </TextField>
-          </Grid>
-          <Grid size={{ xs: 12 }}>
-            <TextField
-              label="Описание"
-              fullWidth
-              multiline
-              minRows={3}
-              value={activeVulnDetails.description || ""}
-              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, description: event.target.value || null } : prev))}
-            />
-          </Grid>
-          <Grid size={{ xs: 12 }}>
-            {renderCommentsSection()}
-          </Grid>
-          <Grid size={{ xs: 12, md: 3 }}>
-            <TextField
-              label="CVSS версия"
-              fullWidth
-              value={CVSS_VERSION}
-              slotProps={{ input: { readOnly: true } }}
-              helperText="В карточке поддерживается только CVSS 4.0"
+              slotProps={{ input: { readOnly: !vulnEditMode } }}
             />
           </Grid>
           <Grid size={{ xs: 12, md: 3 }}>
             <TextField
-              label="CVSS score"
-              type="number"
+              label="CWE ID"
               fullWidth
-              value={activeVulnDetails.cvss_score ?? ""}
-              slotProps={{ input: { readOnly: true } }}
-              helperText="Рассчитывается автоматически по версии и вектору"
+              value={activeVulnDetails.cwe_id || ""}
+              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cwe_id: event.target.value || null } : prev))}
+              slotProps={{ input: { readOnly: !vulnEditMode } }}
             />
           </Grid>
-          <Grid size={{ xs: 12, md: 6 }}>
+          <Grid size={{ xs: 12, md: 2 }}>
+            {vulnEditMode ? (
+              <TextField
+                select
+                label="Статус"
+                fullWidth
+                value={activeVulnDetails.status}
+                onChange={(event) =>
+                  setActiveVulnDetails((prev) => (prev ? { ...prev, status: event.target.value as Vulnerability["status"] } : prev))
+                }
+              >
+                <MenuItem value="open">open</MenuItem>
+                <MenuItem value="in_progress">in_progress</MenuItem>
+                <MenuItem value="fixed">fixed</MenuItem>
+                <MenuItem value="wont_fix">wont_fix</MenuItem>
+                <MenuItem value="accepted_risk">accepted_risk</MenuItem>
+              </TextField>
+            ) : (
+              <TextField label="Статус" fullWidth value={activeVulnDetails.status} slotProps={{ input: { readOnly: true } }} />
+            )}
+          </Grid>
+          <Grid size={{ xs: 12, md: 2 }}>
+            <TextField label="CVSS score" type="number" fullWidth value={activeVulnDetails.cvss_score ?? ""} slotProps={{ input: { readOnly: true } }} />
+          </Grid>
+          <Grid size={{ xs: 12, md: 2 }}>
+            <TextField label="Критичность" fullWidth value={activeVulnDetails.severity} slotProps={{ input: { readOnly: true } }} />
+          </Grid>
+          <Grid size={{ xs: 12, md: 8 }}>
             <TextField
               label="CVSS vector"
               fullWidth
@@ -2230,22 +2641,16 @@ export function HostDetailPage() {
               onChange={(event) =>
                 setActiveVulnDetails((prev) => (prev ? { ...prev, ...buildAutoCvssFields(event.target.value || null) } : prev))
               }
-            />
-          </Grid>
-          <Grid size={{ xs: 12 }}>
-            <TextField
-              label="CWE ID"
-              fullWidth
-              value={activeVulnDetails.cwe_id || ""}
-              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cwe_id: event.target.value || null } : prev))}
+              slotProps={{ input: { readOnly: !vulnEditMode } }}
             />
           </Grid>
           <Grid size={{ xs: 12 }}>
             <VulnerabilityStagesEditor
               stages={activeVulnDetails.workflow_steps || []}
-              endpoints={host?.endpoints || []}
+              endpoints={normalizedHostEndpoints}
               hostLabel={host?.hostname || host?.ip_address || undefined}
               busy={vulnBusy}
+              editable={vulnEditMode}
               onChange={(nextStages) =>
                 setActiveVulnDetails((prev) =>
                   prev
@@ -2258,59 +2663,84 @@ export function HostDetailPage() {
               }
               onUploadImage={async (stageId, file) => {
                 if (!projectId || !activeVulnDetails) {
-                  return;
+                  return null;
                 }
                 try {
                   const uploadedFile = await uploadVulnerabilityFile(projectId, activeVulnDetails.id, file);
-                  const nextWorkflowSteps = (activeVulnDetails.workflow_steps || []).map((stage) =>
-                    stage.id === stageId ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] } : stage
+                  setActiveVulnDetails((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          files: [uploadedFile, ...prev.files.filter((fileMeta) => fileMeta.id !== uploadedFile.id)],
+                        }
+                      : prev
                   );
-                  const updated = await updateVulnerability(projectId, activeVulnDetails.id, { workflow_steps: nextWorkflowSteps });
-                  setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
+                  return `![${uploadedFile.original_name}](/api/v1/files/${uploadedFile.id}/download)`;
                 } catch {
                   setError("Не удалось загрузить картинку этапа.");
-                }
-              }}
-              onRemoveImage={async (_stageId, fileId) => {
-                if (!projectId || !activeVulnDetails) {
-                  return;
-                }
-                try {
-                  await deleteVulnerabilityFile(projectId, activeVulnDetails.id, fileId);
-                  const nextWorkflowSteps = (activeVulnDetails.workflow_steps || []).map((stage) => ({
-                    ...stage,
-                    image_file_ids: stage.image_file_ids.filter((imageFileId) => imageFileId !== fileId),
-                  }));
-                  const updated = await updateVulnerability(projectId, activeVulnDetails.id, { workflow_steps: nextWorkflowSteps });
-                  setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
-                } catch {
-                  setError("Не удалось удалить картинку этапа.");
+                  return null;
                 }
               }}
             />
           </Grid>
           <Grid size={{ xs: 12 }}>
-            <TextField
-              label="Влияние"
-              fullWidth
-              multiline
-              minRows={2}
-              value={activeVulnDetails.impact || ""}
-              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev))}
-            />
+            {vulnEditMode ? (
+              <TextField
+                label="Влияние"
+                fullWidth
+                multiline
+                minRows={2}
+                value={activeVulnDetails.impact || ""}
+                onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev))}
+              />
+            ) : (
+              <>
+                <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
+                  Влияние
+                </Typography>
+                {renderMarkdownPreview(activeVulnDetails.impact, "Влияние не указано.")}
+              </>
+            )}
           </Grid>
           <Grid size={{ xs: 12 }}>
-            <TextField
-              label="Рекомендации"
-              fullWidth
-              multiline
-              minRows={2}
-              value={activeVulnDetails.recommendations || ""}
-              onChange={(event) =>
-                setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: event.target.value || null } : prev))
-              }
-            />
+            {vulnEditMode ? (
+              <TextField
+                label="Рекомендации"
+                fullWidth
+                multiline
+                minRows={2}
+                value={activeVulnDetails.recommendations || ""}
+                onChange={(event) =>
+                  setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: event.target.value || null } : prev))
+                }
+              />
+            ) : (
+              <>
+                <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
+                  Рекомендации
+                </Typography>
+                {renderMarkdownPreview(activeVulnDetails.recommendations, "Рекомендации не указаны.")}
+              </>
+            )}
           </Grid>
+          {vulnEditMode && (
+            <Grid size={{ xs: 12 }}>
+              <Stack direction={{ xs: "column", sm: "row" }} justifyContent="flex-end" spacing={1.5}>
+                <Button variant="outlined" size="large" sx={{ minWidth: { sm: 180 } }} onClick={() => void loadVulnerabilityDetails(activeVulnDetails.id)}>
+                  Отменить
+                </Button>
+                <Button
+                  variant="contained"
+                  size="large"
+                  sx={{ minWidth: { sm: 200 } }}
+                  onClick={() => void saveActiveVulnerability()}
+                  disabled={!activeVulnDetails || vulnBusy}
+                >
+                  Сохранить изменения
+                </Button>
+              </Stack>
+            </Grid>
+          )}
         </Grid>
 
       </Stack>
@@ -2327,9 +2757,6 @@ export function HostDetailPage() {
 
   return (
     <Stack spacing={2.5}>
-      {error && <Alert severity="error">{error}</Alert>}
-      {infoMessage && <Alert severity="success">{infoMessage}</Alert>}
-
       <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
         <Stack spacing={0.2}>
           <Typography variant="h4" fontWeight={700}>
@@ -2374,7 +2801,17 @@ export function HostDetailPage() {
           onSelectSection={openHostSection}
           onSelectProjectOverview={() => navigate(`/projects/${projectId}`)}
           onSelectHost={() => undefined}
-          onOpenHost={(nextHostId, section) => navigate(`/projects/${projectId}/hosts/${nextHostId}`, { state: { section } })}
+          onOpenHost={(nextHostId, section) => {
+            // #region agent log
+            postHostDetailReloadDebugLog(
+              "frontend/src/pages/HostDetailPage.tsx:onOpenHost",
+              "Host navigation requested",
+              { currentHostId: hostId, nextHostId, projectId, section, path: location.pathname },
+              "R4"
+            );
+            // #endregion
+            navigate(`/projects/${projectId}/hosts/${nextHostId}`, { state: { section } });
+          }}
         />
 
         <Stack flex={1} spacing={2}>
@@ -2552,7 +2989,21 @@ export function HostDetailPage() {
                                 direction="row"
                                 justifyContent="space-between"
                                 alignItems="center"
-                                sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.26)" }}
+                                sx={{
+                                  border: "1px solid rgba(126,224,255,0.12)",
+                                  p: 1,
+                                  borderRadius: 0,
+                                  backgroundColor: "rgba(8,17,31,0.26)",
+                                  "& .service-actions": {
+                                    opacity: 0,
+                                    pointerEvents: "none",
+                                    transition: "opacity 0.15s ease",
+                                  },
+                                  "&:hover .service-actions": {
+                                    opacity: 1,
+                                    pointerEvents: "auto",
+                                  },
+                                }}
                               >
                                 <Stack spacing={0.2}>
                                   <Typography variant="body2" fontWeight={600}>
@@ -2562,28 +3013,10 @@ export function HostDetailPage() {
                                     {service.version || "version n/a"}
                                   </Typography>
                                 </Stack>
-                                <Stack direction="row" spacing={0.4}>
-                                  <Tooltip title="Редактировать сервис">
-                                    <IconButton
-                                      size="small"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        openEditServiceDialog(port.id, service);
-                                      }}
-                                    >
-                                      <EditIcon fontSize="small" />
-                                    </IconButton>
-                                  </Tooltip>
-                                  <Tooltip title="Удалить сервис">
-                                    <IconButton
-                                      size="small"
-                                      color="error"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        void removeService(port.id, service.id);
-                                      }}
-                                    >
-                                      <DeleteIcon fontSize="small" />
+                                <Stack direction="row" spacing={0.4} className="service-actions">
+                                  <Tooltip title="Действия">
+                                    <IconButton size="small" onClick={(event) => openServiceActions(event, port.id, service)}>
+                                      <MoreVertIcon fontSize="small" />
                                     </IconButton>
                                   </Tooltip>
                                 </Stack>
@@ -2631,6 +3064,36 @@ export function HostDetailPage() {
                     Удалить
                   </MenuItem>
                 </Menu>
+                <Menu
+                  anchorEl={serviceActionsAnchorEl}
+                  open={serviceActionsOpen}
+                  onClose={closeServiceActions}
+                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                  transformOrigin={{ vertical: "top", horizontal: "right" }}
+                >
+                  <MenuItem
+                    onClick={() => {
+                      if (activeService && activeServicePortId) {
+                        openEditServiceDialog(activeServicePortId, activeService);
+                      }
+                      closeServiceActions();
+                    }}
+                  >
+                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
+                    Редактировать
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      if (activeService && activeServicePortId) {
+                        void removeService(activeServicePortId, activeService.id);
+                      }
+                      closeServiceActions();
+                    }}
+                  >
+                    <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
+                    Удалить
+                  </MenuItem>
+                </Menu>
               </CardContent>
             </Card>
           )}
@@ -2642,36 +3105,116 @@ export function HostDetailPage() {
                   <Typography variant="h6" fontWeight={700}>
                     Эндпоинты
                   </Typography>
-                  <Stack direction="row" spacing={0.5}>
-                    <Tooltip title="Импортировать из Swagger/OpenAPI (JSON/YAML)">
-                      <IconButton size="small" component="label" disabled={swaggerImporting}>
-                        <UploadFileIcon fontSize="small" />
-                        <input
-                          hidden
-                          type="file"
-                          accept="application/json,.json,.yaml,.yml,text/yaml,application/yaml"
-                          onChange={(event) => {
-                            const selectedFile = event.target.files?.[0] ?? null;
-                            void importEndpointsFromSwaggerFile(selectedFile);
-                            event.target.value = "";
-                          }}
-                        />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="Добавить эндпоинт">
-                      <IconButton
-                        size="small"
-                        onClick={openCreateEndpointDialog}
-                        sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
-                      >
-                        <AddIcon fontSize="small" />
-                      </IconButton>
+                  <Stack direction="row" alignItems="center" spacing={0.5}>
+                    {endpointBulkDeleteMode && selectedEndpointIds.size > 0 ? (
+                      <Tooltip title="Удалить выбранные эндпоинты">
+                        <span>
+                          <Button
+                            size="small"
+                            color="error"
+                            variant="outlined"
+                            data-endpoint-bulk-delete="true"
+                            startIcon={<DeleteIcon fontSize="small" />}
+                            disabled={bulkDeletingEndpoints}
+                            onClick={() => {
+                              void removeSelectedEndpoints();
+                            }}
+                          >
+                            Удалить ({selectedEndpointIds.size})
+                          </Button>
+                        </span>
+                      </Tooltip>
+                    ) : null}
+                    <Tooltip title="Действия с эндпоинтами">
+                      <span>
+                        <IconButton
+                          size="small"
+                          onClick={(event) => setEndpointsMenuAnchorEl(event.currentTarget)}
+                          disabled={swaggerImporting || swaggerExporting}
+                          sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                        >
+                          <MoreVertIcon fontSize="small" />
+                        </IconButton>
+                      </span>
                     </Tooltip>
                   </Stack>
+                  <input
+                    ref={swaggerImportInputRef}
+                    hidden
+                    type="file"
+                    accept="application/json,.json,.yaml,.yml,text/yaml,application/yaml"
+                    onChange={(event) => {
+                      const selectedFile = event.target.files?.[0] ?? null;
+                      void importEndpointsFromSwaggerFile(selectedFile);
+                      event.target.value = "";
+                    }}
+                  />
+                  <Menu
+                    anchorEl={endpointsMenuAnchorEl}
+                    open={endpointsMenuOpen}
+                    onClose={closeEndpointsMenu}
+                    anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                    transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  >
+                    <MenuItem
+                      onClick={() => {
+                        closeEndpointsMenu();
+                        openCreateEndpointDialog();
+                      }}
+                    >
+                      <AddIcon fontSize="small" sx={{ mr: 1 }} />
+                      Добавить эндпоинт
+                    </MenuItem>
+                    <MenuItem
+                      disabled={swaggerImporting}
+                      onClick={() => {
+                        closeEndpointsMenu();
+                        swaggerImportInputRef.current?.click();
+                      }}
+                    >
+                      <UploadFileIcon fontSize="small" sx={{ mr: 1 }} />
+                      Импортировать Swagger/OpenAPI
+                    </MenuItem>
+                    <MenuItem
+                      disabled={swaggerExporting || !normalizedHostEndpoints.length}
+                      onClick={() => {
+                        closeEndpointsMenu();
+                        void exportEndpointsToSwaggerFile();
+                      }}
+                    >
+                      <DownloadIcon fontSize="small" sx={{ mr: 1 }} />
+                      Экспортировать Swagger/OpenAPI
+                    </MenuItem>
+                    {!endpointBulkDeleteMode ? (
+                      <MenuItem
+                        data-endpoint-delete-mode-item="true"
+                        disabled={!normalizedHostEndpoints.length}
+                        onClick={() => {
+                          closeEndpointsMenu();
+                          setEndpointBulkDeleteMode(true);
+                        }}
+                      >
+                        <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+                        Выбрать эндпоинты для удаления
+                      </MenuItem>
+                    ) : (
+                      <MenuItem
+                        data-endpoint-delete-mode-item="true"
+                        onClick={() => {
+                          closeEndpointsMenu();
+                          setEndpointBulkDeleteMode(false);
+                          setSelectedEndpointIds(new Set());
+                        }}
+                      >
+                        <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+                        Выйти из режима удаления
+                      </MenuItem>
+                    )}
+                  </Menu>
                 </Stack>
                 <Stack spacing={1.25}>
-                  {host?.endpoints?.length ? renderEndpointPathTree(endpointPathTree) : null}
-                  {!host?.endpoints?.length && <Typography color="text.secondary">Эндпоинты для этого хоста пока не добавлены.</Typography>}
+                  {normalizedHostEndpoints.length ? renderEndpointPathTree(endpointPathTree) : null}
+                  {!normalizedHostEndpoints.length && <Typography color="text.secondary">Эндпоинты для этого хоста пока не добавлены.</Typography>}
                 </Stack>
                 <Menu
                   anchorEl={endpointActionsAnchorEl}
@@ -2715,64 +3258,41 @@ export function HostDetailPage() {
             </Card>
           )}
 
-          {selectedSection === "vulns" && (
+          {selectedSection === "vulns" &&
+            (isVulnerabilityRoute ? (
+              <Stack spacing={3}>
+                <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", backgroundColor: "rgba(15,27,45,0.82)" }}>
+                  <CardContent>
+                    <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1} mb={2}>
+                      <Button startIcon={<ArrowBackIcon />} onClick={closeVulnerabilityView}>
+                        Назад
+                      </Button>
+                      <Tooltip title="Редактировать">
+                        <span>
+                          <IconButton
+                            size="small"
+                            onClick={() => setVulnEditMode(true)}
+                            disabled={vulnEditMode}
+                            sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                          >
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </Stack>
+                    {renderVulnerabilityDetailsContent()}
+                  </CardContent>
+                </Card>
+                <Card sx={{ border: "1px solid rgba(126,224,255,0.16)", backgroundColor: "rgba(15,27,45,0.82)" }}>
+                  <CardContent>{renderCommentsSection()}</CardContent>
+                </Card>
+              </Stack>
+            ) : (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
-                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
-                  <Typography variant="h6" fontWeight={700}>
-                    Уязвимости хоста
-                  </Typography>
-                  <Tooltip title="Добавить уязвимость">
-                    <IconButton
-                      size="small"
-                      onClick={() => setCreateVulnerabilityOpen(true)}
-                      sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
-                    >
-                      <AddIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                </Stack>
-                {isVulnerabilityRoute && (
-                  <Card sx={{ mb: 2, border: "1px solid rgba(126,224,255,0.18)", backgroundColor: "rgba(8,17,31,0.32)" }}>
-                    <CardContent>
-                      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1} mb={2}>
-                        <Button startIcon={<ArrowBackIcon />} onClick={closeVulnerabilityView}>
-                          Назад
-                        </Button>
-                        <Stack direction="row" spacing={1}>
-                          <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setCreateVulnerabilityOpen(true)}>
-                            Новая уязвимость
-                          </Button>
-                        </Stack>
-                      </Stack>
-                      {renderVulnerabilityDetailsContent()}
-                      <Divider sx={{ my: 2 }} />
-                      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="flex-end" spacing={1.5}>
-                        <Button
-                          color="error"
-                          variant="outlined"
-                          size="large"
-                          sx={{ minWidth: { sm: 180 } }}
-                          onClick={() => void removeActiveVulnerability()}
-                          disabled={!activeVulnDetails || vulnBusy}
-                        >
-                          Удалить
-                        </Button>
-                        <Button
-                          variant="contained"
-                          size="large"
-                          sx={{ minWidth: { sm: 200 } }}
-                          onClick={() => void saveActiveVulnerability()}
-                          disabled={!activeVulnDetails || vulnBusy}
-                        >
-                          Сохранить изменения
-                        </Button>
-                      </Stack>
-                    </CardContent>
-                  </Card>
-                )}
-                {!isVulnerabilityRoute && (
-                <>
+                <Typography variant="h6" fontWeight={700} mb={1}>
+                  Уязвимости хоста
+                </Typography>
                 <Stack spacing={1}>
                   {vulnerabilities.map((item) => (
                     <Box
@@ -2796,13 +3316,7 @@ export function HostDetailPage() {
                       }}
                     >
                       <Stack direction="row" justifyContent="space-between" alignItems="center">
-                        <Stack spacing={0.8}>
-                          <Typography fontWeight={600}>{item.title}</Typography>
-                          <Stack direction="row" spacing={1}>
-                            <Chip size="small" label={item.severity} sx={severityChipSx[item.severity]} />
-                            <Chip size="small" label={item.status} sx={vulnerabilityStatusChipSx[item.status]} />
-                          </Stack>
-                        </Stack>
+                        <Typography fontWeight={600}>{item.title}</Typography>
                         <Stack direction="row" spacing={0.4} alignItems="center" className="vuln-actions">
                           <Tooltip title="Действия">
                             <IconButton size="small" onClick={(event) => openVulnerabilityActions(event, item)}>
@@ -2813,34 +3327,21 @@ export function HostDetailPage() {
                       </Stack>
                       <Collapse in={expandedVulnerabilityIds.includes(item.id)} timeout="auto" unmountOnExit>
                         <Stack spacing={1} mt={0.8}>
-                          <Typography color="text.secondary" variant="body2">
-                            {item.description || "Описание не указано"}
-                          </Typography>
                           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                            {item.cvss_version && <Chip size="small" variant="outlined" label={`CVSS ${item.cvss_version} ${item.cvss_score ?? "-"}`} />}
-                            {item.cwe_id && <Chip size="small" variant="outlined" label={item.cwe_id} />}
+                              {item.cwe_id && <Chip size="small" variant="outlined" label={item.cwe_id} />}
+                              {item.cvss_version && <Chip size="small" variant="outlined" label={`CVSS ${item.cvss_version} ${item.cvss_score ?? "-"}`} />}
+                              <Chip size="small" label={item.severity} sx={severityChipSx[item.severity]} />
+                            <Chip size="small" label={item.status} sx={vulnerabilityStatusChipSx[item.status]} />
                           </Stack>
+                          <Typography color="text.secondary" variant="body2">
+                            {item.impact || "Влияние не указано"}
+                          </Typography>
                           <Box>
                             <Button
                               size="small"
                               variant="text"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                // #region agent log
-                                fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-                                  body: JSON.stringify({
-                                    sessionId: "a74592",
-                                    runId: "vuln-card-pre",
-                                    hypothesisId: "H1",
-                                    location: "HostDetailPage.tsx:open-card-button",
-                                    message: "Host vulnerability card button clicked",
-                                    data: { vulnerabilityId: item.id, expanded: expandedVulnerabilityIds.includes(item.id) },
-                                    timestamp: Date.now(),
-                                  }),
-                                }).catch(() => {});
-                                // #endregion
                                 openVulnerabilityPage(item.id);
                               }}
                             >
@@ -2894,11 +3395,9 @@ export function HostDetailPage() {
                     Удалить
                   </MenuItem>
                 </Menu>
-                </>
-                )}
               </CardContent>
             </Card>
-          )}
+            ))}
         </Stack>
       </Stack>
 
@@ -3031,10 +3530,8 @@ export function HostDetailPage() {
                 placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
                 value={editingEndpointImportRaw}
                 onChange={(event) => setEditingEndpointImportRaw(event.target.value)}
+                helperText="Поля ниже заполняются автоматически, если запрос удалось разобрать."
               />
-              <Button variant="outlined" onClick={applyParsedRequestToEditEndpoint}>
-                Разобрать и заполнить поля
-              </Button>
             </Stack>
             <Divider />
             {editingEndpointImportHostWarn && (
@@ -3161,10 +3658,8 @@ export function HostDetailPage() {
                 placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
                 value={creatingEndpointImportRaw}
                 onChange={(event) => setCreatingEndpointImportRaw(event.target.value)}
+                helperText="Поля ниже заполняются автоматически, если запрос удалось разобрать."
               />
-              <Button variant="outlined" onClick={applyParsedRequestToCreateEndpoint}>
-                Разобрать и заполнить поля
-              </Button>
             </Stack>
             <Divider />
             {creatingEndpointImportHostWarn && (
@@ -3281,15 +3776,28 @@ export function HostDetailPage() {
 
       <Dialog open={!isVulnerabilityRoute && vulnDetailOpen} onClose={closeVulnerabilityView} fullWidth maxWidth="lg">
         <DialogTitle>Карточка уязвимости</DialogTitle>
-        <DialogContent>{renderVulnerabilityDetailsContent()}</DialogContent>
+        <DialogContent>
+          <Stack spacing={3} sx={{ mt: 0.5 }}>
+            {renderVulnerabilityDetailsContent()}
+            <Divider />
+            {renderCommentsSection()}
+          </Stack>
+        </DialogContent>
         <DialogActions sx={{ px: 3, pb: 3, pt: 1.5 }}>
           <Button onClick={closeVulnerabilityView}>Закрыть</Button>
-          <Button color="error" variant="outlined" onClick={() => void removeActiveVulnerability()} disabled={!activeVulnDetails || vulnBusy}>
-            Удалить
-          </Button>
-          <Button variant="contained" size="large" sx={{ minWidth: 180 }} onClick={() => void saveActiveVulnerability()} disabled={!activeVulnDetails || vulnBusy}>
-            Сохранить
-          </Button>
+          {!vulnEditMode && (
+            <Tooltip title="Редактировать">
+              <span>
+                <IconButton
+                  onClick={() => setVulnEditMode(true)}
+                  disabled={!activeVulnDetails}
+                  sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                >
+                  <EditIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
         </DialogActions>
       </Dialog>
 
@@ -3363,70 +3871,74 @@ export function HostDetailPage() {
         <DialogTitle>Добавить уязвимость к хосту</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField
-              label="Название"
-              value={creatingVulnerabilityTitle}
-              onChange={(event) => setCreatingVulnerabilityTitle(event.target.value)}
-            />
-            <TextField
-              multiline
-              minRows={3}
-              label="Описание"
-              value={creatingVulnerabilityDescription}
-              onChange={(event) => setCreatingVulnerabilityDescription(event.target.value)}
-            />
-            <TextField
-              select
-              label="Критичность"
-              value={creatingVulnerabilitySeverity}
-              onChange={(event) => setCreatingVulnerabilitySeverity(event.target.value as Vulnerability["severity"])}
-            >
-              <MenuItem value="critical">critical</MenuItem>
-              <MenuItem value="high">high</MenuItem>
-              <MenuItem value="medium">medium</MenuItem>
-              <MenuItem value="low">low</MenuItem>
-              <MenuItem value="info">info</MenuItem>
-            </TextField>
-            <TextField
-              select
-              label="Статус"
-              value={creatingVulnerabilityStatus}
-              onChange={(event) => setCreatingVulnerabilityStatus(event.target.value as Vulnerability["status"])}
-            >
-              <MenuItem value="open">open</MenuItem>
-              <MenuItem value="in_progress">in_progress</MenuItem>
-              <MenuItem value="fixed">fixed</MenuItem>
-              <MenuItem value="wont_fix">wont_fix</MenuItem>
-              <MenuItem value="accepted_risk">accepted_risk</MenuItem>
-            </TextField>
-            <TextField
-              label="CVSS версия"
-              value={CVSS_VERSION}
-              slotProps={{ input: { readOnly: true } }}
-              helperText="Для новых уязвимостей используется только CVSS 4.0"
-            />
-            <TextField
-              label="CVSS score"
-              type="number"
-              inputProps={{ min: 0, max: 10, step: 0.1 }}
-              value={creatingVulnerabilityCvssScore}
-              slotProps={{ input: { readOnly: true } }}
-              helperText="Рассчитывается автоматически по версии и вектору"
-            />
-            <TextField
-              label="CVSS vector"
-              value={creatingVulnerabilityCvssVector}
-              onChange={(event) => {
-                const nextVector = event.target.value;
-                const { score } = calculateCvssScore(CVSS_VERSION, nextVector || null);
-                setCreatingVulnerabilityCvssVector(nextVector);
-                setCreatingVulnerabilityCvssScore(score === null ? "" : String(score));
-              }}
-            />
-            <TextField label="CWE ID" value={creatingVulnerabilityCweId} onChange={(event) => setCreatingVulnerabilityCweId(event.target.value)} />
+            <Grid container spacing={2}>
+              <Grid size={{ xs: 12, md: 7 }}>
+                <TextField
+                  label="Название"
+                  value={creatingVulnerabilityTitle}
+                  onChange={(event) => setCreatingVulnerabilityTitle(event.target.value)}
+                  fullWidth
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 3 }}>
+                <TextField
+                  label="CWE ID"
+                  value={creatingVulnerabilityCweId}
+                  onChange={(event) => setCreatingVulnerabilityCweId(event.target.value)}
+                  fullWidth
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 2 }}>
+                <TextField
+                  select
+                  label="Статус"
+                  value={creatingVulnerabilityStatus}
+                  onChange={(event) => setCreatingVulnerabilityStatus(event.target.value as Vulnerability["status"])}
+                  fullWidth
+                >
+                  <MenuItem value="open">open</MenuItem>
+                  <MenuItem value="in_progress">in_progress</MenuItem>
+                  <MenuItem value="fixed">fixed</MenuItem>
+                  <MenuItem value="wont_fix">wont_fix</MenuItem>
+                  <MenuItem value="accepted_risk">accepted_risk</MenuItem>
+                </TextField>
+              </Grid>
+              <Grid size={{ xs: 12, md: 2 }}>
+                <TextField
+                  label="Критичность"
+                  value={creatingVulnerabilitySeverity}
+                  slotProps={{ input: { readOnly: true } }}
+                  fullWidth
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 2 }}>
+                <TextField
+                  label="CVSS score"
+                  type="number"
+                  inputProps={{ min: 0, max: 10, step: 0.1 }}
+                  value={creatingVulnerabilityCvssScore}
+                  slotProps={{ input: { readOnly: true } }}
+                  fullWidth
+                />
+              </Grid>
+              <Grid size={{ xs: 12, md: 8 }}>
+                <TextField
+                  label="CVSS vector"
+                  value={creatingVulnerabilityCvssVector}
+                  onChange={(event) => {
+                    const nextVector = event.target.value;
+                    const { score } = calculateCvssScore(CVSS_VERSION, nextVector || null);
+                    setCreatingVulnerabilityCvssVector(nextVector);
+                    setCreatingVulnerabilityCvssScore(score === null ? "" : String(score));
+                    setCreatingVulnerabilitySeverity(severityFromCvssScore(score));
+                  }}
+                  fullWidth
+                />
+              </Grid>
+            </Grid>
             <VulnerabilityStagesEditor
               stages={creatingVulnerabilityStages}
-              endpoints={host?.endpoints || []}
+              endpoints={normalizedHostEndpoints}
               hostLabel={host?.hostname || host?.ip_address || undefined}
               onChange={setCreatingVulnerabilityStages}
             />

@@ -17,6 +17,7 @@ services:
     volumes:
       - ./backend:/app
       - ./:/workspace
+      - ./:/workspace
 
   mail-worker:
     build:
@@ -25,11 +26,15 @@ services:
       - .env
     command: python -m app.worker.mail_worker
     depends_on:
-      - db
-      - rabbitmq
-      - mailpit
+      db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
     volumes:
       - ./backend:/app
+      - ./:/workspace
 
   frontend:
     build:
@@ -73,7 +78,7 @@ services:
     environment:
       CLICKHOUSE_DB: pcf
       CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_PASSWORD: clickhouse_dev_password
     ports:
       - "8123:8123"
     volumes:
@@ -83,6 +88,12 @@ services:
     image: rabbitmq:3-management
     environment:
       RABBITMQ_ERLANG_COOKIE: pcf_rabbitmq_dev_cookie_1234567890
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
   mailpit:
     image: axllent/mailpit

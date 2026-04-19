@@ -4,7 +4,6 @@ import asyncio
 import json
 import re
 import secrets
-from pathlib import Path
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from urllib.parse import parse_qsl, urlparse, urlsplit
@@ -13,52 +12,7 @@ from xml.sax.saxutils import escape
 
 import magic
 import yaml
-
-# region agent log
-def _write_debug_log(message: str, data: dict, hypothesis_id: str) -> None:
-    payload = {
-        "sessionId": "a74592",
-        "runId": "cvss-import-debug",
-        "hypothesisId": hypothesis_id,
-        "location": "backend/app/services.py:cvss-import",
-        "message": message,
-        "data": data,
-        "timestamp": int(datetime.now(UTC).timestamp() * 1000),
-    }
-    log_path = Path("/workspace/debug-a74592.log")
-    if not log_path.parent.exists():
-        log_path = Path(__file__).resolve().parents[2] / "debug-a74592.log"
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-
-try:
-    _write_debug_log(
-        "Attempting cvss import",
-        {
-            "cwd": str(Path.cwd()),
-            "pythonExecutable": __import__("sys").executable,
-            "workspaceMounted": Path("/workspace").exists(),
-            "servicesFile": str(Path(__file__).resolve()),
-        },
-        "H1",
-    )
-    from cvss import CVSS4
-except Exception as exc:
-    _write_debug_log(
-        "cvss import failed",
-        {
-            "errorType": type(exc).__name__,
-            "errorMessage": str(exc),
-            "cwd": str(Path.cwd()),
-            "pythonExecutable": __import__("sys").executable,
-            "workspaceMounted": Path("/workspace").exists(),
-            "requirementsExists": Path("/app/requirements.txt").exists(),
-        },
-        "H2",
-    )
-    raise
-# endregion
+from cvss import CVSS4
 from docx import Document
 from docx.shared import Inches
 from fastapi import UploadFile
@@ -74,7 +28,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from app.audit_store import audit_store
 from app.config import get_settings
-from app.enums import AssetType, NotificationType, ProjectStatus, UserRole
+from app.enums import AssetType, NotificationType, ProjectStatus, Severity, UserRole
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError
 from app.models import (
     AuditLog,
@@ -120,6 +74,8 @@ from app.ws_manager import ws_manager
 settings = get_settings()
 MENTION_RE = re.compile(r"@([a-zA-Z0-9_.-]{1,100})")
 MAX_FILE_SIZE = 50 * 1024 * 1024
+MAX_OPENAPI_IMPORT_BYTES = 2 * 1024 * 1024
+MAX_OPENAPI_PATHS = 2000
 ALLOWED_MIME_TYPES = {
     "image/png",
     "image/jpeg",
@@ -882,6 +838,25 @@ class AssetService:
     )
 
     _METHODS_WITHOUT_BODY = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
+    _UUID_PATH_SEGMENT_RE = re.compile(
+        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    )
+
+    @staticmethod
+    def _normalize_endpoint_path(path_value: str | None) -> str | None:
+        if path_value is None:
+            return None
+        path_only, _ = AssetService._parse_request_target_token(str(path_value))
+        normalized = re.sub(r"/{2,}", "/", (path_only or "/").strip() or "/")
+        normalized = normalized if normalized.startswith("/") else f"/{normalized}"
+        if normalized != "/" and normalized.endswith("/"):
+            normalized = normalized[:-1]
+        segments = [
+            "{UUID}" if AssetService._UUID_PATH_SEGMENT_RE.fullmatch(segment) else segment
+            for segment in normalized.split("/")
+            if segment
+        ]
+        return f"/{'/'.join(segments)}" if segments else "/"
 
     @staticmethod
     def _normalize_endpoint_headers(raw_headers: list[dict] | None) -> list[dict]:
@@ -943,6 +918,8 @@ class AssetService:
 
     @staticmethod
     def _apply_structured_request_payload(payload: dict) -> dict:
+        if "path" in payload and payload.get("path") is not None:
+            payload["path"] = AssetService._normalize_endpoint_path(payload.get("path"))
         if "query_params" in payload:
             payload["query_params"] = AssetService._normalize_endpoint_query_params(payload.get("query_params"))
         if "request_headers" in payload and payload.get("request_headers") is not None:
@@ -980,7 +957,7 @@ class AssetService:
             raise ValidationError("request_raw должен содержать HTTP-версию в request line")
         path_only, query_pairs = AssetService._parse_request_target_token(path_value)
         payload["method"] = method
-        payload["path"] = path_only
+        payload["path"] = AssetService._normalize_endpoint_path(path_only)
         if "query_params" not in payload or not payload.get("query_params"):
             payload["query_params"] = [
                 {"name": key, "value": value, "required": False, "description": None} for key, value in query_pairs
@@ -1008,6 +985,19 @@ class AssetService:
             payload["request_content_type"] = None
         payload.pop("request_raw", None)
         return payload
+
+    @staticmethod
+    def _merge_endpoint_fields(endpoint: Endpoint, endpoint_payload: dict) -> None:
+        if not endpoint.description and endpoint_payload.get("description"):
+            endpoint.description = endpoint_payload["description"]
+        if not endpoint.query_params and endpoint_payload.get("query_params"):
+            endpoint.query_params = endpoint_payload["query_params"]
+        if not endpoint.request_body and endpoint_payload.get("request_body"):
+            endpoint.request_body = endpoint_payload["request_body"]
+        if not endpoint.request_content_type and endpoint_payload.get("request_content_type"):
+            endpoint.request_content_type = endpoint_payload["request_content_type"]
+        if not endpoint.request_headers and endpoint_payload.get("request_headers"):
+            endpoint.request_headers = endpoint_payload["request_headers"]
 
     async def _get_host(self, project_id: UUID, host_id: UUID) -> Host:
         host = await self.db.scalar(select(Host).where(and_(Host.id == host_id, Host.project_id == project_id)))
@@ -1206,6 +1196,22 @@ class AssetService:
         payload = self._apply_structured_request_payload(self._apply_raw_request_payload(dict(payload)))
         if payload.get("request_headers") is None:
             payload["request_headers"] = []
+        duplicate = await self.db.scalar(
+            select(Endpoint).where(
+                and_(
+                    Endpoint.host_id == host_id,
+                    Endpoint.path == payload.get("path"),
+                    Endpoint.method == payload.get("method"),
+                )
+            )
+        )
+        if duplicate:
+            self._merge_endpoint_fields(duplicate, payload)
+            await self.db.commit()
+            await self.db.refresh(duplicate)
+            await self.audit.log("UPDATE", user_id=actor_id, entity_type="endpoint", entity_id=duplicate.id)
+            await ws_manager.broadcast(project_id, {"event": "updated", "entity": "endpoint", "project_id": str(project_id), "data": {"id": str(duplicate.id)}})
+            return duplicate
         endpoint = Endpoint(host_id=host_id, **payload)
         self.db.add(endpoint)
         await self.db.commit()
@@ -1220,6 +1226,20 @@ class AssetService:
         endpoint = await self.db.scalar(select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id)))
         if not endpoint:
             raise NotFoundError("Endpoint не найден")
+        next_path = payload.get("path") if payload.get("path") is not None else endpoint.path
+        next_method = payload.get("method") if payload.get("method") is not None else endpoint.method
+        duplicate = await self.db.scalar(
+            select(Endpoint).where(
+                and_(
+                    Endpoint.host_id == host_id,
+                    Endpoint.id != endpoint_id,
+                    Endpoint.path == next_path,
+                    Endpoint.method == next_method,
+                )
+            )
+        )
+        if duplicate:
+            raise ConflictError("Эндпоинт с таким методом и path уже существует")
         for key, value in payload.items():
             if key in {"description", "request_body", "request_content_type", "query_params", "request_headers"} or value is not None:
                 setattr(endpoint, key, value)
@@ -1317,29 +1337,74 @@ class VulnerabilityService:
 
     @staticmethod
     def _normalize_cvss_vector(version: str | None, vector: str | None) -> str | None:
+        version_value = getattr(version, "value", version)
         if not version or not vector:
             return None
         raw = vector.strip()
         if not raw:
             return None
-        normalized = re.sub(r"^CVSS:\d\.\d/", f"CVSS:{version}/", raw)
+        normalized = re.sub(r"^CVSS:\d\.\d/", f"CVSS:{version_value}/", raw)
         if not normalized.startswith("CVSS:"):
-            normalized = f"CVSS:{version}/{normalized.lstrip('/')}"
+            normalized = f"CVSS:{version_value}/{normalized.lstrip('/')}"
         return normalized
 
     @staticmethod
     def _calculate_cvss_score(version: str | None, vector: str | None) -> tuple[str | None, float | None]:
+        version_value = getattr(version, "value", version)
         normalized_vector = VulnerabilityService._normalize_cvss_vector(version, vector)
         if not normalized_vector:
             return None, None
         try:
-            if version == "4.0":
+            if version_value == "4.0":
                 score = float(CVSS4(normalized_vector).scores()[0])
             else:
                 raise ValidationError("Поддерживается только CVSS 4.0")
         except Exception as exc:
             raise ValidationError(f"Некорректный CVSS вектор: {exc}") from exc
         return normalized_vector, score
+
+    @staticmethod
+    def _apply_calculated_cvss_fields(payload: dict, *, current_version: str | None = None, current_vector: str | None = None) -> None:
+        has_explicit_score = payload.get("cvss_score") is not None
+        next_version = getattr(payload.get("cvss_version", current_version), "value", payload.get("cvss_version", current_version))
+        next_vector = payload.get("cvss_vector", current_vector)
+
+        if "cvss_vector" in payload and not payload.get("cvss_vector"):
+            if has_explicit_score:
+                raise ValidationError("CVSS score рассчитывается автоматически и требует корректный CVSS 4.0 вектор")
+            payload["cvss_version"] = None
+            payload["cvss_vector"] = None
+            payload["cvss_score"] = None
+            return
+
+        if next_vector:
+            if not next_version:
+                raise ValidationError("Для расчёта CVSS укажите версию 4.0 и корректный вектор")
+            normalized_vector, calculated_score = VulnerabilityService._calculate_cvss_score(next_version, next_vector)
+            payload["cvss_version"] = next_version
+            payload["cvss_vector"] = normalized_vector
+            payload["cvss_score"] = calculated_score
+            return
+
+        if has_explicit_score:
+            raise ValidationError("CVSS score рассчитывается автоматически и требует корректный CVSS 4.0 вектор")
+
+        if "cvss_version" in payload and payload.get("cvss_version"):
+            raise ValidationError("Для расчёта CVSS укажите корректный CVSS 4.0 вектор")
+
+    @staticmethod
+    def _severity_from_cvss_score(score: float | None) -> Severity:
+        if score is None:
+            return Severity.INFO
+        if score >= 9.0:
+            return Severity.CRITICAL
+        if score >= 7.0:
+            return Severity.HIGH
+        if score >= 4.0:
+            return Severity.MEDIUM
+        if score > 0:
+            return Severity.LOW
+        return Severity.INFO
 
     async def _resolve_workflow_step_endpoints(self, project_id: UUID, host_id: UUID, steps: list[dict]) -> list[dict]:
         resolved_steps: list[dict] = []
@@ -1459,10 +1524,9 @@ class VulnerabilityService:
         if not host_id:
             raise ValidationError("Уязвимость должна быть привязана к конкретному хосту")
         await self._assert_asset_in_project(project_id, AssetType.HOST, host_id)
-        normalized_vector, calculated_score = self._calculate_cvss_score(payload.get("cvss_version"), payload.get("cvss_vector"))
-        if normalized_vector is not None:
-            payload["cvss_vector"] = normalized_vector
-            payload["cvss_score"] = calculated_score
+        self._apply_calculated_cvss_fields(payload)
+        if payload.get("cvss_score") is not None:
+            payload["severity"] = self._severity_from_cvss_score(payload.get("cvss_score"))
         if "workflow_steps" in payload:
             payload["workflow_steps"] = self._normalize_workflow_steps(payload.get("workflow_steps"))
             payload["workflow_steps"] = await self._resolve_workflow_step_endpoints(project_id, host_id, payload["workflow_steps"])
@@ -1493,14 +1557,14 @@ class VulnerabilityService:
 
     async def update(self, project_id: UUID, vuln_id: UUID, payload: dict, actor_id: UUID) -> Vulnerability:
         vuln = await self._get_vuln(project_id, vuln_id)
-        next_cvss_version = payload.get("cvss_version", vuln.cvss_version.value if vuln.cvss_version else None)
-        next_cvss_vector = payload.get("cvss_vector", vuln.cvss_vector)
-        normalized_vector, calculated_score = self._calculate_cvss_score(next_cvss_version, next_cvss_vector)
-        if normalized_vector is not None:
-            payload["cvss_vector"] = normalized_vector
-            payload["cvss_score"] = calculated_score
-        elif "cvss_vector" in payload and not payload.get("cvss_vector"):
-            payload["cvss_score"] = None
+        self._apply_calculated_cvss_fields(
+            payload,
+            current_version=vuln.cvss_version.value if vuln.cvss_version else None,
+            current_vector=vuln.cvss_vector,
+        )
+        next_score = payload.get("cvss_score", vuln.cvss_score)
+        if next_score is not None:
+            payload["severity"] = self._severity_from_cvss_score(next_score)
         if "workflow_steps" in payload:
             payload["workflow_steps"] = self._normalize_workflow_steps(payload.get("workflow_steps"))
             host_id = await self._get_primary_host_id(vuln.id)
@@ -1756,6 +1820,7 @@ class CommentService:
                     vulnerability_id=comment.vulnerability_id,
                     user_id=comment.user_id,
                     username=user.username,
+                    avatar_url=user.avatar_url,
                     content=comment.content,
                     mentions=mentions,
                     created_at=comment.created_at,
@@ -1802,6 +1867,7 @@ class CommentService:
             vulnerability_id=comment.vulnerability_id,
             user_id=comment.user_id,
             username=actor.username,
+            avatar_url=actor.avatar_url,
             content=comment.content,
             mentions=mention_models,
             created_at=comment.created_at,
@@ -1815,7 +1881,7 @@ class CommentService:
         )
         if not comment:
             raise NotFoundError("Комментарий не найден")
-        if actor.role != UserRole.ADMIN and comment.user_id != actor.id:
+        if comment.user_id != actor.id:
             raise ForbiddenError("Можно редактировать только свой комментарий")
         comment.content = content
         await self.db.execute(delete(CommentMention).where(CommentMention.comment_id == comment.id))
@@ -1823,26 +1889,9 @@ class CommentService:
         mention_models: list[MentionOut] = []
         for user in mentioned_users:
             self.db.add(CommentMention(comment_id=comment.id, user_id=user.id))
-            self.db.add(Notification(user_id=user.id, type=NotificationType.MENTION, comment_id=comment.id, is_read=False))
             mention_models.append(MentionOut(user_id=user.id, username=user.username))
         await self.db.commit()
         await self.db.refresh(comment)
-        for user in mentioned_users:
-            await ws_manager.notify_user(
-                user.id,
-                {
-                    "event": "notification",
-                    "entity": "notification",
-                    "data": {
-                        "type": NotificationType.MENTION.value,
-                        "is_read": False,
-                        "comment_id": str(comment.id),
-                        "vulnerability_id": str(vuln_id),
-                        "project_id": str(project_id),
-                        "commenter_username": actor.username,
-                    },
-                },
-            )
         await self.audit.log("UPDATE", user_id=actor.id, entity_type="comment", entity_id=comment.id)
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "comment", "project_id": str(project_id), "data": {"id": str(comment.id)}})
         return CommentOut(
@@ -1850,6 +1899,7 @@ class CommentService:
             vulnerability_id=comment.vulnerability_id,
             user_id=comment.user_id,
             username=actor.username,
+            avatar_url=actor.avatar_url,
             content=comment.content,
             mentions=mention_models,
             created_at=comment.created_at,
@@ -1863,7 +1913,7 @@ class CommentService:
         )
         if not comment:
             raise NotFoundError("Комментарий не найден")
-        if actor.role != UserRole.ADMIN and comment.user_id != actor.id:
+        if comment.user_id != actor.id:
             raise ForbiddenError("Можно удалить только свой комментарий")
         await self.db.delete(comment)
         await self.db.commit()
@@ -2023,14 +2073,189 @@ class ImportService:
             raise ValidationError("Файл должен быть в кодировке UTF-8") from exc
 
     @staticmethod
-    def _load_json_or_yaml_document(raw_text: str) -> dict:
+    def _validate_openapi_payload(payload: bytes) -> None:
+        if not payload:
+            raise ValidationError("Swagger/OpenAPI файл пуст")
+        if len(payload) > MAX_OPENAPI_IMPORT_BYTES:
+            raise ValidationError("Swagger/OpenAPI файл превышает 2 МБ")
+
+    @staticmethod
+    def _parse_relaxed_openapi_scalar(raw_value: str) -> object:
+        value = raw_value.strip().rstrip(",").strip()
+        if not value:
+            return ""
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        if re.fullmatch(r"-?\d+", value):
+            try:
+                return int(value)
+            except ValueError:
+                return value
+        return value
+
+    @classmethod
+    def _parse_relaxed_openapi_object(cls, lines: list[str], index: int) -> tuple[dict, int]:
+        result: dict = {}
+        while index < len(lines):
+            line = lines[index].strip()
+            if not line:
+                index += 1
+                continue
+            normalized = line[:-1].rstrip() if line.endswith(",") else line
+            if normalized == "}":
+                return result, index + 1
+            if normalized.endswith("{"):
+                key = normalized[:-1].strip()
+                nested, index = cls._parse_relaxed_openapi_object(lines, index + 1)
+                result[key] = nested
+                continue
+            if normalized.endswith("["):
+                key = normalized[:-1].strip()
+                nested, index = cls._parse_relaxed_openapi_array(lines, index + 1)
+                result[key] = nested
+                continue
+            parts = normalized.split(None, 1)
+            key = parts[0].strip()
+            raw_value = parts[1] if len(parts) > 1 else ""
+            if raw_value == "{}":
+                result[key] = {}
+            elif raw_value == "[]":
+                result[key] = []
+            else:
+                result[key] = cls._parse_relaxed_openapi_scalar(raw_value)
+            index += 1
+        return result, index
+
+    @classmethod
+    def _parse_relaxed_openapi_array(cls, lines: list[str], index: int) -> tuple[list[object], int]:
+        result: list[object] = []
+        while index < len(lines):
+            line = lines[index].strip()
+            if not line:
+                index += 1
+                continue
+            normalized = line[:-1].rstrip() if line.endswith(",") else line
+            if normalized == "]":
+                return result, index + 1
+            if normalized == "{":
+                nested, index = cls._parse_relaxed_openapi_object(lines, index + 1)
+                result.append(nested)
+                continue
+            if normalized == "[":
+                nested, index = cls._parse_relaxed_openapi_array(lines, index + 1)
+                result.append(nested)
+                continue
+            result.append(cls._parse_relaxed_openapi_scalar(normalized))
+            index += 1
+        return result, index
+
+    @staticmethod
+    def _normalize_relaxed_openapi_mime(value: str) -> str:
+        text = value.strip()
+        if "/" in text:
+            return text
+        for prefix in ("application", "multipart", "text", "image", "audio", "video"):
+            if text.startswith(prefix) and len(text) > len(prefix):
+                return f"{prefix}/{text[len(prefix):]}"
+        return text
+
+    @staticmethod
+    def _normalize_relaxed_openapi_ref(value: str) -> str:
+        text = value.strip()
+        for prefix in ("definitions", "parameters", "responses", "securityDefinitions"):
+            compact = f"#{prefix}"
+            if text.startswith(compact) and not text.startswith(f"#/{prefix}/"):
+                tail = text[len(compact) :].strip("/")
+                if tail:
+                    return f"#/{prefix}/{tail}"
+        return text
+
+    @classmethod
+    def _normalize_relaxed_openapi_path_key(cls, raw_path: str, path_item: object) -> str:
+        text = str(raw_path or "").strip()
+        if not text:
+            return "/"
+        if text.startswith("/"):
+            return text
+        first_tag = ""
+        if isinstance(path_item, dict):
+            for operation in path_item.values():
+                if not isinstance(operation, dict):
+                    continue
+                tags = operation.get("tags")
+                if isinstance(tags, list) and tags:
+                    candidate = str(tags[0] or "").strip().strip("/")
+                    if candidate:
+                        first_tag = candidate
+                        break
+        if first_tag and text.lower().startswith(first_tag.lower()):
+            tail = text[len(first_tag) :].lstrip("/")
+            text = f"/{first_tag}/{tail}" if tail else f"/{first_tag}"
+        else:
+            text = f"/{text.lstrip('/')}"
+        text = re.sub(r"(?<!/)\{", "/{", text)
+        text = re.sub(r"\}(?!/|$)", "}/", text)
+        text = re.sub(r"/{2,}", "/", text)
+        return text
+
+    @classmethod
+    def _normalize_relaxed_openapi_document(cls, value: object, key: str | None = None) -> object:
+        if isinstance(value, dict):
+            normalized = {item_key: cls._normalize_relaxed_openapi_document(item_value, item_key) for item_key, item_value in value.items()}
+            if "basePath" in normalized and isinstance(normalized["basePath"], str):
+                base_path = normalized["basePath"].strip()
+                normalized["basePath"] = f"/{base_path.lstrip('/')}" if base_path else ""
+            if "paths" in normalized and isinstance(normalized["paths"], dict):
+                normalized["paths"] = {
+                    cls._normalize_relaxed_openapi_path_key(path_key, path_item): path_item
+                    for path_key, path_item in normalized["paths"].items()
+                }
+            return normalized
+        if isinstance(value, list):
+            return [cls._normalize_relaxed_openapi_document(item, key) for item in value]
+        if isinstance(value, str):
+            text = value.strip()
+            if key == "$ref":
+                return cls._normalize_relaxed_openapi_ref(text)
+            if key in {"consumes", "produces"}:
+                return cls._normalize_relaxed_openapi_mime(text)
+            return text
+        return value
+
+    @classmethod
+    def _load_relaxed_openapi_document(cls, raw_text: str) -> dict:
+        lines = raw_text.splitlines()
+        index = 0
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        if index >= len(lines) or lines[index].strip() != "{":
+            raise ValidationError("Swagger/OpenAPI файл должен быть валидным JSON или YAML")
+        parsed, next_index = cls._parse_relaxed_openapi_object(lines, index + 1)
+        trailing = [line.strip() for line in lines[next_index:] if line.strip()]
+        if trailing:
+            raise ValidationError("Swagger/OpenAPI файл должен быть валидным JSON или YAML")
+        normalized = cls._normalize_relaxed_openapi_document(parsed)
+        if not isinstance(normalized, dict):
+            raise ValidationError("Swagger/OpenAPI документ должен быть объектом")
+        return normalized
+
+    @classmethod
+    def _load_json_or_yaml_document(cls, raw_text: str) -> dict:
+        if not raw_text.strip():
+            raise ValidationError("Swagger/OpenAPI файл пуст")
         try:
             parsed = json.loads(raw_text)
         except Exception:
             try:
                 parsed = yaml.safe_load(raw_text)
             except Exception as exc:
-                raise ValidationError("Swagger/OpenAPI файл должен быть валидным JSON или YAML") from exc
+                try:
+                    parsed = cls._load_relaxed_openapi_document(raw_text)
+                except Exception:
+                    raise ValidationError("Swagger/OpenAPI файл должен быть валидным JSON или YAML") from exc
         if not isinstance(parsed, dict):
             raise ValidationError("Swagger/OpenAPI документ должен быть объектом")
         return parsed
@@ -2066,8 +2291,7 @@ class ImportService:
     @staticmethod
     def _normalize_openapi_path(path_value: str, prefix: str) -> str:
         combined = f"{prefix.rstrip('/')}/{path_value.lstrip('/')}" if prefix else path_value
-        normalized = re.sub(r"/{2,}", "/", combined.strip() or "/")
-        return normalized if normalized.startswith("/") else f"/{normalized}"
+        return AssetService._normalize_endpoint_path(combined) or "/"
 
     @staticmethod
     def _extract_openapi_host(document: dict) -> str | None:
@@ -2111,12 +2335,57 @@ class ImportService:
     def _serialize_openapi_example(value: object) -> str | None:
         if value is None:
             return None
+        if isinstance(value, bool):
+            return "true" if value else "false"
         if isinstance(value, str):
             text = value.strip()
             return text or None
         if isinstance(value, (dict, list)):
             return json.dumps(value, ensure_ascii=False, indent=2)
         return str(value)
+
+    @classmethod
+    def _build_openapi_example_from_schema(cls, document: dict, schema: object, depth: int = 0) -> object:
+        if schema is None or depth > 8:
+            return None
+        resolved = cls._resolve_openapi_ref(document, schema)
+        if not isinstance(resolved, dict):
+            return None
+        if "example" in resolved:
+            return resolved.get("example")
+        if "default" in resolved:
+            return resolved.get("default")
+        enum_values = resolved.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            return enum_values[0]
+        schema_type = str(resolved.get("type") or "").lower()
+        if schema_type == "object" or isinstance(resolved.get("properties"), dict):
+            properties = resolved.get("properties") if isinstance(resolved.get("properties"), dict) else {}
+            example: dict = {}
+            for prop_name, prop_schema in properties.items():
+                example[prop_name] = cls._build_openapi_example_from_schema(document, prop_schema, depth + 1)
+            return example
+        if schema_type == "array":
+            item_example = cls._build_openapi_example_from_schema(document, resolved.get("items"), depth + 1)
+            return [item_example] if item_example is not None else []
+        if schema_type in {"integer", "number"}:
+            return 0
+        if schema_type == "boolean":
+            return False
+        if schema_type == "file":
+            return "<binary>"
+        if schema_type == "string" or not schema_type:
+            fmt = str(resolved.get("format") or "").lower()
+            if fmt == "date-time":
+                return "2024-01-01T00:00:00Z"
+            if fmt == "date":
+                return "2024-01-01"
+            if fmt == "uuid":
+                return "00000000-0000-0000-0000-000000000000"
+            if fmt == "email":
+                return "user@example.com"
+            return "string"
+        return None
 
     @classmethod
     def _extract_openapi_query_params(cls, document: dict, path_item: dict, operation: dict) -> list[dict]:
@@ -2133,10 +2402,22 @@ class ImportService:
                 if not name or name in seen:
                     continue
                 seen.add(name)
+                example_value: object | None = None
+                if "example" in resolved:
+                    example_value = resolved.get("example")
+                elif "default" in resolved:
+                    example_value = resolved.get("default")
+                elif isinstance(resolved.get("enum"), list) and resolved["enum"]:
+                    example_value = resolved["enum"][0]
+                else:
+                    schema_for_value = resolved.get("schema") if isinstance(resolved.get("schema"), dict) else resolved
+                    built = cls._build_openapi_example_from_schema(document, schema_for_value)
+                    if built is not None and not isinstance(built, (dict, list)):
+                        example_value = built
                 collected.append(
                     {
                         "name": name,
-                        "value": None,
+                        "value": cls._serialize_openapi_example(example_value),
                         "required": bool(resolved.get("required")),
                         "description": str(resolved.get("description") or "").strip() or None,
                     }
@@ -2144,32 +2425,85 @@ class ImportService:
         return collected
 
     @classmethod
-    def _extract_openapi_request_details(cls, document: dict, operation: dict) -> tuple[str | None, str | None]:
+    def _collect_openapi_form_params(cls, document: dict, path_item: dict, operation: dict) -> list[dict]:
+        body_param: dict | None = None
+        form_params: list[dict] = []
+        for source in (path_item.get("parameters"), operation.get("parameters")):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                resolved = cls._resolve_openapi_ref(document, item)
+                if not isinstance(resolved, dict):
+                    continue
+                in_value = str(resolved.get("in") or "").lower()
+                if in_value == "body" and body_param is None:
+                    body_param = resolved
+                elif in_value == "formdata":
+                    form_params.append(resolved)
+        return [{"body": body_param, "form": form_params}]
+
+    @classmethod
+    def _extract_openapi_request_details(
+        cls, document: dict, path_item: dict, operation: dict
+    ) -> tuple[str | None, str | None]:
         request_body = operation.get("requestBody")
-        if not request_body:
-            return None, None
-        resolved = cls._resolve_openapi_ref(document, request_body)
-        if not isinstance(resolved, dict):
-            return None, None
-        content = resolved.get("content")
-        if not isinstance(content, dict) or not content:
-            return None, None
-        for content_type, content_schema in content.items():
-            normalized_type = str(content_type or "").strip() or None
-            if not isinstance(content_schema, dict):
-                return normalized_type, None
-            if "example" in content_schema:
-                return normalized_type, cls._serialize_openapi_example(content_schema.get("example"))
-            examples = content_schema.get("examples")
-            if isinstance(examples, dict):
-                for example in examples.values():
-                    if isinstance(example, dict) and "value" in example:
-                        return normalized_type, cls._serialize_openapi_example(example.get("value"))
-            schema = content_schema.get("schema")
-            resolved_schema = cls._resolve_openapi_ref(document, schema) if schema else None
-            if isinstance(resolved_schema, dict) and "example" in resolved_schema:
-                return normalized_type, cls._serialize_openapi_example(resolved_schema.get("example"))
-            return normalized_type, None
+        if request_body:
+            resolved = cls._resolve_openapi_ref(document, request_body)
+            if isinstance(resolved, dict):
+                content = resolved.get("content")
+                if isinstance(content, dict) and content:
+                    for content_type, content_schema in content.items():
+                        normalized_type = str(content_type or "").strip() or None
+                        if not isinstance(content_schema, dict):
+                            return normalized_type, None
+                        if "example" in content_schema:
+                            return normalized_type, cls._serialize_openapi_example(content_schema.get("example"))
+                        examples = content_schema.get("examples")
+                        if isinstance(examples, dict):
+                            for example in examples.values():
+                                if isinstance(example, dict) and "value" in example:
+                                    return normalized_type, cls._serialize_openapi_example(example.get("value"))
+                        schema = content_schema.get("schema")
+                        if schema is not None:
+                            built = cls._build_openapi_example_from_schema(document, schema)
+                            if built is not None:
+                                return normalized_type, cls._serialize_openapi_example(built)
+                        return normalized_type, None
+        swagger_consumes = operation.get("consumes") if isinstance(operation.get("consumes"), list) else document.get("consumes")
+        consumes_list = swagger_consumes if isinstance(swagger_consumes, list) else []
+        preferred_type = next(
+            (str(item).strip() for item in consumes_list if isinstance(item, str) and str(item).strip()),
+            None,
+        )
+        collected = cls._collect_openapi_form_params(document, path_item, operation)
+        body_param = collected[0]["body"] if collected else None
+        form_params = collected[0]["form"] if collected else []
+        if body_param:
+            content_type = preferred_type or "application/json"
+            if "example" in body_param:
+                return content_type, cls._serialize_openapi_example(body_param.get("example"))
+            built = cls._build_openapi_example_from_schema(document, body_param.get("schema"))
+            if built is None:
+                return content_type, None
+            return content_type, cls._serialize_openapi_example(built)
+        if form_params:
+            content_type = preferred_type or "application/x-www-form-urlencoded"
+            pairs: list[tuple[str, str]] = []
+            for param in form_params:
+                name = str(param.get("name") or "").strip()
+                if not name:
+                    continue
+                schema_for_value = param.get("schema") if isinstance(param.get("schema"), dict) else param
+                built = cls._build_openapi_example_from_schema(document, schema_for_value)
+                value_text = cls._serialize_openapi_example(built) or ""
+                pairs.append((name, value_text))
+            if not pairs:
+                return content_type, None
+            if content_type.startswith("multipart"):
+                body_text = "\n".join(f"{name}={value}" for name, value in pairs)
+            else:
+                body_text = "&".join(f"{name}={value}" for name, value in pairs)
+            return content_type, body_text or None
         return None, None
 
     async def import_openapi(self, project_id: UUID, host_id: UUID, payload: bytes, actor_id: UUID) -> OpenApiImportResult:
@@ -2177,11 +2511,14 @@ class ImportService:
         if not host:
             raise NotFoundError("Хост не найден")
 
+        self._validate_openapi_payload(payload)
         raw_text = self._decode_text_payload(payload)
         document = self._load_json_or_yaml_document(raw_text)
         paths = document.get("paths")
         if not isinstance(paths, dict) or not paths:
             raise ValidationError("В Swagger/OpenAPI документе отсутствует объект paths")
+        if len(paths) > MAX_OPENAPI_PATHS:
+            raise ValidationError("Swagger/OpenAPI документ содержит слишком много paths для импорта")
 
         spec_host = self._extract_openapi_host(document)
         result = OpenApiImportResult(
@@ -2221,7 +2558,14 @@ class ImportService:
                     if not isinstance(operation, dict):
                         result.errors.append(f"Операция '{raw_method_name}' для '{path_value}' имеет некорректную структуру.")
                         continue
-                    request_content_type, request_body = self._extract_openapi_request_details(document, operation)
+                    if bool(operation.get("deprecated")):
+                        result.errors.append(
+                            f"Операция '{raw_method_name.upper()} {path_value}' помечена как deprecated и была пропущена."
+                        )
+                        continue
+                    request_content_type, request_body = self._extract_openapi_request_details(
+                        document, path_item, operation
+                    )
                     endpoint_payload = {
                         "path": self._normalize_openapi_path(path_value, path_prefix),
                         "method": method_name.upper(),
@@ -2280,6 +2624,94 @@ class ImportService:
             {"event": "updated", "entity": "endpoint", "project_id": str(project_id), "data": {"host_id": str(host_id), "imported": True}},
         )
         return result
+
+    async def export_openapi(self, project_id: UUID, host_id: UUID) -> dict:
+        """Собирает OpenAPI 3.0 документ из эндпоинтов хоста."""
+        host = await self.db.scalar(select(Host).where(and_(Host.id == host_id, Host.project_id == project_id)))
+        if not host:
+            raise NotFoundError("Хост не найден")
+        endpoints_result = await self.db.scalars(
+            select(Endpoint).where(Endpoint.host_id == host.id).order_by(Endpoint.path, Endpoint.method)
+        )
+        endpoints = endpoints_result.all()
+        title = host.hostname or host.ip_address or "API"
+        server_url = None
+        if host.hostname:
+            server_url = f"https://{host.hostname}"
+        elif host.ip_address:
+            server_url = f"http://{host.ip_address}"
+        document: dict = {
+            "openapi": "3.0.0",
+            "info": {"title": title, "version": "1.0.0"},
+            "paths": {},
+        }
+        if server_url:
+            document["servers"] = [{"url": server_url}]
+        for endpoint in endpoints:
+            path_value = endpoint.path or "/"
+            method_value = (endpoint.method.value if endpoint.method else "GET").lower()
+            path_item = document["paths"].setdefault(path_value, {})
+            operation: dict = {}
+            description = (endpoint.description or "").strip()
+            if description:
+                first_line, _, rest = description.partition("\n\n")
+                operation["summary"] = first_line.strip()
+                if rest.strip():
+                    operation["description"] = rest.strip()
+            parameters: list[dict] = []
+            for raw_param in endpoint.query_params or []:
+                if not isinstance(raw_param, dict):
+                    continue
+                name = str(raw_param.get("name") or "").strip()
+                if not name:
+                    continue
+                parameter: dict = {
+                    "name": name,
+                    "in": "query",
+                    "required": bool(raw_param.get("required")),
+                    "schema": {"type": "string"},
+                }
+                description_value = str(raw_param.get("description") or "").strip()
+                if description_value:
+                    parameter["description"] = description_value
+                example_value = raw_param.get("value")
+                if example_value not in (None, ""):
+                    parameter["example"] = example_value
+                parameters.append(parameter)
+            for raw_header in endpoint.request_headers or []:
+                if not isinstance(raw_header, dict):
+                    continue
+                name = str(raw_header.get("name") or "").strip()
+                if not name:
+                    continue
+                parameter = {
+                    "name": name,
+                    "in": "header",
+                    "required": False,
+                    "schema": {"type": "string"},
+                }
+                example_value = raw_header.get("value")
+                if example_value not in (None, ""):
+                    parameter["example"] = example_value
+                parameters.append(parameter)
+            if parameters:
+                operation["parameters"] = parameters
+            request_body_text = (endpoint.request_body or "").strip()
+            if request_body_text:
+                content_type = (endpoint.request_content_type or "application/json").strip() or "application/json"
+                example_payload: object = request_body_text
+                if content_type.endswith("json") or "json" in content_type.lower():
+                    try:
+                        example_payload = json.loads(request_body_text)
+                    except (ValueError, TypeError):
+                        example_payload = request_body_text
+                operation["requestBody"] = {
+                    "required": True,
+                    "content": {content_type: {"example": example_payload}},
+                }
+            operation["responses"] = {"200": {"description": "OK"}}
+            path_item[method_value] = operation
+        return document
 
     async def import_json(self, project_id: UUID, payload: bytes, actor_id: UUID) -> ImportResult:
         """Импортирует данные атомарно: при ошибке откатывает всё."""

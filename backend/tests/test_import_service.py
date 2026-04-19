@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from app.enums import HostStatus
+from app.exceptions import ValidationError
 from app.services import ImportService
 
 
@@ -82,6 +83,49 @@ paths:
     assert "/health" in parsed["paths"]
 
 
+def test_load_json_or_yaml_document_supports_relaxed_swagger_text() -> None:
+    parsed = ImportService._load_json_or_yaml_document(
+        """
+{
+  swagger 2.0,
+  basePath v1,
+  paths {
+    users{userId} {
+      get {
+        tags [
+          users
+        ],
+        summary Get user,
+        parameters [
+          {
+            name verbose,
+            in query,
+            required false,
+            type string
+          }
+        ]
+      }
+    }
+  }
+}
+"""
+    )
+
+    assert parsed["swagger"] == "2.0"
+    assert parsed["basePath"] == "/v1"
+    assert "/users/{userId}" in parsed["paths"]
+
+
+def test_validate_openapi_payload_rejects_empty_bytes() -> None:
+    with pytest.raises(ValidationError, match="пуст"):
+        ImportService._validate_openapi_payload(b"")
+
+
+def test_validate_openapi_payload_rejects_oversized_bytes() -> None:
+    with pytest.raises(ValidationError, match="2 МБ"):
+        ImportService._validate_openapi_payload(b"a" * (2 * 1024 * 1024 + 1))
+
+
 def test_resolve_openapi_ref_supports_local_refs() -> None:
     document = {
         "paths": {
@@ -152,3 +196,185 @@ paths:
     assert result.errors
     assert existing_endpoint.description == "List users"
     db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_import_openapi_accepts_relaxed_swagger_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    project_id = uuid4()
+    host_id = uuid4()
+    actor_id = uuid4()
+    host = SimpleNamespace(id=host_id, hostname="current.local", ip_address=None)
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[host, None])
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    monkeypatch.setattr("app.services.AuditService.log", AsyncMock())
+    monkeypatch.setattr("app.services.ws_manager.broadcast", AsyncMock())
+    service = ImportService(db)
+
+    payload = b"""
+{
+  swagger 2.0,
+  basePath v1,
+  paths {
+    users{userId} {
+      get {
+        tags [
+          users
+        ],
+        summary Get user,
+        parameters [
+          {
+            name verbose,
+            in query,
+            required false,
+            type string
+          }
+        ]
+      }
+    }
+  }
+}
+"""
+
+    result = await service.import_openapi(project_id, host_id, payload, actor_id)
+
+    assert result.endpoints_created == 1
+    db.add.assert_called_once()
+    created_endpoint = db.add.call_args.args[0]
+    assert created_endpoint.path == "/v1/users/{userId}"
+    assert created_endpoint.method == "GET"
+
+
+def test_extract_openapi_request_details_handles_swagger2_body_with_definitions() -> None:
+    document = {
+        "swagger": "2.0",
+        "consumes": ["application/json"],
+        "definitions": {
+            "Pet": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "name": {"type": "string", "example": "doggie"},
+                    "status": {"type": "string", "enum": ["available", "sold"]},
+                },
+            }
+        },
+    }
+    operation = {
+        "parameters": [
+            {"name": "body", "in": "body", "required": True, "schema": {"$ref": "#/definitions/Pet"}}
+        ]
+    }
+
+    content_type, body = ImportService._extract_openapi_request_details(document, {}, operation)
+
+    assert content_type == "application/json"
+    assert body is not None
+    assert "doggie" in body
+    assert "available" in body
+
+
+def test_extract_openapi_request_details_handles_swagger2_form_data() -> None:
+    document = {"swagger": "2.0"}
+    operation = {
+        "consumes": ["application/x-www-form-urlencoded"],
+        "parameters": [
+            {"name": "name", "in": "formData", "type": "string", "example": "rex"},
+            {"name": "status", "in": "formData", "type": "string", "default": "available"},
+        ],
+    }
+
+    content_type, body = ImportService._extract_openapi_request_details(document, {}, operation)
+
+    assert content_type == "application/x-www-form-urlencoded"
+    assert body == "name=rex&status=available"
+
+
+@pytest.mark.asyncio
+async def test_import_openapi_skips_deprecated_operations(monkeypatch: pytest.MonkeyPatch) -> None:
+    project_id = uuid4()
+    host_id = uuid4()
+    actor_id = uuid4()
+    host = SimpleNamespace(id=host_id, hostname="api.local", ip_address=None)
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[host, None])
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    monkeypatch.setattr("app.services.AuditService.log", AsyncMock())
+    monkeypatch.setattr("app.services.ws_manager.broadcast", AsyncMock())
+    service = ImportService(db)
+
+    payload = b"""
+openapi: 3.0.0
+paths:
+  /pet/findByTags:
+    get:
+      summary: Finds Pets by tags
+      deprecated: true
+  /pet/findByStatus:
+    get:
+      summary: Finds Pets by status
+"""
+
+    result = await service.import_openapi(project_id, host_id, payload, actor_id)
+
+    assert result.endpoints_created == 1
+    assert any("deprecated" in error.lower() for error in result.errors)
+    created_endpoint = db.add.call_args.args[0]
+    assert created_endpoint.path == "/pet/findByStatus"
+
+
+@pytest.mark.asyncio
+async def test_export_openapi_builds_document_from_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    project_id = uuid4()
+    host_id = uuid4()
+    host = SimpleNamespace(id=host_id, hostname="api.local", ip_address=None)
+    endpoint = SimpleNamespace(
+        path="/pet/{petId}",
+        method=SimpleNamespace(value="GET"),
+        description="Find pet by ID",
+        query_params=[{"name": "verbose", "value": "true", "required": False, "description": "verbose mode"}],
+        request_body=None,
+        request_content_type=None,
+        request_headers=[{"name": "X-Trace", "value": "abc"}],
+    )
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=host)
+    scalars_result = MagicMock()
+    scalars_result.all.return_value = [endpoint]
+    db.scalars = AsyncMock(return_value=scalars_result)
+    service = ImportService(db)
+
+    document = await service.export_openapi(project_id, host_id)
+
+    assert document["openapi"] == "3.0.0"
+    assert document["info"]["title"] == "api.local"
+    operation = document["paths"]["/pet/{petId}"]["get"]
+    assert operation["summary"] == "Find pet by ID"
+    parameter_locations = {param["in"] for param in operation["parameters"]}
+    assert {"query", "header"} <= parameter_locations
+    assert any(p["name"] == "verbose" and p.get("example") == "true" for p in operation["parameters"])
+
+
+def test_extract_openapi_query_params_uses_default_or_enum_value() -> None:
+    document = {"swagger": "2.0"}
+    operation = {
+        "parameters": [
+            {
+                "name": "status",
+                "in": "query",
+                "type": "string",
+                "enum": ["available", "pending", "sold"],
+                "required": True,
+            },
+            {"name": "limit", "in": "query", "type": "integer", "default": 10},
+        ]
+    }
+
+    params = ImportService._extract_openapi_query_params(document, {}, operation)
+
+    assert {"name": "status", "value": "available", "required": True, "description": None} in params
+    assert {"name": "limit", "value": "10", "required": False, "description": None} in params

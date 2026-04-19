@@ -3,7 +3,6 @@ import EditIcon from "@mui/icons-material/Edit";
 import KeyIcon from "@mui/icons-material/Key";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import {
-  Alert,
   Avatar,
   Box,
   Button,
@@ -28,6 +27,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import { createUser, deleteUser, getApiErrorMessage, getUsers, resetUserPassword, updateUser } from "../api";
 import type { User, UserRole } from "../types";
+import { useErrorToast, useToastMessage } from "../useErrorToast";
 
 const ROLE_OPTIONS: Array<{ value: UserRole; label: string }> = [
   { value: "admin", label: "Администратор" },
@@ -66,6 +66,9 @@ export function UsersAdminPage() {
   const [editRole, setEditRole] = useState<UserRole>("pentester");
   const [editIsActive, setEditIsActive] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
+
+  useErrorToast(error);
+  useToastMessage(infoMessage, "success");
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
@@ -229,9 +232,6 @@ export function UsersAdminPage() {
 
   return (
     <Stack spacing={2.5}>
-      {error && <Alert severity="error">{error}</Alert>}
-      {infoMessage && <Alert severity="success">{infoMessage}</Alert>}
-
       <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} gap={1.5}>
         <Stack spacing={0.3}>
           <Typography variant="h4" fontWeight={700}>

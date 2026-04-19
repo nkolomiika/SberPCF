@@ -1,5 +1,6 @@
 import AddIcon from "@mui/icons-material/Add";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
+import CloseIcon from "@mui/icons-material/Close";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
@@ -7,7 +8,7 @@ import FlagIcon from "@mui/icons-material/Flag";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import {
-  Alert,
+  Avatar,
   Box,
   Button,
   Card,
@@ -28,18 +29,18 @@ import {
   MenuItem,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   createHost,
   createVulnerabilityComment,
   deleteHost,
   addProjectMember,
-  deleteVulnerability,
   deleteVulnerabilityComment,
-  deleteVulnerabilityFile,
   getApiErrorMessage,
   generateProjectReport,
   getEndpoints,
@@ -59,7 +60,7 @@ import {
   updateVulnerability,
   uploadVulnerabilityFile,
 } from "../api";
-import { calculateCvssScore } from "../cvss";
+import { calculateCvssScore, severityFromCvssScore } from "../cvss";
 import { PROJECT_STATUS_CHIP_SX, PROJECT_STATUS_LABELS, PROJECT_STATUS_ORDER } from "../projectStatus";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
@@ -77,9 +78,49 @@ import type {
   VulnerabilityComment,
   VulnerabilityDetails,
 } from "../types";
+import { useErrorToast } from "../useErrorToast";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const CVSS_VERSION = "4.0" as const;
+const UUID_PATH_SEGMENT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const normalizeEndpointDisplayPath = (pathValue: string): string => {
+  const raw = (pathValue || "/").trim().replace(/\/+/g, "/");
+  if (!raw || raw === "/") {
+    return "/";
+  }
+  const withSlash = raw.startsWith("/") ? raw : `/${raw}`;
+  const trimmed = withSlash.length > 1 && withSlash.endsWith("/") ? withSlash.slice(0, -1) || "/" : withSlash;
+  const segments = trimmed
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => (UUID_PATH_SEGMENT_RE.test(segment) ? "{UUID}" : segment));
+  return segments.length ? `/${segments.join("/")}` : "/";
+};
+
+const dedupeEndpointsByNormalizedPath = (endpoints: Endpoint[]): Endpoint[] => {
+  const deduped = new Map<string, Endpoint>();
+  for (const endpoint of endpoints) {
+    const normalizedPath = normalizeEndpointDisplayPath(endpoint.path);
+    const key = `${(endpoint.method || "GET").toUpperCase()} ${normalizedPath}`;
+    const candidate = { ...endpoint, path: normalizedPath };
+    const existing = deduped.get(key);
+    deduped.set(
+      key,
+      existing
+        ? {
+            ...existing,
+            description: existing.description || candidate.description,
+            query_params: existing.query_params?.length ? existing.query_params : candidate.query_params,
+            request_body: existing.request_body || candidate.request_body,
+            request_content_type: existing.request_content_type || candidate.request_content_type,
+            request_headers: existing.request_headers?.length ? existing.request_headers : candidate.request_headers,
+          }
+        : candidate
+    );
+  }
+  return Array.from(deduped.values());
+};
 
 const toDateInputValue = (date: Date) => {
   const year = date.getFullYear();
@@ -115,6 +156,7 @@ export function ProjectDetailPage() {
   const [hosts, setHosts] = useState<Host[]>([]);
   const [ports, setPorts] = useState<Port[]>([]);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
+  const normalizedEndpoints = useMemo(() => dedupeEndpointsByNormalizedPath(endpoints), [endpoints]);
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
@@ -131,6 +173,7 @@ export function ProjectDetailPage() {
   const [membersDialogOpen, setMembersDialogOpen] = useState(false);
   const [removeMembersDialogOpen, setRemoveMembersDialogOpen] = useState(false);
   const [selectedAvailableMemberIds, setSelectedAvailableMemberIds] = useState<string[]>([]);
+  const [memberSearchQuery, setMemberSearchQuery] = useState("");
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [membersBusy, setMembersBusy] = useState(false);
   const [hostStatsById, setHostStatsById] = useState<Record<string, HostTreeStats>>({});
@@ -169,14 +212,44 @@ export function ProjectDetailPage() {
   const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [vulnBusy, setVulnBusy] = useState(false);
+  const [vulnEditMode, setVulnEditMode] = useState(false);
   const [editCommentOpen, setEditCommentOpen] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingCommentContent, setEditingCommentContent] = useState("");
+  const [commentActionsAnchorEl, setCommentActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [activeComment, setActiveComment] = useState<VulnerabilityComment | null>(null);
 
-  const availableUsers = useMemo(
-    () => usersCatalog.filter((candidate) => !projectMembers.some((member) => member.user_id === candidate.id)),
-    [projectMembers, usersCatalog]
-  );
+  useErrorToast(error);
+
+  const membersDialogUsers = useMemo(() => {
+    const memberById = new Map(projectMembers.map((member) => [member.user_id, member]));
+    const catalogIds = new Set(usersCatalog.map((candidate) => candidate.id));
+    const mergedUsers = [
+      ...usersCatalog.map((candidate) => ({
+        id: candidate.id,
+        username: candidate.username,
+        email: candidate.email,
+        role: candidate.role,
+        inProject: memberById.has(candidate.id),
+      })),
+      ...projectMembers
+        .filter((member) => !catalogIds.has(member.user_id))
+        .map((member) => ({
+          id: member.user_id,
+          username: member.username,
+          email: member.email,
+          role: member.role,
+          inProject: true,
+        })),
+    ];
+    const normalizedQuery = memberSearchQuery.trim().toLowerCase();
+    return mergedUsers
+      .filter((candidate) => !normalizedQuery || candidate.username.toLowerCase().includes(normalizedQuery))
+      .sort(
+        (left, right) =>
+          Number(right.inProject) - Number(left.inProject) || left.username.localeCompare(right.username, "ru-RU")
+      );
+  }, [memberSearchQuery, projectMembers, usersCatalog]);
 
   const loadProjectData = useCallback(async () => {
     if (!projectId) {
@@ -482,24 +555,6 @@ export function ProjectDetailPage() {
   const selectedHost = hosts.find((host) => host.id === selectedHostId) ?? null;
   const hostLabel = selectedHost ? selectedHost.hostname || selectedHost.ip_address || "unknown-host" : "Хост не выбран";
 
-  useEffect(() => {
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-      body: JSON.stringify({
-        sessionId: "a74592",
-        runId: "vuln-card-pre",
-        hypothesisId: "H4",
-        location: "ProjectDetailPage.tsx:vuln-dialog-state",
-        message: "Project vulnerability dialog state changed",
-        data: { vulnDetailOpen, activeVulnId: activeVuln?.id ?? null, selectedHostId: selectedHostId ?? null },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-  }, [vulnDetailOpen, activeVuln?.id, selectedHostId]);
-
   const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
     if (!projectId) {
       return;
@@ -507,66 +562,15 @@ export function ProjectDetailPage() {
     setVulnBusy(true);
     setError(null);
     try {
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "vuln-card-pre",
-          hypothesisId: "H2",
-          location: "ProjectDetailPage.tsx:loadVulnerabilityDetails:start",
-          message: "Project vulnerability details load started",
-          data: { projectId, vulnerabilityId, selectedHostId: selectedHostId ?? null },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       const [vulnDetail, commentsPage] = await Promise.all([
         getVulnerability(projectId, vulnerabilityId),
         listVulnerabilityComments(projectId, vulnerabilityId),
       ]);
       setActiveVuln(vulnDetail);
       setVulnComments(commentsPage.items);
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "vuln-card-pre",
-          hypothesisId: "H4",
-          location: "ProjectDetailPage.tsx:loadVulnerabilityDetails:success",
-          message: "Project vulnerability details loaded",
-          data: { vulnerabilityId, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
+      setVulnEditMode(false);
       setVulnDetailOpen(true);
     } catch (error) {
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "vuln-card-pre",
-          hypothesisId: "H2",
-          location: "ProjectDetailPage.tsx:loadVulnerabilityDetails:error",
-          message: "Project vulnerability details load failed",
-          data: {
-            vulnerabilityId,
-            errorMessage: error instanceof Error ? error.message : "unknown",
-            responseStatus:
-              typeof error === "object" && error !== null && "response" in error
-                ? ((error as { response?: { status?: number } }).response?.status ?? null)
-                : null,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       setError(getApiErrorMessage(error, "Не удалось загрузить карточку уязвимости"));
     } finally {
       setVulnBusy(false);
@@ -595,27 +599,10 @@ export function ProjectDetailPage() {
         recommendations: activeVuln.recommendations || null,
       });
       setActiveVuln((prev) => (prev ? { ...prev, ...updated } : prev));
+      setVulnEditMode(false);
       await loadHostAssets();
     } catch (error) {
       setError(getApiErrorMessage(error, "Не удалось сохранить уязвимость"));
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const removeActiveVulnerability = async () => {
-    if (!projectId || !activeVuln) {
-      return;
-    }
-    setVulnBusy(true);
-    setError(null);
-    try {
-      await deleteVulnerability(projectId, activeVuln.id);
-      setVulnDetailOpen(false);
-      setActiveVuln(null);
-      await loadHostAssets();
-    } catch (error) {
-      setError(getApiErrorMessage(error, "Не удалось удалить уязвимость"));
     } finally {
       setVulnBusy(false);
     }
@@ -625,6 +612,7 @@ export function ProjectDetailPage() {
     const normalizedVersion = vector?.trim() ? CVSS_VERSION : null;
     const { score } = calculateCvssScore(normalizedVersion, vector);
     return {
+      severity: severityFromCvssScore(score),
       cvss_version: normalizedVersion,
       cvss_vector: vector,
       cvss_score: score,
@@ -686,51 +674,153 @@ export function ProjectDetailPage() {
     }
   };
 
+  const openCommentActionsMenu = (event: React.MouseEvent<HTMLElement>, comment: VulnerabilityComment) => {
+    setActiveComment(comment);
+    setCommentActionsAnchorEl(event.currentTarget);
+  };
+
+  const closeCommentActionsMenu = () => {
+    setCommentActionsAnchorEl(null);
+    setActiveComment(null);
+  };
+
+  const formatCommentTimestamp = (value: string): string =>
+    new Intl.DateTimeFormat("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(value));
+
   const renderCommentsSection = () => (
-    <Stack spacing={1.25} sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+    <Stack spacing={1.25}>
       <Typography variant="subtitle1" fontWeight={700}>
         Комментарии ({vulnComments.length})
       </Typography>
+      <List dense disablePadding>
+        {vulnComments.map((comment) => {
+          const canManageComment = user?.id === comment.user_id;
+          return (
+            <ListItem
+              key={comment.id}
+              alignItems="flex-start"
+              sx={{
+                mb: 2.5,
+                ...(canManageComment
+                  ? {
+                      "&:hover .comment-row-actions, &:focus-within .comment-row-actions": {
+                        opacity: 1,
+                        pointerEvents: "auto",
+                      },
+                    }
+                  : {}),
+              }}
+            >
+              <Stack spacing={0.75} sx={{ width: "100%" }}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2}>
+                  <Stack direction="row" alignItems="center" spacing={1.25} minWidth={0}>
+                    <Avatar
+                      src={comment.avatar_url || undefined}
+                      alt={comment.username}
+                      sx={{ width: 28, height: 28, fontSize: "0.8rem", bgcolor: "rgba(126,224,255,0.18)" }}
+                    >
+                      {comment.username.slice(0, 1).toUpperCase()}
+                    </Avatar>
+                    <Typography fontWeight={700} color="text.primary" noWrap>
+                      {comment.username}
+                    </Typography>
+                  </Stack>
+                  <Stack direction="row" alignItems="center" spacing={0} sx={{ flexShrink: 0 }}>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ whiteSpace: "nowrap", textAlign: "right", minWidth: "7.75rem", pr: 0.5 }}
+                    >
+                      {formatCommentTimestamp(comment.created_at)}
+                    </Typography>
+                    <Box sx={{ width: 36, display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
+                      {canManageComment ? (
+                        <IconButton
+                          className="comment-row-actions"
+                          size="small"
+                          onClick={(event) => openCommentActionsMenu(event, comment)}
+                          sx={{
+                            mr: -0.75,
+                            opacity: 0,
+                            pointerEvents: "none",
+                            transition: "opacity 0.15s ease",
+                            color: "rgba(148,163,184,0.85)",
+                            "&:hover": {
+                              color: "rgba(148,163,184,1)",
+                              backgroundColor: "rgba(126,224,255,0.06)",
+                            },
+                          }}
+                        >
+                          <MoreVertIcon fontSize="small" />
+                        </IconButton>
+                      ) : null}
+                    </Box>
+                  </Stack>
+                </Stack>
+                <Typography variant="body2" color="rgba(235,245,255,0.92)" sx={{ whiteSpace: "pre-wrap", pr: 1 }}>
+                  {comment.content}
+                </Typography>
+              </Stack>
+            </ListItem>
+          );
+        })}
+        {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
+      </List>
       <TextField
         label="Комментарий (@username только для участников проекта)"
         multiline
         minRows={3}
         value={newComment}
         onChange={(e) => setNewComment(e.target.value)}
-        helperText="Раздел вынесен выше, чтобы не теряться в длинной форме."
       />
-      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1}>
-        <Typography variant="caption" color="text.secondary">
-          Упоминания приходят только участникам текущего проекта.
-        </Typography>
-        <Button variant="contained" disabled={!newComment.trim()} onClick={() => void addCommentToActiveVuln()}>
+      <Stack direction="row" justifyContent="flex-end">
+        <Button variant="contained" disabled={!newComment.trim() || vulnBusy} onClick={() => void addCommentToActiveVuln()}>
           Добавить комментарий
         </Button>
       </Stack>
-      <List dense disablePadding>
-        {vulnComments.map((comment) => (
-          <ListItem
-            key={comment.id}
-            alignItems="flex-start"
-            secondaryAction={
-              user?.role === "admin" || user?.id === comment.user_id ? (
-                <Stack direction="row" spacing={0.5}>
-                  <IconButton size="small" onClick={() => openCommentEdit(comment)}>
-                    <EditIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
-                    <DeleteOutlineIcon fontSize="small" />
-                  </IconButton>
-                </Stack>
-              ) : null
+      <Menu
+        anchorEl={commentActionsAnchorEl}
+        open={Boolean(commentActionsAnchorEl)}
+        onClose={closeCommentActionsMenu}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            if (activeComment) {
+              openCommentEdit(activeComment);
             }
-          >
-            <ListItemText primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`} secondary={comment.content} />
-          </ListItem>
-        ))}
-        {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
-      </List>
+            closeCommentActionsMenu();
+          }}
+        >
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Редактировать
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (activeComment) {
+              void removeCommentFromActiveVuln(activeComment.id);
+            }
+            closeCommentActionsMenu();
+          }}
+        >
+          <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+          Удалить
+        </MenuItem>
+      </Menu>
     </Stack>
+  );
+
+  const renderMarkdownPreview = (value: string | null | undefined, emptyText: string) => (
+    <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+      {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
+    </Box>
   );
 
   const submitImport = async () => {
@@ -926,6 +1016,7 @@ export function ProjectDetailPage() {
     }
     setError(null);
     setSelectedAvailableMemberIds([]);
+    setMemberSearchQuery("");
     setMembersDialogOpen(true);
     if (user?.role !== "admin") {
       return;
@@ -1001,34 +1092,13 @@ export function ProjectDetailPage() {
 
   return (
     <Stack spacing={2.5}>
-      {error && <Alert severity="error">{error}</Alert>}
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Box>
           <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.4, fontWeight: 700 }}>
             Project Workspace
           </Typography>
-          <Stack direction={{ xs: "column", md: "row" }} spacing={1} alignItems={{ md: "center" }}>
-            <Typography variant="h4" fontWeight={700}>
-              {projectName ? `Проект: ${projectName}` : "Проект"}
-            </Typography>
-            <Chip size="small" label={PROJECT_STATUS_LABELS[projectStatus]} sx={PROJECT_STATUS_CHIP_SX[projectStatus]} />
-            {user?.role === "admin" && (
-              <IconButton
-                size="small"
-                onClick={openProjectEditDialog}
-                sx={{
-                  border: "1px solid rgba(126,224,255,0.18)",
-                  width: 32,
-                  height: 32,
-                  backgroundColor: "rgba(15,27,45,0.46)",
-                }}
-              >
-                <EditIcon fontSize="small" />
-              </IconButton>
-            )}
-          </Stack>
-          <Typography variant="body2" color="text.secondary" mt={0.5}>
-            Даты: {projectTimeMetrics.startLabel} - {projectTimeMetrics.endLabel}
+          <Typography variant="h4" fontWeight={700}>
+            {projectName ? `Проект: ${projectName}` : "Проект"}
           </Typography>
         </Box>
         <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", width: 42, height: 42, backgroundColor: "rgba(15,27,45,0.72)" }}>
@@ -1103,7 +1173,7 @@ export function ProjectDetailPage() {
           selectedSection={selectedSection}
           isCollapsed={isSidebarCollapsed}
           portsCount={ports.length}
-          endpointsCount={endpoints.length}
+          endpointsCount={normalizedEndpoints.length}
           vulnerabilitiesCount={vulnerabilities.length}
           hostStatsById={hostStatsById}
           autoExpandSelectedHost={false}
@@ -1467,7 +1537,7 @@ export function ProjectDetailPage() {
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Stack spacing={1.2}>
-                  {endpoints.map((endpoint) => (
+                  {normalizedEndpoints.map((endpoint) => (
                     <Box key={endpoint.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <Chip size="small" label={endpoint.method || "ANY"} />
@@ -1478,7 +1548,7 @@ export function ProjectDetailPage() {
                       </Typography>
                     </Box>
                   ))}
-                  {endpoints.length === 0 && (
+                  {normalizedEndpoints.length === 0 && (
                     <Typography color="text.secondary">Эндпоинты не добавлены. Выберите хост и добавьте первый эндпоинт.</Typography>
                   )}
                 </Stack>
@@ -1502,9 +1572,19 @@ export function ProjectDetailPage() {
               </Stack>
               <Stack spacing={1.2}>
                 {vulnerabilities.map((item) => (
-                    <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
-                      <Stack direction="row" justifyContent="space-between" alignItems="center">
-                    <Typography>{item.title}</Typography>
+                  <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
+                    <Stack spacing={1}>
+                      <Typography>{item.title}</Typography>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        {item.cwe_id && <Chip label={item.cwe_id} size="small" variant="outlined" />}
+                        {item.cvss_version && <Chip label={`CVSS ${item.cvss_version} ${item.cvss_score ?? "-"}`} size="small" variant="outlined" />}
+                        <Chip label={item.severity} size="small" sx={severityChipSx[item.severity]} />
+                        <Chip label={item.status} size="small" sx={vulnerabilityStatusChipSx[item.status]} />
+                      </Stack>
+                      <Typography color="text.secondary" variant="body2">
+                        {item.impact || "Влияние не указано"}
+                      </Typography>
+                      <Box>
                         <Button
                           size="small"
                           variant="outlined"
@@ -1519,10 +1599,7 @@ export function ProjectDetailPage() {
                         >
                           Открыть
                         </Button>
-                      </Stack>
-                      <Stack direction="row" spacing={1} mt={1} flexWrap="wrap">
-                        <Chip label={item.severity} size="small" sx={severityChipSx[item.severity]} />
-                        <Chip label={item.status} size="small" sx={vulnerabilityStatusChipSx[item.status]} />
+                      </Box>
                     </Stack>
                   </Box>
                 ))}
@@ -1680,7 +1757,15 @@ export function ProjectDetailPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={vulnDetailOpen} onClose={() => setVulnDetailOpen(false)} fullWidth maxWidth="lg">
+      <Dialog
+        open={vulnDetailOpen}
+        onClose={() => {
+          setVulnEditMode(false);
+          setVulnDetailOpen(false);
+        }}
+        fullWidth
+        maxWidth="lg"
+      >
         <DialogTitle>Карточка уязвимости</DialogTitle>
         <DialogContent>
           {!activeVuln ? (
@@ -1688,98 +1773,65 @@ export function ProjectDetailPage() {
           ) : (
             <Stack spacing={2} sx={{ mt: 0.5 }}>
               <Grid container spacing={2}>
-                <Grid size={{ xs: 12, md: 8 }}>
+                <Grid size={{ xs: 12, md: 7 }}>
                   <TextField
                     label="Название"
                     fullWidth
                     value={activeVuln.title}
                     onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, title: e.target.value } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, md: 2 }}>
-                  <TextField
-                    select
-                    label="Критичность"
-                    fullWidth
-                    value={activeVuln.severity}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, severity: e.target.value as Vulnerability["severity"] } : prev))}
-                  >
-                    <MenuItem value="critical">critical</MenuItem>
-                    <MenuItem value="high">high</MenuItem>
-                    <MenuItem value="medium">medium</MenuItem>
-                    <MenuItem value="low">low</MenuItem>
-                    <MenuItem value="info">info</MenuItem>
-                  </TextField>
-                </Grid>
-                <Grid size={{ xs: 12, md: 2 }}>
-                  <TextField
-                    select
-                    label="Статус"
-                    fullWidth
-                    value={activeVuln.status}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, status: e.target.value as Vulnerability["status"] } : prev))}
-                  >
-                    <MenuItem value="open">open</MenuItem>
-                    <MenuItem value="in_progress">in_progress</MenuItem>
-                    <MenuItem value="fixed">fixed</MenuItem>
-                    <MenuItem value="wont_fix">wont_fix</MenuItem>
-                    <MenuItem value="accepted_risk">accepted_risk</MenuItem>
-                  </TextField>
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Описание"
-                    fullWidth
-                    multiline
-                    minRows={3}
-                    value={activeVuln.description || ""}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, description: e.target.value || null } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  {renderCommentsSection()}
-                </Grid>
-                <Grid size={{ xs: 12, md: 3 }}>
-                  <TextField
-                    label="CVSS версия"
-                    fullWidth
-                    value={CVSS_VERSION}
-                    slotProps={{ input: { readOnly: true } }}
-                    helperText="Поддерживается только CVSS 4.0"
+                    slotProps={{ input: { readOnly: !vulnEditMode } }}
                   />
                 </Grid>
                 <Grid size={{ xs: 12, md: 3 }}>
-                  <TextField
-                    label="CVSS score"
-                    type="number"
-                    fullWidth
-                    value={activeVuln.cvss_score ?? ""}
-                    slotProps={{ input: { readOnly: true } }}
-                    helperText="Рассчитывается автоматически по версии и вектору"
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, md: 6 }}>
-                  <TextField
-                    label="CVSS vector"
-                    fullWidth
-                    value={activeVuln.cvss_vector || ""}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, ...buildAutoCvssFields(e.target.value || null) } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12 }}>
                   <TextField
                     label="CWE ID"
                     fullWidth
                     value={activeVuln.cwe_id || ""}
                     onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, cwe_id: e.target.value || null } : prev))}
+                    slotProps={{ input: { readOnly: !vulnEditMode } }}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12, md: 2 }}>
+                  {vulnEditMode ? (
+                    <TextField
+                      select
+                      label="Статус"
+                      fullWidth
+                      value={activeVuln.status}
+                      onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, status: e.target.value as Vulnerability["status"] } : prev))}
+                    >
+                      <MenuItem value="open">open</MenuItem>
+                      <MenuItem value="in_progress">in_progress</MenuItem>
+                      <MenuItem value="fixed">fixed</MenuItem>
+                      <MenuItem value="wont_fix">wont_fix</MenuItem>
+                      <MenuItem value="accepted_risk">accepted_risk</MenuItem>
+                    </TextField>
+                  ) : (
+                    <TextField label="Статус" fullWidth value={activeVuln.status} slotProps={{ input: { readOnly: true } }} />
+                  )}
+                </Grid>
+                <Grid size={{ xs: 12, md: 2 }}>
+                  <TextField label="CVSS score" type="number" fullWidth value={activeVuln.cvss_score ?? ""} slotProps={{ input: { readOnly: true } }} />
+                </Grid>
+                <Grid size={{ xs: 12, md: 2 }}>
+                  <TextField label="Критичность" fullWidth value={activeVuln.severity} slotProps={{ input: { readOnly: true } }} />
+                </Grid>
+                <Grid size={{ xs: 12, md: 8 }}>
+                  <TextField
+                    label="CVSS vector"
+                    fullWidth
+                    value={activeVuln.cvss_vector || ""}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, ...buildAutoCvssFields(e.target.value || null) } : prev))}
+                    slotProps={{ input: { readOnly: !vulnEditMode } }}
                   />
                 </Grid>
                 <Grid size={{ xs: 12 }}>
                   <VulnerabilityStagesEditor
                     stages={activeVuln.workflow_steps || []}
-                    endpoints={endpoints}
+                    endpoints={normalizedEndpoints}
                     hostLabel={selectedHost?.hostname || selectedHost?.ip_address || undefined}
                     busy={vulnBusy}
+                    editable={vulnEditMode}
                     onChange={(nextStages) =>
                       setActiveVuln((prev) =>
                         prev
@@ -1790,72 +1842,106 @@ export function ProjectDetailPage() {
                           : prev
                       )
                     }
-                    onUploadImage={async (stageId, file) => {
+                    onUploadImage={async (_stageId, file) => {
                       if (!projectId || !activeVuln) {
-                        return;
+                        return null;
                       }
                       try {
                         const uploadedFile = await uploadVulnerabilityFile(projectId, activeVuln.id, file);
-                        const nextWorkflowSteps = (activeVuln.workflow_steps || []).map((stage) =>
-                          stage.id === stageId ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] } : stage
+                        setActiveVuln((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                files: [uploadedFile, ...prev.files.filter((fileMeta) => fileMeta.id !== uploadedFile.id)],
+                              }
+                            : prev
                         );
-                        const updated = await updateVulnerability(projectId, activeVuln.id, { workflow_steps: nextWorkflowSteps });
-                        setActiveVuln((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
+                        return `![${uploadedFile.original_name}](/api/v1/files/${uploadedFile.id}/download)`;
                       } catch {
                         setError("Не удалось загрузить картинку этапа");
-                      }
-                    }}
-                    onRemoveImage={async (_stageId, fileId) => {
-                      if (!projectId || !activeVuln) {
-                        return;
-                      }
-                      try {
-                        await deleteVulnerabilityFile(projectId, activeVuln.id, fileId);
-                        const nextWorkflowSteps = (activeVuln.workflow_steps || []).map((stage) => ({
-                          ...stage,
-                          image_file_ids: stage.image_file_ids.filter((imageFileId) => imageFileId !== fileId),
-                        }));
-                        const updated = await updateVulnerability(projectId, activeVuln.id, { workflow_steps: nextWorkflowSteps });
-                        setActiveVuln((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
-                      } catch {
-                        setError("Не удалось удалить картинку этапа");
+                        return null;
                       }
                     }}
                   />
                 </Grid>
                 <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Влияние"
-                    fullWidth
-                    multiline
-                    minRows={2}
-                    value={activeVuln.impact || ""}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, impact: e.target.value || null } : prev))}
-                  />
+                  {vulnEditMode ? (
+                    <TextField
+                      label="Влияние"
+                      fullWidth
+                      multiline
+                      minRows={2}
+                      value={activeVuln.impact || ""}
+                      onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, impact: e.target.value || null } : prev))}
+                    />
+                  ) : (
+                    <>
+                      <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
+                        Влияние
+                      </Typography>
+                      {renderMarkdownPreview(activeVuln.impact, "Влияние не указано.")}
+                    </>
+                  )}
                 </Grid>
                 <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Рекомендации"
-                    fullWidth
-                    multiline
-                    minRows={2}
-                    value={activeVuln.recommendations || ""}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: e.target.value || null } : prev))}
-                  />
+                  {vulnEditMode ? (
+                    <TextField
+                      label="Рекомендации"
+                      fullWidth
+                      multiline
+                      minRows={2}
+                      value={activeVuln.recommendations || ""}
+                      onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: e.target.value || null } : prev))}
+                    />
+                  ) : (
+                    <>
+                      <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
+                        Рекомендации
+                      </Typography>
+                      {renderMarkdownPreview(activeVuln.recommendations, "Рекомендации не указаны.")}
+                    </>
+                  )}
                 </Grid>
+                {vulnEditMode && (
+                  <Grid size={{ xs: 12 }}>
+                    <Stack direction={{ xs: "column", sm: "row" }} justifyContent="flex-end" spacing={1.5}>
+                      <Button variant="outlined" onClick={() => activeVuln && void loadVulnerabilityDetails(activeVuln.id)}>
+                        Отменить
+                      </Button>
+                      <Button variant="contained" size="large" sx={{ minWidth: 180 }} onClick={() => void saveActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
+                        Сохранить
+                      </Button>
+                    </Stack>
+                  </Grid>
+                )}
               </Grid>
-
+              <Divider />
+              {renderCommentsSection()}
             </Stack>
           )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 3, pt: 1.5 }}>
-          <Button onClick={() => setVulnDetailOpen(false)}>Закрыть</Button>
-          <Button color="error" variant="outlined" onClick={() => void removeActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
-            Удалить
+          <Button
+            onClick={() => {
+              setVulnEditMode(false);
+              setVulnDetailOpen(false);
+            }}
+          >
+            Закрыть
           </Button>
-          <Button variant="contained" size="large" sx={{ minWidth: 180 }} onClick={() => void saveActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
-            Сохранить
-          </Button>
+          {!vulnEditMode && (
+            <Tooltip title="Редактировать">
+              <span>
+                <IconButton
+                  onClick={() => setVulnEditMode(true)}
+                  disabled={!activeVuln}
+                  sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                >
+                  <EditIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
         </DialogActions>
       </Dialog>
 
@@ -1952,17 +2038,43 @@ export function ProjectDetailPage() {
       </Dialog>
 
       <Dialog open={membersDialogOpen} onClose={() => setMembersDialogOpen(false)} fullWidth maxWidth="md">
-        <DialogTitle>Добавить пользователей в проект</DialogTitle>
+        <DialogTitle sx={{ pr: 6 }}>
+          Добавить пользователей в проект
+          <IconButton
+            aria-label="Закрыть"
+            onClick={() => setMembersDialogOpen(false)}
+            sx={{ position: "absolute", right: 8, top: 8 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             {user?.role === "admin" && (
               <>
+                <TextField
+                  label="Поиск по username"
+                  value={memberSearchQuery}
+                  onChange={(event) => setMemberSearchQuery(event.target.value)}
+                  placeholder="Например, alice"
+                  fullWidth
+                />
                 <Typography variant="subtitle2" color="text.secondary">
-                  Выберите пользователей для добавления
+                  Отмеченные пользователи уже состоят в проекте
                 </Typography>
-                <List dense disablePadding>
-                  {availableUsers.map((candidate) => {
-                    const checked = selectedAvailableMemberIds.includes(candidate.id);
+                <List
+                  dense
+                  disablePadding
+                  sx={{
+                    maxHeight: 360,
+                    overflowY: "auto",
+                    border: "1px solid rgba(126,224,255,0.12)",
+                    backgroundColor: "rgba(8,17,31,0.2)",
+                    px: 1,
+                  }}
+                >
+                  {membersDialogUsers.map((candidate) => {
+                    const checked = candidate.inProject || selectedAvailableMemberIds.includes(candidate.id);
                     return (
                       <ListItem
                         key={candidate.id}
@@ -1970,6 +2082,17 @@ export function ProjectDetailPage() {
                           <Checkbox
                             edge="end"
                             checked={checked}
+                            disabled={candidate.inProject}
+                            sx={
+                              candidate.inProject
+                                ? {
+                                    color: "primary.main",
+                                    "&.Mui-checked": {
+                                      color: "primary.main",
+                                    },
+                                  }
+                                : undefined
+                            }
                             onChange={(event) =>
                               setSelectedAvailableMemberIds((prev) =>
                                 event.target.checked ? [...prev, candidate.id] : prev.filter((item) => item !== candidate.id)
@@ -1978,11 +2101,18 @@ export function ProjectDetailPage() {
                           />
                         }
                       >
-                        <ListItemText primary={`${candidate.username} (${candidate.role})`} secondary={candidate.email} />
+                        <ListItemText
+                          primary={`${candidate.username} (${candidate.role})`}
+                          secondary={candidate.inProject ? `${candidate.email} • уже в проекте` : candidate.email}
+                        />
                       </ListItem>
                     );
                   })}
-                  {availableUsers.length === 0 && <Typography color="text.secondary">Свободных пользователей для добавления нет.</Typography>}
+                  {membersDialogUsers.length === 0 && (
+                    <Typography color="text.secondary" sx={{ px: 1, py: 1.5 }}>
+                      Пользователи по этому запросу не найдены.
+                    </Typography>
+                  )}
                 </List>
                 <Stack direction="row" justifyContent="flex-end">
                   <Button variant="contained" disabled={selectedAvailableMemberIds.length === 0 || membersBusy} onClick={() => void addMembersToProject()}>
@@ -1991,23 +2121,8 @@ export function ProjectDetailPage() {
                 </Stack>
               </>
             )}
-
-            <Typography variant="subtitle2" color="text.secondary">
-              Уже в проекте
-            </Typography>
-            <List dense disablePadding>
-              {projectMembers.map((member) => (
-                <ListItem key={member.user_id}>
-                  <ListItemText primary={`${member.username} (${member.role})`} secondary={member.email} />
-                </ListItem>
-              ))}
-              {projectMembers.length === 0 && <Typography color="text.secondary">Участники пока не добавлены.</Typography>}
-            </List>
           </Stack>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setMembersDialogOpen(false)}>Закрыть</Button>
-        </DialogActions>
       </Dialog>
 
       <Dialog open={removeMembersDialogOpen} onClose={() => setRemoveMembersDialogOpen(false)} fullWidth maxWidth="md">

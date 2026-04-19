@@ -1,9 +1,10 @@
 import PhotoCameraIcon from "@mui/icons-material/PhotoCamera";
-import { Alert, Avatar, Box, Button, Card, CardContent, Chip, Stack, TextField, Typography } from "@mui/material";
+import { Avatar, Box, Button, Card, CardContent, Chip, Stack, TextField, Typography } from "@mui/material";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { changeMyPassword, getApiErrorMessage, updateMyProfile, uploadMyAvatar } from "../api";
 import { useAuthStore } from "../store";
+import { useErrorToast, useToastMessage } from "../useErrorToast";
 
 export function ProfilePage() {
   const user = useAuthStore((s) => s.user);
@@ -24,6 +25,9 @@ export function ProfilePage() {
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+
+  useErrorToast(error);
+  useToastMessage(infoMessage, "success");
 
   useEffect(() => {
     if (!user) {
@@ -201,8 +205,6 @@ export function ProfilePage() {
 
   return (
     <Stack spacing={2.5}>
-      {error && <Alert severity="error">{error}</Alert>}
-      {infoMessage && <Alert severity="success">{infoMessage}</Alert>}
       <Stack spacing={0.5}>
         <Typography variant="h4" fontWeight={700}>
           Профиль

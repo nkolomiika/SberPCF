@@ -1,7 +1,9 @@
 import asyncio
 import json
+import socket
 from datetime import UTC, datetime
-from urllib import request as urllib_request
+from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import aio_pika
@@ -13,26 +15,22 @@ from app.mail import send_plain_text_email
 from app.models import MailJob
 
 settings = get_settings()
+DEBUG_LOG_PATH = Path("/workspace/debug-755228.log")
 
 
-def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
     payload = {
-        "sessionId": "a74592",
-        "runId": run_id,
+        "sessionId": "755228",
+        "runId": "mail-worker-connect",
         "hypothesisId": hypothesis_id,
         "location": location,
         "message": message,
         "data": data,
         "timestamp": int(datetime.now(UTC).timestamp() * 1000),
     }
-    req = urllib_request.Request(
-        "http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "X-Debug-Session-Id": "a74592"},
-        method="POST",
-    )
     try:
-        urllib_request.urlopen(req, timeout=2).read()
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -100,48 +98,83 @@ async def main() -> None:
     if not settings.mail_enabled:
         while True:
             await asyncio.sleep(60)
+    parsed_rabbitmq_url = urlsplit(settings.rabbitmq_url)
+    attempt = 0
+    # region agent log
+    _debug_log(
+        "H2",
+        "backend/app/worker/mail_worker.py:main:init",
+        "Mail worker startup settings",
+        {
+            "mail_enabled": settings.mail_enabled,
+            "queue_name": settings.mail_queue_name,
+            "rabbitmq_scheme": parsed_rabbitmq_url.scheme,
+            "rabbitmq_host": parsed_rabbitmq_url.hostname,
+            "rabbitmq_port": parsed_rabbitmq_url.port or 5672,
+            "rabbitmq_vhost": parsed_rabbitmq_url.path or "/",
+        },
+    )
+    # endregion
     while True:
         try:
-            # #region agent log
+            attempt += 1
+            resolved_addresses = sorted(
+                {
+                    item[4][0]
+                    for item in socket.getaddrinfo(
+                        parsed_rabbitmq_url.hostname or "rabbitmq",
+                        parsed_rabbitmq_url.port or 5672,
+                        type=socket.SOCK_STREAM,
+                    )
+                }
+            )
+            # region agent log
             _debug_log(
-                run_id="mail-worker-broker",
-                hypothesis_id="H2",
-                location="mail_worker.py:main:connect_start",
-                message="Mail worker attempting broker connection",
-                data={
-                    "mail_enabled": settings.mail_enabled,
-                    "rabbitmq_url": settings.rabbitmq_url,
-                    "mail_queue_name": settings.mail_queue_name,
+                "H1",
+                "backend/app/worker/mail_worker.py:main:before_connect",
+                "Attempting RabbitMQ connection",
+                {
+                    "attempt": attempt,
+                    "rabbitmq_host": parsed_rabbitmq_url.hostname,
+                    "rabbitmq_port": parsed_rabbitmq_url.port or 5672,
+                    "resolved_addresses": resolved_addresses,
                 },
             )
-            # #endregion
+            # endregion
             connection = await aio_pika.connect_robust(settings.rabbitmq_url)
             async with connection:
                 channel = await connection.channel()
                 await channel.set_qos(prefetch_count=10)
                 queue = await channel.declare_queue(settings.mail_queue_name, durable=True)
-                # #region agent log
+                # region agent log
                 _debug_log(
-                    run_id="mail-worker-broker",
-                    hypothesis_id="H3",
-                    location="mail_worker.py:main:connect_success",
-                    message="Mail worker connected to broker",
-                    data={"mail_queue_name": queue.name},
+                    "H1",
+                    "backend/app/worker/mail_worker.py:main:connected",
+                    "RabbitMQ connection established",
+                    {
+                        "attempt": attempt,
+                        "queue_name": queue.name,
+                    },
                 )
-                # #endregion
+                # endregion
                 relay_task = asyncio.create_task(relay_pending_jobs(channel, queue.name))
                 consumer_task = asyncio.create_task(consume_mail_jobs(queue))
                 await asyncio.gather(relay_task, consumer_task)
         except Exception as exc:
-            # #region agent log
+            # region agent log
             _debug_log(
-                run_id="mail-worker-broker",
-                hypothesis_id="H3",
-                location="mail_worker.py:main:connect_error",
-                message="Mail worker broker connection failed",
-                data={"error_type": type(exc).__name__, "error_message": str(exc)},
+                "H3",
+                "backend/app/worker/mail_worker.py:main:connect_error",
+                "RabbitMQ connection failed",
+                {
+                    "attempt": attempt,
+                    "exception_type": type(exc).__name__,
+                    "exception": str(exc),
+                    "rabbitmq_host": parsed_rabbitmq_url.hostname,
+                    "rabbitmq_port": parsed_rabbitmq_url.port or 5672,
+                },
             )
-            # #endregion
+            # endregion
             await asyncio.sleep(5)
 
 

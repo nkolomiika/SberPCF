@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
   AppBar,
   Avatar,
   Badge,
@@ -32,7 +33,7 @@ import type { PaletteMode } from "@mui/material";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { listNotifications, markNotificationRead, unreadCount } from "./api";
 import type { Notification } from "./types";
-import { useAuthStore } from "./store";
+import { useAuthStore, useToastStore } from "./store";
 import { ForceChangePasswordPage } from "./pages/ForceChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { HostDetailPage } from "./pages/HostDetailPage";
@@ -46,11 +47,62 @@ type PrivateLayoutProps = {
   themeMode: PaletteMode;
 };
 
+function GlobalToastHost() {
+  const toasts = useToastStore((state) => state.toasts);
+  const dismissToast = useToastStore((state) => state.dismissToast);
+
+  useEffect(() => {
+    if (toasts.length === 0) {
+      return;
+    }
+    const timers = toasts.map((toast) =>
+      window.setTimeout(() => {
+        dismissToast(toast.id);
+      }, 15000)
+    );
+    return () => {
+      timers.forEach((timerId) => window.clearTimeout(timerId));
+    };
+  }, [toasts, dismissToast]);
+
+  if (toasts.length === 0) {
+    return null;
+  }
+
+  return (
+    <Box
+      sx={{
+        position: "fixed",
+        right: { xs: 12, sm: 24 },
+        bottom: { xs: 12, sm: 24 },
+        zIndex: (theme) => theme.zIndex.snackbar,
+        display: "flex",
+        flexDirection: "column",
+        gap: 1.5,
+        pointerEvents: "none",
+      }}
+    >
+      {toasts.map((toast) => (
+        <Alert
+          key={toast.id}
+          severity={toast.severity}
+          variant="filled"
+          onClose={() => dismissToast(toast.id)}
+          sx={{ minWidth: 320, maxWidth: 520, alignItems: "center", boxShadow: 4, pointerEvents: "auto" }}
+        >
+          {toast.message}
+        </Alert>
+      ))}
+    </Box>
+  );
+}
+
 function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
+  const pushToast = useToastStore((s) => s.pushToast);
   const [count, setCount] = useState<number>(0);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -100,6 +152,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${window.location.host}/ws/notifications`);
     socket.onmessage = () => {
+      pushToast("Новое уведомление", "info");
       void loadUnreadNotifications();
       if (notificationsOpen) {
         void loadNotificationsList();
@@ -108,7 +161,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     return () => {
       socket.close();
     };
-  }, [isPasswordChangeLocked, loadNotificationsList, loadUnreadNotifications, notificationsOpen, user]);
+  }, [isPasswordChangeLocked, loadNotificationsList, loadUnreadNotifications, notificationsOpen, pushToast, user]);
 
   const openNotifications = async (event: React.MouseEvent<HTMLElement>) => {
     if (isPasswordChangeLocked) {
@@ -466,9 +519,15 @@ export default function App({ themeMode }: AppProps) {
   }
 
   return (
-    <Routes>
-      <Route path="/login" element={user ? <Navigate to={user.must_change_password ? "/force-change-password" : "/"} replace /> : <LoginPage />} />
-      <Route path="/*" element={<PrivateLayout themeMode={themeMode} />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route
+          path="/login"
+          element={user ? <Navigate to={user.must_change_password ? "/force-change-password" : "/"} replace /> : <LoginPage />}
+        />
+        <Route path="/*" element={<PrivateLayout themeMode={themeMode} />} />
+      </Routes>
+      <GlobalToastHost />
+    </>
   );
 }
