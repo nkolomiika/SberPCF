@@ -12,8 +12,8 @@ export function LoginPage() {
     const [password, setPassword] = useState("admin");
     const handleSubmit = async (event) => {
         event.preventDefault();
-        await signIn(username, password);
-        navigate("/");
+        const currentUser = await signIn(username, password);
+        navigate(currentUser.must_change_password ? "/force-change-password" : "/");
     };
     return (_jsx(Box, { display: "flex", minHeight: "100vh", alignItems: "center", justifyContent: "center", sx: {
             p: 2,

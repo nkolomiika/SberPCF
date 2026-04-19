@@ -33,7 +33,8 @@ api.interceptors.response.use((response) => response, async (error) => {
     return Promise.reject(error);
 });
 export async function login(username, password) {
-    await api.post("/auth/login", { username, password });
+    const { data } = await api.post("/auth/login", { username, password });
+    return data;
 }
 export async function logout() {
     await api.post("/auth/logout");
@@ -54,11 +55,32 @@ export async function updateUser(userId, payload) {
     const { data } = await api.put(`/users/${userId}`, payload);
     return data;
 }
-export async function resetUserPassword(userId, newPassword) {
-    await api.patch(`/users/${userId}/password`, { new_password: newPassword });
+export async function resetUserPassword(userId) {
+    const { data } = await api.patch(`/users/${userId}/password`);
+    return data;
 }
 export async function deleteUser(userId) {
     await api.delete(`/users/${userId}`);
+}
+export async function updateMyProfile(payload) {
+    const { data } = await api.patch("/users/me", payload);
+    return data;
+}
+export async function changeMyPassword(payload) {
+    const { data } = await api.patch("/users/me/password", payload);
+    return data;
+}
+export async function forceChangePassword(newPassword) {
+    const { data } = await api.post("/auth/force-change-password", { new_password: newPassword });
+    return data;
+}
+export async function uploadMyAvatar(file) {
+    const formData = new FormData();
+    formData.append("avatar", file);
+    const { data } = await api.post("/users/me/avatar", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+    });
+    return data;
 }
 export async function getProjects(page = 1, size = 20, status) {
     const { data } = await api.get("/projects", { params: { page, size, status } });

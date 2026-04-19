@@ -21,6 +21,7 @@ export const useAuthStore = create((set) => ({
             await login(username, password);
             const me = await getMe();
             set({ user: me, isLoading: false });
+            return me;
         }
         catch {
             set({ error: "Не удалось выполнить вход", isLoading: false });
@@ -30,5 +31,17 @@ export const useAuthStore = create((set) => ({
     signOut: async () => {
         await logout();
         set({ user: null });
+    },
+    setUser: (user) => set({ user }),
+    refreshUser: async () => {
+        try {
+            const me = await getMe();
+            set({ user: me });
+            return me;
+        }
+        catch {
+            set({ user: null });
+            return null;
+        }
     },
 }));

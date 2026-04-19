@@ -7,17 +7,21 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import HistoryIcon from "@mui/icons-material/History";
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { listNotifications, unreadCount } from "./api";
 import { useAuthStore } from "./store";
+import { ForceChangePasswordPage } from "./pages/ForceChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
+import { ProfilePage } from "./pages/ProfilePage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { UsersAdminPage } from "./pages/UsersAdminPage";
 function PrivateLayout({ themeMode }) {
     const navigate = useNavigate();
+    const location = useLocation();
     const user = useAuthStore((s) => s.user);
     const signOut = useAuthStore((s) => s.signOut);
     const [count, setCount] = useState(0);
@@ -29,6 +33,12 @@ function PrivateLayout({ themeMode }) {
         const unread = await unreadCount();
         setCount(unread);
     }, []);
+    const loadNotificationsList = useCallback(async () => {
+        const response = await listNotifications();
+        setNotifications(response.items);
+    }, []);
+    const notificationsOpen = Boolean(notificationsAnchorEl);
+    const profileMenuOpen = Boolean(profileAnchorEl);
     useEffect(() => {
         void loadUnreadNotifications();
         const intervalId = window.setInterval(() => {
@@ -38,12 +48,27 @@ function PrivateLayout({ themeMode }) {
             window.clearInterval(intervalId);
         };
     }, [loadUnreadNotifications]);
+    useEffect(() => {
+        if (!user) {
+            return;
+        }
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        const socket = new WebSocket(`${protocol}://${window.location.host}/ws/notifications`);
+        socket.onmessage = () => {
+            void loadUnreadNotifications();
+            if (notificationsOpen) {
+                void loadNotificationsList();
+            }
+        };
+        return () => {
+            socket.close();
+        };
+    }, [loadNotificationsList, loadUnreadNotifications, notificationsOpen, user]);
     const openNotifications = async (event) => {
         setNotificationsAnchorEl(event.currentTarget);
         setNotificationsLoading(true);
         try {
-            const response = await listNotifications();
-            setNotifications(response.items);
+            await loadNotificationsList();
             await loadUnreadNotifications();
         }
         finally {
@@ -53,8 +78,6 @@ function PrivateLayout({ themeMode }) {
     const closeNotifications = () => {
         setNotificationsAnchorEl(null);
     };
-    const notificationsOpen = Boolean(notificationsAnchorEl);
-    const profileMenuOpen = Boolean(profileAnchorEl);
     const openProfileMenu = (event) => {
         setProfileAnchorEl(event.currentTarget);
     };
@@ -63,6 +86,9 @@ function PrivateLayout({ themeMode }) {
     };
     if (!user) {
         return _jsx(Navigate, { to: "/login", replace: true });
+    }
+    if (user.must_change_password && location.pathname !== "/force-change-password") {
+        return _jsx(Navigate, { to: "/force-change-password", replace: true });
     }
     const roleLabel = user.role === "admin" ? "Администратор" : user.role === "developer" ? "Разработчик" : "Пентестер";
     return (_jsxs(Box, { sx: {
@@ -106,13 +132,16 @@ function PrivateLayout({ themeMode }) {
                                             "&:hover": {
                                                 backgroundColor: "rgba(20,36,58,0.92)",
                                             },
-                                        }, children: _jsxs(Stack, { direction: "row", spacing: 1.2, alignItems: "center", justifyContent: "flex-end", sx: { width: "100%" }, children: [_jsx(Avatar, { sx: { width: 30, height: 30, bgcolor: "primary.main" }, children: user.username[0]?.toUpperCase() }), _jsxs(Stack, { spacing: 0, sx: { flex: 1, minWidth: 0 }, children: [_jsx(Typography, { color: "text.primary", textAlign: "right", noWrap: true, children: user.username }), _jsx(Typography, { variant: "caption", color: "text.secondary", textAlign: "right", noWrap: true, children: roleLabel })] }), _jsx(KeyboardArrowDownIcon, { fontSize: "small", sx: { color: "text.secondary" } })] }) })] })] }) }) }), _jsxs(Menu, { anchorEl: profileAnchorEl, open: profileMenuOpen, onClose: closeProfileMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, slotProps: {
+                                        }, children: _jsxs(Stack, { direction: "row", spacing: 1.2, alignItems: "center", justifyContent: "flex-end", sx: { width: "100%" }, children: [_jsx(Avatar, { src: user.avatar_url ?? undefined, sx: { width: 30, height: 30, bgcolor: "primary.main" }, children: (user.full_name || user.username)[0]?.toUpperCase() }), _jsxs(Stack, { spacing: 0, sx: { flex: 1, minWidth: 0 }, children: [_jsx(Typography, { color: "text.primary", textAlign: "right", noWrap: true, children: user.full_name || user.username }), _jsx(Typography, { variant: "caption", color: "text.secondary", textAlign: "right", noWrap: true, children: roleLabel })] }), _jsx(KeyboardArrowDownIcon, { fontSize: "small", sx: { color: "text.secondary" } })] }) })] })] }) }) }), _jsxs(Menu, { anchorEl: profileAnchorEl, open: profileMenuOpen, onClose: closeProfileMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, slotProps: {
                     paper: {
                         sx: {
-                            width: 220,
+                            width: profileAnchorEl?.clientWidth ?? 220,
                         },
                     },
                 }, children: [_jsxs(MenuItem, { onClick: () => {
+                            navigate("/profile");
+                            closeProfileMenu();
+                        }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(PersonOutlineIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u041F\u0440\u043E\u0444\u0438\u043B\u044C" })] }), _jsxs(MenuItem, { onClick: () => {
                             navigate("/");
                             closeProfileMenu();
                         }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(HomeIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0414\u043E\u043C\u043E\u0439" })] }), user.role === "admin" && (_jsxs(MenuItem, { onClick: () => {
@@ -130,11 +159,11 @@ function PrivateLayout({ themeMode }) {
                     py: { xs: 2.5, md: 3.5 },
                     px: { xs: 2, md: 3 },
                     maxWidth: "min(1800px, 100vw)",
-                }, children: _jsxs(Routes, { children: [_jsx(Route, { path: "/", element: _jsx(Paper, { sx: {
+                }, children: _jsxs(Routes, { children: [_jsx(Route, { path: "/force-change-password", element: _jsx(ForceChangePasswordPage, {}) }), _jsx(Route, { path: "/", element: _jsx(Paper, { sx: {
                                     p: { xs: 2, md: 3 },
                                     borderRadius: 0,
                                     backgroundColor: themeMode === "dark" ? "rgba(15,27,45,0.78)" : "rgba(255,255,255,0.8)",
-                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/users", element: user.role === "admin" ? _jsx(UsersAdminPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "/audit-logs", element: user.role === "admin" ? _jsx(AuditLogsPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
+                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/profile", element: _jsx(ProfilePage, {}) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/users", element: user.role === "admin" ? _jsx(UsersAdminPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "/audit-logs", element: user.role === "admin" ? _jsx(AuditLogsPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
 }
 export default function App({ themeMode }) {
     const initialize = useAuthStore((s) => s.initialize);
@@ -146,5 +175,5 @@ export default function App({ themeMode }) {
     if (!isInitialized) {
         return (_jsx(Box, { display: "flex", minHeight: "100vh", alignItems: "center", justifyContent: "center", children: _jsx(CircularProgress, {}) }));
     }
-    return (_jsxs(Routes, { children: [_jsx(Route, { path: "/login", element: user ? _jsx(Navigate, { to: "/", replace: true }) : _jsx(LoginPage, {}) }), _jsx(Route, { path: "/*", element: _jsx(PrivateLayout, { themeMode: themeMode }) })] }));
+    return (_jsxs(Routes, { children: [_jsx(Route, { path: "/login", element: user ? _jsx(Navigate, { to: user.must_change_password ? "/force-change-password" : "/", replace: true }) : _jsx(LoginPage, {}) }), _jsx(Route, { path: "/*", element: _jsx(PrivateLayout, { themeMode: themeMode }) })] }));
 }

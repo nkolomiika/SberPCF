@@ -1,20 +1,26 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
 import DeleteIcon from "@mui/icons-material/Delete";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditIcon from "@mui/icons-material/Edit";
 import AddIcon from "@mui/icons-material/Add";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
-import { Alert, Box, Button, Card, CardContent, Chip, Collapse, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Grid2 as Grid, IconButton, Menu, MenuItem, Stack, TextField, Tooltip, Typography, } from "@mui/material";
-import { useCallback, useEffect, useState } from "react";
+import { Alert, Box, Button, Card, CardContent, Chip, Collapse, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Grid2 as Grid, IconButton, List, ListItem, ListItemText, Menu, MenuItem, Stack, TextField, Tooltip, Typography, } from "@mui/material";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { load as parseYaml } from "js-yaml";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
-import { createHost, createEndpoint, createPort, createService, createVulnerability, deleteEndpoint, deleteHost, deletePort, deleteService, deleteVulnerability, getServices, getHost, getHosts, getHostVulnerabilities, updateEndpoint, updateHost, updatePort, updateService, updateVulnerability, } from "../api";
+import { addVulnerabilityAsset, createHost, createVulnerabilityComment, createEndpoint, createPort, createService, createVulnerability, deleteVulnerabilityAsset, deleteVulnerabilityComment, deleteVulnerabilityFile, deleteEndpoint, deleteHost, deletePort, deleteService, deleteVulnerability, getVulnerability, getServices, getHost, getHosts, getHostVulnerabilities, listVulnerabilityComments, listVulnerabilityFiles, updateEndpoint, updateHost, updatePort, updateService, updateVulnerabilityComment, updateVulnerability, uploadVulnerabilityFile, } from "../api";
 import { ProjectTreeNav } from "../components/ProjectTreeNav";
+import { useAuthStore } from "../store";
 export function HostDetailPage() {
     const { projectId, hostId } = useParams();
     const navigate = useNavigate();
+    const user = useAuthStore((s) => s.user);
+    const storagePrefix = projectId && hostId ? `host-detail:${projectId}:${hostId}` : null;
     const [host, setHost] = useState(null);
     const [hosts, setHosts] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -69,6 +75,13 @@ export function HostDetailPage() {
     const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
     const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState("medium");
     const [creatingVulnerabilityStatus, setCreatingVulnerabilityStatus] = useState("open");
+    const [creatingVulnerabilityCvssVersion, setCreatingVulnerabilityCvssVersion] = useState("");
+    const [creatingVulnerabilityCvssScore, setCreatingVulnerabilityCvssScore] = useState("");
+    const [creatingVulnerabilityCvssVector, setCreatingVulnerabilityCvssVector] = useState("");
+    const [creatingVulnerabilityCweId, setCreatingVulnerabilityCweId] = useState("");
+    const [creatingVulnerabilitySteps, setCreatingVulnerabilitySteps] = useState("");
+    const [creatingVulnerabilityImpact, setCreatingVulnerabilityImpact] = useState("");
+    const [creatingVulnerabilityRecommendations, setCreatingVulnerabilityRecommendations] = useState("");
     const [hostActionsAnchorEl, setHostActionsAnchorEl] = useState(null);
     const [isEditHostOpen, setEditHostOpen] = useState(false);
     const [editingHostIp, setEditingHostIp] = useState("");
@@ -84,6 +97,17 @@ export function HostDetailPage() {
     const [expandedPortIds, setExpandedPortIds] = useState([]);
     const [expandedEndpointIds, setExpandedEndpointIds] = useState([]);
     const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState([]);
+    const [vulnDetailOpen, setVulnDetailOpen] = useState(false);
+    const [activeVulnDetails, setActiveVulnDetails] = useState(null);
+    const [vulnFiles, setVulnFiles] = useState([]);
+    const [vulnComments, setVulnComments] = useState([]);
+    const [linkAssetType, setLinkAssetType] = useState("host");
+    const [linkAssetId, setLinkAssetId] = useState("");
+    const [newComment, setNewComment] = useState("");
+    const [vulnBusy, setVulnBusy] = useState(false);
+    const [editCommentOpen, setEditCommentOpen] = useState(false);
+    const [editingCommentId, setEditingCommentId] = useState(null);
+    const [editingCommentContent, setEditingCommentContent] = useState("");
     const loadHost = useCallback(async () => {
         if (!projectId || !hostId) {
             return;
@@ -155,6 +179,31 @@ export function HostDetailPage() {
             socket.close();
         };
     }, [loadHost, projectId]);
+    useEffect(() => {
+        if (!storagePrefix) {
+            return;
+        }
+        const storedSection = window.localStorage.getItem(`${storagePrefix}:selectedSection`);
+        const storedCollapsed = window.localStorage.getItem(`${storagePrefix}:sidebarCollapsed`);
+        if (storedSection) {
+            setSelectedSection(storedSection);
+        }
+        if (storedCollapsed) {
+            setSidebarCollapsed(storedCollapsed === "1");
+        }
+    }, [storagePrefix]);
+    useEffect(() => {
+        if (!storagePrefix) {
+            return;
+        }
+        window.localStorage.setItem(`${storagePrefix}:selectedSection`, selectedSection);
+    }, [selectedSection, storagePrefix]);
+    useEffect(() => {
+        if (!storagePrefix) {
+            return;
+        }
+        window.localStorage.setItem(`${storagePrefix}:sidebarCollapsed`, isSidebarCollapsed ? "1" : "0");
+    }, [isSidebarCollapsed, storagePrefix]);
     useEffect(() => {
         const loadServices = async () => {
             if (!projectId || !hostId || !host?.ports.length) {
@@ -757,13 +806,337 @@ export function HostDetailPage() {
             description: creatingVulnerabilityDescription.trim() || undefined,
             severity: creatingVulnerabilitySeverity,
             status: creatingVulnerabilityStatus,
+            cvss_version: creatingVulnerabilityCvssVersion || undefined,
+            cvss_score: creatingVulnerabilityCvssScore === "" ? undefined : Number(creatingVulnerabilityCvssScore),
+            cvss_vector: creatingVulnerabilityCvssVector.trim() || undefined,
+            cwe_id: creatingVulnerabilityCweId.trim() || undefined,
+            steps_to_reproduce: creatingVulnerabilitySteps.trim() || undefined,
+            impact: creatingVulnerabilityImpact.trim() || undefined,
+            recommendations: creatingVulnerabilityRecommendations.trim() || undefined,
         });
         setCreateVulnerabilityOpen(false);
         setCreatingVulnerabilityTitle("");
         setCreatingVulnerabilityDescription("");
         setCreatingVulnerabilitySeverity("medium");
         setCreatingVulnerabilityStatus("open");
+        setCreatingVulnerabilityCvssVersion("");
+        setCreatingVulnerabilityCvssScore("");
+        setCreatingVulnerabilityCvssVector("");
+        setCreatingVulnerabilityCweId("");
+        setCreatingVulnerabilitySteps("");
+        setCreatingVulnerabilityImpact("");
+        setCreatingVulnerabilityRecommendations("");
         await loadHost();
+    };
+    const hostServices = useMemo(() => Object.values(servicesByPortId).flat(), [servicesByPortId]);
+    const linkAssetOptions = useMemo(() => {
+        if (linkAssetType === "host") {
+            return host ? [{ id: host.id, label: `Host: ${host.hostname || host.ip_address || host.id}` }] : [];
+        }
+        if (linkAssetType === "port") {
+            return (host?.ports ?? []).map((port) => ({
+                id: port.id,
+                label: `Port: ${port.port_number}/${port.protocol}`,
+            }));
+        }
+        if (linkAssetType === "service") {
+            return hostServices.map((service) => ({
+                id: service.id,
+                label: `Service: ${service.name}${service.version ? ` ${service.version}` : ""}`,
+            }));
+        }
+        return (host?.endpoints ?? []).map((endpoint) => ({
+            id: endpoint.id,
+            label: `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}`,
+        }));
+    }, [host, hostServices, linkAssetType]);
+    const resolveAssetLabel = (assetType, assetId) => {
+        if (assetType === "host") {
+            return `Host: ${host?.hostname || host?.ip_address || assetId}`;
+        }
+        if (assetType === "port") {
+            const port = host?.ports.find((item) => item.id === assetId);
+            return port ? `Port: ${port.port_number}/${port.protocol}` : `port:${assetId}`;
+        }
+        if (assetType === "service") {
+            const service = hostServices.find((item) => item.id === assetId);
+            return service ? `Service: ${service.name}${service.version ? ` ${service.version}` : ""}` : `service:${assetId}`;
+        }
+        const endpoint = host?.endpoints.find((item) => item.id === assetId);
+        return endpoint ? `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}` : `endpoint:${assetId}`;
+    };
+    useEffect(() => {
+        // #region agent log
+        fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+            body: JSON.stringify({
+                sessionId: "a74592",
+                runId: "vuln-card-pre",
+                hypothesisId: "H4",
+                location: "HostDetailPage.tsx:vuln-dialog-state",
+                message: "Host vulnerability dialog state changed",
+                data: { vulnDetailOpen, activeVulnId: activeVulnDetails?.id ?? null },
+                timestamp: Date.now(),
+            }),
+        }).catch(() => { });
+        // #endregion
+    }, [vulnDetailOpen, activeVulnDetails?.id]);
+    const loadVulnerabilityDetails = async (vulnerabilityId) => {
+        if (!projectId) {
+            return;
+        }
+        setVulnBusy(true);
+        setError(null);
+        try {
+            // #region agent log
+            fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+                body: JSON.stringify({
+                    sessionId: "a74592",
+                    runId: "vuln-card-pre",
+                    hypothesisId: "H2",
+                    location: "HostDetailPage.tsx:loadVulnerabilityDetails:start",
+                    message: "Host vulnerability details load started",
+                    data: { projectId, hostId: hostId ?? null, vulnerabilityId },
+                    timestamp: Date.now(),
+                }),
+            }).catch(() => { });
+            // #endregion
+            const [vulnDetail, files, commentsPage] = await Promise.all([
+                getVulnerability(projectId, vulnerabilityId),
+                listVulnerabilityFiles(projectId, vulnerabilityId),
+                listVulnerabilityComments(projectId, vulnerabilityId),
+            ]);
+            setActiveVulnDetails(vulnDetail);
+            setVulnFiles(files);
+            setVulnComments(commentsPage.items);
+            // #region agent log
+            fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+                body: JSON.stringify({
+                    sessionId: "a74592",
+                    runId: "vuln-card-pre",
+                    hypothesisId: "H4",
+                    location: "HostDetailPage.tsx:loadVulnerabilityDetails:success",
+                    message: "Host vulnerability details loaded",
+                    data: { vulnerabilityId, filesCount: files.length, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
+                    timestamp: Date.now(),
+                }),
+            }).catch(() => { });
+            // #endregion
+            setVulnDetailOpen(true);
+        }
+        catch (error) {
+            // #region agent log
+            fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+                body: JSON.stringify({
+                    sessionId: "a74592",
+                    runId: "vuln-card-pre",
+                    hypothesisId: "H2",
+                    location: "HostDetailPage.tsx:loadVulnerabilityDetails:error",
+                    message: "Host vulnerability details load failed",
+                    data: {
+                        vulnerabilityId,
+                        errorMessage: error instanceof Error ? error.message : "unknown",
+                        responseStatus: typeof error === "object" && error !== null && "response" in error
+                            ? (error.response?.status ?? null)
+                            : null,
+                    },
+                    timestamp: Date.now(),
+                }),
+            }).catch(() => { });
+            // #endregion
+            setError("Не удалось загрузить карточку уязвимости.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const saveActiveVulnerability = async () => {
+        if (!projectId || !activeVulnDetails) {
+            return;
+        }
+        setVulnBusy(true);
+        setError(null);
+        try {
+            const updated = await updateVulnerability(projectId, activeVulnDetails.id, {
+                title: activeVulnDetails.title,
+                description: activeVulnDetails.description || undefined,
+                severity: activeVulnDetails.severity,
+                status: activeVulnDetails.status,
+                cvss_version: activeVulnDetails.cvss_version || undefined,
+                cvss_score: activeVulnDetails.cvss_score ?? undefined,
+                cvss_vector: activeVulnDetails.cvss_vector || undefined,
+                cwe_id: activeVulnDetails.cwe_id || undefined,
+                steps_to_reproduce: activeVulnDetails.steps_to_reproduce || undefined,
+                impact: activeVulnDetails.impact || undefined,
+                recommendations: activeVulnDetails.recommendations || undefined,
+            });
+            setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated } : prev));
+            await loadHost();
+        }
+        catch {
+            setError("Не удалось сохранить уязвимость.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const removeActiveVulnerability = async () => {
+        if (!projectId || !activeVulnDetails) {
+            return;
+        }
+        setVulnBusy(true);
+        setError(null);
+        try {
+            await deleteVulnerability(projectId, activeVulnDetails.id);
+            setVulnDetailOpen(false);
+            setActiveVulnDetails(null);
+            await loadHost();
+        }
+        catch {
+            setError("Не удалось удалить уязвимость.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const uploadFileToActiveVuln = async (file) => {
+        if (!projectId || !activeVulnDetails || !file) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await uploadVulnerabilityFile(projectId, activeVulnDetails.id, file);
+            const files = await listVulnerabilityFiles(projectId, activeVulnDetails.id);
+            setVulnFiles(files);
+        }
+        catch {
+            setError("Не удалось загрузить файл.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const removeVulnerabilityFile = async (fileId) => {
+        if (!projectId || !activeVulnDetails) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await deleteVulnerabilityFile(projectId, activeVulnDetails.id, fileId);
+            const files = await listVulnerabilityFiles(projectId, activeVulnDetails.id);
+            setVulnFiles(files);
+        }
+        catch {
+            setError("Не удалось удалить файл.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const addAssetLinkToActiveVuln = async () => {
+        if (!projectId || !activeVulnDetails || !linkAssetId) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await addVulnerabilityAsset(projectId, activeVulnDetails.id, {
+                asset_type: linkAssetType,
+                asset_id: linkAssetId,
+            });
+            await loadVulnerabilityDetails(activeVulnDetails.id);
+            await loadHost();
+            setLinkAssetId("");
+        }
+        catch {
+            setError("Не удалось привязать актив к уязвимости.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const removeAssetLinkFromActiveVuln = async (assetLinkId) => {
+        if (!projectId || !activeVulnDetails) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await deleteVulnerabilityAsset(projectId, activeVulnDetails.id, assetLinkId);
+            await loadVulnerabilityDetails(activeVulnDetails.id);
+            await loadHost();
+        }
+        catch {
+            setError("Не удалось удалить привязку актива.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const addCommentToActiveVuln = async () => {
+        if (!projectId || !activeVulnDetails || !newComment.trim()) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await createVulnerabilityComment(projectId, activeVulnDetails.id, newComment.trim());
+            const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
+            setVulnComments(commentsPage.items);
+            setNewComment("");
+        }
+        catch {
+            setError("Не удалось добавить комментарий.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const removeCommentFromActiveVuln = async (commentId) => {
+        if (!projectId || !activeVulnDetails) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await deleteVulnerabilityComment(projectId, activeVulnDetails.id, commentId);
+            const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
+            setVulnComments(commentsPage.items);
+        }
+        catch {
+            setError("Не удалось удалить комментарий.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
+    };
+    const openCommentEdit = (comment) => {
+        setEditingCommentId(comment.id);
+        setEditingCommentContent(comment.content);
+        setEditCommentOpen(true);
+    };
+    const saveCommentEdit = async () => {
+        if (!projectId || !activeVulnDetails || !editingCommentId || !editingCommentContent.trim()) {
+            return;
+        }
+        setVulnBusy(true);
+        try {
+            await updateVulnerabilityComment(projectId, activeVulnDetails.id, editingCommentId, editingCommentContent.trim());
+            const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
+            setVulnComments(commentsPage.items);
+            setEditCommentOpen(false);
+            setEditingCommentId(null);
+            setEditingCommentContent("");
+        }
+        catch {
+            setError("Не удалось обновить комментарий.");
+        }
+        finally {
+            setVulnBusy(false);
+        }
     };
     const hostTitle = host?.hostname || host?.ip_address || "unknown-host";
     const portsCount = host?.ports.length ?? 0;
@@ -883,7 +1256,30 @@ export function HostDetailPage() {
                                                             opacity: 1,
                                                             pointerEvents: "auto",
                                                         },
-                                                    }, children: [_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", children: [_jsxs(Stack, { spacing: 0.8, children: [_jsx(Typography, { fontWeight: 600, children: item.title }), _jsxs(Stack, { direction: "row", spacing: 1, children: [_jsx(Chip, { size: "small", label: item.severity, sx: severityChipSx[item.severity] }), _jsx(Chip, { size: "small", label: item.status, sx: vulnerabilityStatusChipSx[item.status] })] })] }), _jsx(Stack, { direction: "row", spacing: 0.4, alignItems: "center", className: "vuln-actions", children: _jsx(Tooltip, { title: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F", children: _jsx(IconButton, { size: "small", onClick: (event) => openVulnerabilityActions(event, item), children: _jsx(MoreVertIcon, { fontSize: "small" }) }) }) })] }), _jsx(Collapse, { in: expandedVulnerabilityIds.includes(item.id), timeout: "auto", unmountOnExit: true, children: _jsx(Typography, { mt: 0.8, color: "text.secondary", variant: "body2", children: item.description || "Описание не указано" }) })] }, item.id))), !vulnerabilities.length && _jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438, \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0435 \u043A \u044D\u0442\u043E\u043C\u0443 \u0445\u043E\u0441\u0442\u0443, \u043F\u043E\u043A\u0430 \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B." })] }), _jsxs(Menu, { anchorEl: vulnerabilityActionsAnchorEl, open: vulnerabilityActionsOpen, onClose: closeVulnerabilityActions, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: [_jsxs(MenuItem, { onClick: () => {
+                                                    }, children: [_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "center", children: [_jsxs(Stack, { spacing: 0.8, children: [_jsx(Typography, { fontWeight: 600, children: item.title }), _jsxs(Stack, { direction: "row", spacing: 1, children: [_jsx(Chip, { size: "small", label: item.severity, sx: severityChipSx[item.severity] }), _jsx(Chip, { size: "small", label: item.status, sx: vulnerabilityStatusChipSx[item.status] })] })] }), _jsx(Stack, { direction: "row", spacing: 0.4, alignItems: "center", className: "vuln-actions", children: _jsx(Tooltip, { title: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F", children: _jsx(IconButton, { size: "small", onClick: (event) => openVulnerabilityActions(event, item), children: _jsx(MoreVertIcon, { fontSize: "small" }) }) }) })] }), _jsx(Collapse, { in: expandedVulnerabilityIds.includes(item.id), timeout: "auto", unmountOnExit: true, children: _jsxs(Stack, { spacing: 1, mt: 0.8, children: [_jsx(Typography, { color: "text.secondary", variant: "body2", children: item.description || "Описание не указано" }), _jsxs(Stack, { direction: "row", spacing: 1, flexWrap: "wrap", useFlexGap: true, children: [item.cvss_version && _jsx(Chip, { size: "small", variant: "outlined", label: `CVSS ${item.cvss_version} ${item.cvss_score ?? "-"}` }), item.cwe_id && _jsx(Chip, { size: "small", variant: "outlined", label: item.cwe_id })] }), _jsx(Box, { children: _jsx(Button, { size: "small", variant: "text", onClick: (event) => {
+                                                                                event.stopPropagation();
+                                                                                // #region agent log
+                                                                                fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+                                                                                    method: "POST",
+                                                                                    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+                                                                                    body: JSON.stringify({
+                                                                                        sessionId: "a74592",
+                                                                                        runId: "vuln-card-pre",
+                                                                                        hypothesisId: "H1",
+                                                                                        location: "HostDetailPage.tsx:open-card-button",
+                                                                                        message: "Host vulnerability card button clicked",
+                                                                                        data: { vulnerabilityId: item.id, expanded: expandedVulnerabilityIds.includes(item.id) },
+                                                                                        timestamp: Date.now(),
+                                                                                    }),
+                                                                                }).catch(() => { });
+                                                                                // #endregion
+                                                                                void loadVulnerabilityDetails(item.id);
+                                                                            }, children: "\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u0440\u0442\u043E\u0447\u043A\u0443" }) })] }) })] }, item.id))), !vulnerabilities.length && _jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438, \u043F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0435 \u043A \u044D\u0442\u043E\u043C\u0443 \u0445\u043E\u0441\u0442\u0443, \u043F\u043E\u043A\u0430 \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B." })] }), _jsxs(Menu, { anchorEl: vulnerabilityActionsAnchorEl, open: vulnerabilityActionsOpen, onClose: closeVulnerabilityActions, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: [_jsxs(MenuItem, { onClick: () => {
+                                                        if (activeVulnerability) {
+                                                            void loadVulnerabilityDetails(activeVulnerability.id);
+                                                        }
+                                                        closeVulnerabilityActions();
+                                                    }, children: [_jsx(EditIcon, { fontSize: "small", sx: { mr: 1 } }), "\u041A\u0430\u0440\u0442\u043E\u0447\u043A\u0430"] }), _jsxs(MenuItem, { onClick: () => {
                                                         if (activeVulnerability) {
                                                             openVulnerabilityEdit(activeVulnerability);
                                                         }
@@ -893,5 +1289,11 @@ export function HostDetailPage() {
                                                             void removeVulnerability(activeVulnerability.id);
                                                         }
                                                         closeVulnerabilityActions();
-                                                    }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] })] })] }) }))] })] }), _jsxs(Dialog, { open: isEditHostOpen, onClose: () => setEditHostOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "IP-\u0430\u0434\u0440\u0435\u0441", value: editingHostIp, onChange: (event) => setEditingHostIp(event.target.value) }), _jsx(TextField, { label: "Hostname", value: editingHostName, onChange: (event) => setEditingHostName(event.target.value) }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: editingHostStatus, onChange: (event) => setEditingHostStatus(event.target.value), children: [_jsx(MenuItem, { value: "up", children: "up" }), _jsx(MenuItem, { value: "down", children: "down" }), _jsx(MenuItem, { value: "unknown", children: "unknown" })] }), _jsx(TextField, { multiline: true, minRows: 4, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: editingHostNotes, onChange: (event) => setEditingHostNotes(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditHostOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveHostInfo(), disabled: !editingHostIp.trim() && !editingHostName.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditPortOpen, onClose: () => setEditPortOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u0440\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u043E\u043C\u0435\u0440 \u043F\u043E\u0440\u0442\u0430", type: "number", inputProps: { min: 1, max: 65535 }, value: editingPortNumber, onChange: (event) => setEditingPortNumber(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041F\u0440\u043E\u0442\u043E\u043A\u043E\u043B", value: editingPortProtocol, onChange: (event) => setEditingPortProtocol(event.target.value), children: [_jsx(MenuItem, { value: "tcp", children: "tcp" }), _jsx(MenuItem, { value: "udp", children: "udp" })] }), _jsxs(TextField, { select: true, label: "\u0421\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435", value: editingPortState, onChange: (event) => setEditingPortState(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "closed", children: "closed" }), _jsx(MenuItem, { value: "filtered", children: "filtered" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditPortOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void savePortEdit(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreatePortOpen, onClose: () => setCreatePortOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043F\u043E\u0440\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u043E\u043C\u0435\u0440 \u043F\u043E\u0440\u0442\u0430", type: "number", inputProps: { min: 1, max: 65535 }, value: creatingPortNumber, onChange: (event) => setCreatingPortNumber(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041F\u0440\u043E\u0442\u043E\u043A\u043E\u043B", value: creatingPortProtocol, onChange: (event) => setCreatingPortProtocol(event.target.value), children: [_jsx(MenuItem, { value: "tcp", children: "tcp" }), _jsx(MenuItem, { value: "udp", children: "udp" })] }), _jsxs(TextField, { select: true, label: "\u0421\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435", value: creatingPortState, onChange: (event) => setCreatingPortState(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "closed", children: "closed" }), _jsx(MenuItem, { value: "filtered", children: "filtered" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreatePortOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createHostPort(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreateServiceOpen, onClose: () => setCreateServiceOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u0430", value: creatingServiceName, onChange: (event) => setCreatingServiceName(event.target.value) }), _jsx(TextField, { label: "\u0412\u0435\u0440\u0441\u0438\u044F", value: creatingServiceVersion, onChange: (event) => setCreatingServiceVersion(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "Banner", value: creatingServiceBanner, onChange: (event) => setCreatingServiceBanner(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateServiceOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createPortService(), disabled: !creatingServiceName.trim(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditServiceOpen, onClose: () => setEditServiceOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u0430", value: editingServiceName, onChange: (event) => setEditingServiceName(event.target.value) }), _jsx(TextField, { label: "\u0412\u0435\u0440\u0441\u0438\u044F", value: editingServiceVersion, onChange: (event) => setEditingServiceVersion(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "Banner", value: editingServiceBanner, onChange: (event) => setEditingServiceBanner(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditServiceOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveServiceEdit(), disabled: !editingServiceName.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditEndpointOpen, onClose: () => setEditEndpointOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { multiline: true, minRows: 6, label: "Raw HTTP request (\u043E\u043F\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E)", placeholder: "POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}", value: editingEndpointRequestRaw, onChange: (event) => applyParsedRequestToEditEndpoint(event.target.value) }), _jsx(TextField, { label: "\u041F\u0443\u0442\u044C", value: editingEndpointPath, onChange: (event) => setEditingEndpointPath(event.target.value) }), _jsx(TextField, { select: true, label: "HTTP-\u043C\u0435\u0442\u043E\u0434", value: editingEndpointMethod, onChange: (event) => setEditingEndpointMethod(event.target.value), children: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((method) => (_jsx(MenuItem, { value: method, children: method }, method))) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: editingEndpointDescription, onChange: (event) => setEditingEndpointDescription(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditEndpointOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveEndpointEdit(), disabled: !editingEndpointPath.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreateEndpointOpen, onClose: () => setCreateEndpointOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { multiline: true, minRows: 6, label: "Raw HTTP request (\u043E\u043F\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E)", placeholder: "POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}", value: creatingEndpointRequestRaw, onChange: (event) => applyParsedRequestToCreateEndpoint(event.target.value) }), _jsx(TextField, { label: "\u041F\u0443\u0442\u044C", value: creatingEndpointPath, onChange: (event) => setCreatingEndpointPath(event.target.value) }), _jsx(TextField, { select: true, label: "HTTP-\u043C\u0435\u0442\u043E\u0434", value: creatingEndpointMethod, onChange: (event) => setCreatingEndpointMethod(event.target.value), children: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((method) => (_jsx(MenuItem, { value: method, children: method }, method))) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: creatingEndpointDescription, onChange: (event) => setCreatingEndpointDescription(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateEndpointOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createHostEndpoint(), disabled: !creatingEndpointPath.trim() && !creatingEndpointRequestRaw.trim(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditVulnerabilityOpen, onClose: () => setEditVulnerabilityOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: editingVulnerabilityTitle, onChange: (event) => setEditingVulnerabilityTitle(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: editingVulnerabilityDescription, onChange: (event) => setEditingVulnerabilityDescription(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041A\u0440\u0438\u0442\u0438\u0447\u043D\u043E\u0441\u0442\u044C", value: editingVulnerabilitySeverity, onChange: (event) => setEditingVulnerabilitySeverity(event.target.value), children: [_jsx(MenuItem, { value: "critical", children: "critical" }), _jsx(MenuItem, { value: "high", children: "high" }), _jsx(MenuItem, { value: "medium", children: "medium" }), _jsx(MenuItem, { value: "low", children: "low" }), _jsx(MenuItem, { value: "info", children: "info" })] }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: editingVulnerabilityStatus, onChange: (event) => setEditingVulnerabilityStatus(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "in_progress", children: "in_progress" }), _jsx(MenuItem, { value: "fixed", children: "fixed" }), _jsx(MenuItem, { value: "wont_fix", children: "wont_fix" }), _jsx(MenuItem, { value: "accepted_risk", children: "accepted_risk" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditVulnerabilityOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveVulnerabilityEdit(), disabled: !editingVulnerabilityTitle.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreateVulnerabilityOpen, onClose: () => setCreateVulnerabilityOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u043A \u0445\u043E\u0441\u0442\u0443" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: creatingVulnerabilityTitle, onChange: (event) => setCreatingVulnerabilityTitle(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: creatingVulnerabilityDescription, onChange: (event) => setCreatingVulnerabilityDescription(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041A\u0440\u0438\u0442\u0438\u0447\u043D\u043E\u0441\u0442\u044C", value: creatingVulnerabilitySeverity, onChange: (event) => setCreatingVulnerabilitySeverity(event.target.value), children: [_jsx(MenuItem, { value: "critical", children: "critical" }), _jsx(MenuItem, { value: "high", children: "high" }), _jsx(MenuItem, { value: "medium", children: "medium" }), _jsx(MenuItem, { value: "low", children: "low" }), _jsx(MenuItem, { value: "info", children: "info" })] }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: creatingVulnerabilityStatus, onChange: (event) => setCreatingVulnerabilityStatus(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "in_progress", children: "in_progress" }), _jsx(MenuItem, { value: "fixed", children: "fixed" }), _jsx(MenuItem, { value: "wont_fix", children: "wont_fix" }), _jsx(MenuItem, { value: "accepted_risk", children: "accepted_risk" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateVulnerabilityOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createHostVulnerability(), disabled: !creatingVulnerabilityTitle.trim(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] })] }));
+                                                    }, children: [_jsx(DeleteIcon, { fontSize: "small", sx: { mr: 1 } }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] })] })] }) }))] })] }), _jsxs(Dialog, { open: isEditHostOpen, onClose: () => setEditHostOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0445\u043E\u0441\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "IP-\u0430\u0434\u0440\u0435\u0441", value: editingHostIp, onChange: (event) => setEditingHostIp(event.target.value) }), _jsx(TextField, { label: "Hostname", value: editingHostName, onChange: (event) => setEditingHostName(event.target.value) }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: editingHostStatus, onChange: (event) => setEditingHostStatus(event.target.value), children: [_jsx(MenuItem, { value: "up", children: "up" }), _jsx(MenuItem, { value: "down", children: "down" }), _jsx(MenuItem, { value: "unknown", children: "unknown" })] }), _jsx(TextField, { multiline: true, minRows: 4, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: editingHostNotes, onChange: (event) => setEditingHostNotes(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditHostOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveHostInfo(), disabled: !editingHostIp.trim() && !editingHostName.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditPortOpen, onClose: () => setEditPortOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u0440\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u043E\u043C\u0435\u0440 \u043F\u043E\u0440\u0442\u0430", type: "number", inputProps: { min: 1, max: 65535 }, value: editingPortNumber, onChange: (event) => setEditingPortNumber(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041F\u0440\u043E\u0442\u043E\u043A\u043E\u043B", value: editingPortProtocol, onChange: (event) => setEditingPortProtocol(event.target.value), children: [_jsx(MenuItem, { value: "tcp", children: "tcp" }), _jsx(MenuItem, { value: "udp", children: "udp" })] }), _jsxs(TextField, { select: true, label: "\u0421\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435", value: editingPortState, onChange: (event) => setEditingPortState(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "closed", children: "closed" }), _jsx(MenuItem, { value: "filtered", children: "filtered" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditPortOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void savePortEdit(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreatePortOpen, onClose: () => setCreatePortOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043F\u043E\u0440\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u043E\u043C\u0435\u0440 \u043F\u043E\u0440\u0442\u0430", type: "number", inputProps: { min: 1, max: 65535 }, value: creatingPortNumber, onChange: (event) => setCreatingPortNumber(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041F\u0440\u043E\u0442\u043E\u043A\u043E\u043B", value: creatingPortProtocol, onChange: (event) => setCreatingPortProtocol(event.target.value), children: [_jsx(MenuItem, { value: "tcp", children: "tcp" }), _jsx(MenuItem, { value: "udp", children: "udp" })] }), _jsxs(TextField, { select: true, label: "\u0421\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0435", value: creatingPortState, onChange: (event) => setCreatingPortState(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "closed", children: "closed" }), _jsx(MenuItem, { value: "filtered", children: "filtered" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreatePortOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createHostPort(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreateServiceOpen, onClose: () => setCreateServiceOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u0430", value: creatingServiceName, onChange: (event) => setCreatingServiceName(event.target.value) }), _jsx(TextField, { label: "\u0412\u0435\u0440\u0441\u0438\u044F", value: creatingServiceVersion, onChange: (event) => setCreatingServiceVersion(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "Banner", value: creatingServiceBanner, onChange: (event) => setCreatingServiceBanner(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateServiceOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createPortService(), disabled: !creatingServiceName.trim(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditServiceOpen, onClose: () => setEditServiceOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0435\u0440\u0432\u0438\u0441" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u0430", value: editingServiceName, onChange: (event) => setEditingServiceName(event.target.value) }), _jsx(TextField, { label: "\u0412\u0435\u0440\u0441\u0438\u044F", value: editingServiceVersion, onChange: (event) => setEditingServiceVersion(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "Banner", value: editingServiceBanner, onChange: (event) => setEditingServiceBanner(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditServiceOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveServiceEdit(), disabled: !editingServiceName.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditEndpointOpen, onClose: () => setEditEndpointOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { multiline: true, minRows: 6, label: "Raw HTTP request (\u043E\u043F\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E)", placeholder: "POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}", value: editingEndpointRequestRaw, onChange: (event) => applyParsedRequestToEditEndpoint(event.target.value) }), _jsx(TextField, { label: "\u041F\u0443\u0442\u044C", value: editingEndpointPath, onChange: (event) => setEditingEndpointPath(event.target.value) }), _jsx(TextField, { select: true, label: "HTTP-\u043C\u0435\u0442\u043E\u0434", value: editingEndpointMethod, onChange: (event) => setEditingEndpointMethod(event.target.value), children: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((method) => (_jsx(MenuItem, { value: method, children: method }, method))) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: editingEndpointDescription, onChange: (event) => setEditingEndpointDescription(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditEndpointOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveEndpointEdit(), disabled: !editingEndpointPath.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreateEndpointOpen, onClose: () => setCreateEndpointOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u044D\u043D\u0434\u043F\u043E\u0438\u043D\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { multiline: true, minRows: 6, label: "Raw HTTP request (\u043E\u043F\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E)", placeholder: "POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}", value: creatingEndpointRequestRaw, onChange: (event) => applyParsedRequestToCreateEndpoint(event.target.value) }), _jsx(TextField, { label: "\u041F\u0443\u0442\u044C", value: creatingEndpointPath, onChange: (event) => setCreatingEndpointPath(event.target.value) }), _jsx(TextField, { select: true, label: "HTTP-\u043C\u0435\u0442\u043E\u0434", value: creatingEndpointMethod, onChange: (event) => setCreatingEndpointMethod(event.target.value), children: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((method) => (_jsx(MenuItem, { value: method, children: method }, method))) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: creatingEndpointDescription, onChange: (event) => setCreatingEndpointDescription(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateEndpointOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createHostEndpoint(), disabled: !creatingEndpointPath.trim() && !creatingEndpointRequestRaw.trim(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: vulnDetailOpen, onClose: () => setVulnDetailOpen(false), fullWidth: true, maxWidth: "lg", children: [_jsx(DialogTitle, { children: "\u041A\u0430\u0440\u0442\u043E\u0447\u043A\u0430 \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u0438" }), _jsx(DialogContent, { children: !activeVulnDetails ? (_jsx(Typography, { color: "text.secondary", children: "\u0423\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u0430." })) : (_jsxs(Stack, { spacing: 2, sx: { mt: 0.5 }, children: [_jsxs(Grid, { container: true, spacing: 2, children: [_jsx(Grid, { size: { xs: 12, md: 8 }, children: _jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", fullWidth: true, value: activeVulnDetails.title, onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, title: event.target.value } : prev)) }) }), _jsx(Grid, { size: { xs: 12, md: 2 }, children: _jsxs(TextField, { select: true, label: "\u041A\u0440\u0438\u0442\u0438\u0447\u043D\u043E\u0441\u0442\u044C", fullWidth: true, value: activeVulnDetails.severity, onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, severity: event.target.value } : prev)), children: [_jsx(MenuItem, { value: "critical", children: "critical" }), _jsx(MenuItem, { value: "high", children: "high" }), _jsx(MenuItem, { value: "medium", children: "medium" }), _jsx(MenuItem, { value: "low", children: "low" }), _jsx(MenuItem, { value: "info", children: "info" })] }) }), _jsx(Grid, { size: { xs: 12, md: 2 }, children: _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", fullWidth: true, value: activeVulnDetails.status, onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, status: event.target.value } : prev)), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "in_progress", children: "in_progress" }), _jsx(MenuItem, { value: "fixed", children: "fixed" }), _jsx(MenuItem, { value: "wont_fix", children: "wont_fix" }), _jsx(MenuItem, { value: "accepted_risk", children: "accepted_risk" })] }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", fullWidth: true, multiline: true, minRows: 3, value: activeVulnDetails.description || "", onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, description: event.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12, md: 3 }, children: _jsxs(TextField, { select: true, label: "CVSS \u0432\u0435\u0440\u0441\u0438\u044F", fullWidth: true, value: activeVulnDetails.cvss_version || "", onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_version: event.target.value || null } : prev)), children: [_jsx(MenuItem, { value: "", children: "-" }), _jsx(MenuItem, { value: "3.1", children: "3.1" }), _jsx(MenuItem, { value: "4.0", children: "4.0" })] }) }), _jsx(Grid, { size: { xs: 12, md: 3 }, children: _jsx(TextField, { label: "CVSS score", type: "number", fullWidth: true, value: activeVulnDetails.cvss_score ?? "", onChange: (event) => {
+                                                    const value = event.target.value;
+                                                    setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_score: value === "" ? null : Number(value) } : prev));
+                                                } }) }), _jsx(Grid, { size: { xs: 12, md: 6 }, children: _jsx(TextField, { label: "CVSS vector", fullWidth: true, value: activeVulnDetails.cvss_vector || "", onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_vector: event.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "CWE ID", fullWidth: true, value: activeVulnDetails.cwe_id || "", onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cwe_id: event.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0428\u0430\u0433\u0438 \u0432\u043E\u0441\u043F\u0440\u043E\u0438\u0437\u0432\u0435\u0434\u0435\u043D\u0438\u044F", fullWidth: true, multiline: true, minRows: 2, value: activeVulnDetails.steps_to_reproduce || "", onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, steps_to_reproduce: event.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0412\u043B\u0438\u044F\u043D\u0438\u0435", fullWidth: true, multiline: true, minRows: 2, value: activeVulnDetails.impact || "", onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev)) }) }), _jsx(Grid, { size: { xs: 12 }, children: _jsx(TextField, { label: "\u0420\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0430\u0446\u0438\u0438", fullWidth: true, multiline: true, minRows: 2, value: activeVulnDetails.recommendations || "", onChange: (event) => setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: event.target.value || null } : prev)) }) })] }), _jsx(Divider, {}), _jsxs(Stack, { spacing: 1, children: [_jsxs(Typography, { variant: "subtitle1", fontWeight: 700, children: ["\u041F\u0440\u0438\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0435 \u0430\u043A\u0442\u0438\u0432\u044B (", activeVulnDetails.assets.length, ")"] }), _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 1, children: [_jsxs(TextField, { select: true, label: "\u0422\u0438\u043F \u0430\u043A\u0442\u0438\u0432\u0430", value: linkAssetType, onChange: (event) => {
+                                                        setLinkAssetType(event.target.value);
+                                                        setLinkAssetId("");
+                                                    }, sx: { minWidth: 180 }, children: [_jsx(MenuItem, { value: "host", children: "host" }), _jsx(MenuItem, { value: "port", children: "port" }), _jsx(MenuItem, { value: "service", children: "service" }), _jsx(MenuItem, { value: "endpoint", children: "endpoint" })] }), _jsx(TextField, { select: true, label: "\u0410\u043A\u0442\u0438\u0432", value: linkAssetId, onChange: (event) => setLinkAssetId(event.target.value), fullWidth: true, disabled: linkAssetOptions.length === 0, children: linkAssetOptions.map((option) => (_jsx(MenuItem, { value: option.id, children: option.label }, option.id))) }), _jsx(Button, { variant: "outlined", disabled: !linkAssetId || vulnBusy, onClick: () => void addAssetLinkToActiveVuln(), children: "\u041F\u0440\u0438\u0432\u044F\u0437\u0430\u0442\u044C" })] }), _jsxs(Stack, { direction: "row", spacing: 1, flexWrap: "wrap", useFlexGap: true, children: [activeVulnDetails.assets.map((assetLink) => (_jsx(Chip, { label: resolveAssetLabel(assetLink.asset_type, assetLink.asset_id), onDelete: () => void removeAssetLinkFromActiveVuln(assetLink.id) }, assetLink.id))), activeVulnDetails.assets.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u0421\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0435 \u0430\u043A\u0442\u0438\u0432\u044B \u043F\u043E\u043A\u0430 \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u044B." })] })] }), _jsx(Divider, {}), _jsxs(Stack, { spacing: 1, children: [_jsxs(Typography, { variant: "subtitle1", fontWeight: 700, children: ["\u0424\u0430\u0439\u043B\u044B (", vulnFiles.length, ")"] }), _jsxs(Button, { component: "label", variant: "outlined", startIcon: _jsx(AttachFileIcon, {}), children: ["\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0444\u0430\u0439\u043B", _jsx("input", { hidden: true, type: "file", onChange: (event) => void uploadFileToActiveVuln(event.target.files?.[0] ?? null) })] }), _jsxs(List, { dense: true, disablePadding: true, children: [vulnFiles.map((file) => (_jsx(ListItem, { secondaryAction: _jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(IconButton, { size: "small", component: "a", href: `/api/v1/files/${file.id}/download`, target: "_blank", rel: "noreferrer", children: _jsx(OpenInNewIcon, { fontSize: "small" }) }), _jsx(IconButton, { size: "small", onClick: () => void removeVulnerabilityFile(file.id), children: _jsx(DeleteOutlineIcon, { fontSize: "small" }) })] }), children: _jsx(ListItemText, { primary: file.original_name, secondary: `${file.content_type} • ${Math.round(file.size_bytes / 1024)} KB` }) }, file.id))), vulnFiles.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u0424\u0430\u0439\u043B\u044B \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u044B." })] })] }), _jsx(Divider, {}), _jsxs(Stack, { spacing: 1, children: [_jsxs(Typography, { variant: "subtitle1", fontWeight: 700, children: ["\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0438 (", vulnComments.length, ")"] }), _jsx(TextField, { label: "\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 (\u043F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0430 @username)", multiline: true, minRows: 2, value: newComment, onChange: (event) => setNewComment(event.target.value) }), _jsx(Button, { variant: "contained", disabled: !newComment.trim() || vulnBusy, onClick: () => void addCommentToActiveVuln(), children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439" }), _jsxs(List, { dense: true, disablePadding: true, children: [vulnComments.map((comment) => (_jsx(ListItem, { alignItems: "flex-start", secondaryAction: user?.role === "admin" || user?.id === comment.user_id ? (_jsxs(Stack, { direction: "row", spacing: 0.5, children: [_jsx(IconButton, { size: "small", onClick: () => openCommentEdit(comment), children: _jsx(EditIcon, { fontSize: "small" }) }), _jsx(IconButton, { size: "small", onClick: () => void removeCommentFromActiveVuln(comment.id), children: _jsx(DeleteOutlineIcon, { fontSize: "small" }) })] })) : null, children: _jsx(ListItemText, { primary: `${comment.username} • ${new Date(comment.created_at).toLocaleString()}`, secondary: comment.content }) }, comment.id))), vulnComments.length === 0 && _jsx(Typography, { color: "text.secondary", children: "\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0435\u0432 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442." })] })] })] })) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setVulnDetailOpen(false), children: "\u0417\u0430\u043A\u0440\u044B\u0442\u044C" }), _jsx(Button, { color: "error", variant: "outlined", onClick: () => void removeActiveVulnerability(), disabled: !activeVulnDetails || vulnBusy, children: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C" }), _jsx(Button, { variant: "contained", onClick: () => void saveActiveVulnerability(), disabled: !activeVulnDetails || vulnBusy, children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: editCommentOpen, onClose: () => setEditCommentOpen(false), fullWidth: true, maxWidth: "sm", children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439" }), _jsx(DialogContent, { children: _jsx(TextField, { fullWidth: true, multiline: true, minRows: 4, sx: { mt: 1 }, value: editingCommentContent, onChange: (event) => setEditingCommentContent(event.target.value) }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditCommentOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveCommentEdit(), disabled: !editingCommentContent.trim() || vulnBusy, children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isEditVulnerabilityOpen, onClose: () => setEditVulnerabilityOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: editingVulnerabilityTitle, onChange: (event) => setEditingVulnerabilityTitle(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: editingVulnerabilityDescription, onChange: (event) => setEditingVulnerabilityDescription(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041A\u0440\u0438\u0442\u0438\u0447\u043D\u043E\u0441\u0442\u044C", value: editingVulnerabilitySeverity, onChange: (event) => setEditingVulnerabilitySeverity(event.target.value), children: [_jsx(MenuItem, { value: "critical", children: "critical" }), _jsx(MenuItem, { value: "high", children: "high" }), _jsx(MenuItem, { value: "medium", children: "medium" }), _jsx(MenuItem, { value: "low", children: "low" }), _jsx(MenuItem, { value: "info", children: "info" })] }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: editingVulnerabilityStatus, onChange: (event) => setEditingVulnerabilityStatus(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "in_progress", children: "in_progress" }), _jsx(MenuItem, { value: "fixed", children: "fixed" }), _jsx(MenuItem, { value: "wont_fix", children: "wont_fix" }), _jsx(MenuItem, { value: "accepted_risk", children: "accepted_risk" })] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setEditVulnerabilityOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void saveVulnerabilityEdit(), disabled: !editingVulnerabilityTitle.trim(), children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] }), _jsxs(Dialog, { open: isCreateVulnerabilityOpen, onClose: () => setCreateVulnerabilityOpen(false), fullWidth: true, children: [_jsx(DialogTitle, { children: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0443\u044F\u0437\u0432\u0438\u043C\u043E\u0441\u0442\u044C \u043A \u0445\u043E\u0441\u0442\u0443" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: creatingVulnerabilityTitle, onChange: (event) => setCreatingVulnerabilityTitle(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: creatingVulnerabilityDescription, onChange: (event) => setCreatingVulnerabilityDescription(event.target.value) }), _jsxs(TextField, { select: true, label: "\u041A\u0440\u0438\u0442\u0438\u0447\u043D\u043E\u0441\u0442\u044C", value: creatingVulnerabilitySeverity, onChange: (event) => setCreatingVulnerabilitySeverity(event.target.value), children: [_jsx(MenuItem, { value: "critical", children: "critical" }), _jsx(MenuItem, { value: "high", children: "high" }), _jsx(MenuItem, { value: "medium", children: "medium" }), _jsx(MenuItem, { value: "low", children: "low" }), _jsx(MenuItem, { value: "info", children: "info" })] }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: creatingVulnerabilityStatus, onChange: (event) => setCreatingVulnerabilityStatus(event.target.value), children: [_jsx(MenuItem, { value: "open", children: "open" }), _jsx(MenuItem, { value: "in_progress", children: "in_progress" }), _jsx(MenuItem, { value: "fixed", children: "fixed" }), _jsx(MenuItem, { value: "wont_fix", children: "wont_fix" }), _jsx(MenuItem, { value: "accepted_risk", children: "accepted_risk" })] }), _jsxs(TextField, { select: true, label: "CVSS \u0432\u0435\u0440\u0441\u0438\u044F", value: creatingVulnerabilityCvssVersion, onChange: (event) => setCreatingVulnerabilityCvssVersion(event.target.value), children: [_jsx(MenuItem, { value: "", children: "-" }), _jsx(MenuItem, { value: "3.1", children: "3.1" }), _jsx(MenuItem, { value: "4.0", children: "4.0" })] }), _jsx(TextField, { label: "CVSS score", type: "number", inputProps: { min: 0, max: 10, step: 0.1 }, value: creatingVulnerabilityCvssScore, onChange: (event) => setCreatingVulnerabilityCvssScore(event.target.value) }), _jsx(TextField, { label: "CVSS vector", value: creatingVulnerabilityCvssVector, onChange: (event) => setCreatingVulnerabilityCvssVector(event.target.value) }), _jsx(TextField, { label: "CWE ID", value: creatingVulnerabilityCweId, onChange: (event) => setCreatingVulnerabilityCweId(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u0428\u0430\u0433\u0438 \u0432\u043E\u0441\u043F\u0440\u043E\u0438\u0437\u0432\u0435\u0434\u0435\u043D\u0438\u044F", value: creatingVulnerabilitySteps, onChange: (event) => setCreatingVulnerabilitySteps(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u0412\u043B\u0438\u044F\u043D\u0438\u0435", value: creatingVulnerabilityImpact, onChange: (event) => setCreatingVulnerabilityImpact(event.target.value) }), _jsx(TextField, { multiline: true, minRows: 3, label: "\u0420\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0430\u0446\u0438\u0438", value: creatingVulnerabilityRecommendations, onChange: (event) => setCreatingVulnerabilityRecommendations(event.target.value) })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateVulnerabilityOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void createHostVulnerability(), disabled: !creatingVulnerabilityTitle.trim(), children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] })] }));
 }
