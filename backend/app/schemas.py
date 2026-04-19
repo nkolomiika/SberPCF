@@ -345,6 +345,13 @@ class VulnerabilityCreate(InputBaseModel):
     impact: str | None = None
     recommendations: str | None = None
 
+    @field_validator("cvss_version")
+    @classmethod
+    def validate_cvss_version(cls, value: CvssVersion | None) -> CvssVersion | None:
+        if value is not None and value != CvssVersion.V40:
+            raise ValueError("Поддерживается только CVSS 4.0")
+        return value
+
 
 class VulnerabilityUpdate(InputBaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
@@ -359,6 +366,13 @@ class VulnerabilityUpdate(InputBaseModel):
     steps_to_reproduce: str | None = None
     impact: str | None = None
     recommendations: str | None = None
+
+    @field_validator("cvss_version")
+    @classmethod
+    def validate_cvss_version(cls, value: CvssVersion | None) -> CvssVersion | None:
+        if value is not None and value != CvssVersion.V40:
+            raise ValueError("Поддерживается только CVSS 4.0")
+        return value
 
 
 class VulnerabilityStatusPatch(InputBaseModel):
