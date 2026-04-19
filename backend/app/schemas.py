@@ -438,6 +438,7 @@ class CommentOut(ORMBase):
     vulnerability_id: UUID
     user_id: UUID
     username: str
+    avatar_url: str | None = None
     content: str
     mentions: list[MentionOut]
     created_at: datetime

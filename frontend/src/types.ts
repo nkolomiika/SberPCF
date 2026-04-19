@@ -198,6 +198,7 @@ export interface VulnerabilityComment {
   vulnerability_id: string;
   user_id: string;
   username: string;
+  avatar_url: string | null;
   content: string;
   mentions: Mention[];
   created_at: string;

@@ -614,6 +614,13 @@ export async function importOpenApiFile(projectId: string, hostId: string, file:
   return data;
 }
 
+export async function exportOpenApiFile(projectId: string, hostId: string): Promise<Blob> {
+  const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/export-openapi`, {
+    responseType: "blob",
+  });
+  return data as Blob;
+}
+
 export async function generateProjectReport(projectId: string, format: "md" | "pdf" | "docx"): Promise<Blob> {
   const { data } = await api.post(`/projects/${projectId}/reports/generate`, null, {
     params: { format },
