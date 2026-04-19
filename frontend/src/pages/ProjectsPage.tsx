@@ -37,14 +37,16 @@ import {
   createProject,
   createProjectFolder,
   deleteProject,
+  getApiErrorMessage,
   getProjectFolders,
   getProjects,
   getUsers,
   moveProjectFolder,
   updateProject,
 } from "../api";
+import { PROJECT_STATUS_CHIP_SX, PROJECT_STATUS_LABELS, PROJECT_STATUS_ORDER } from "../projectStatus";
 import { useAuthStore } from "../store";
-import type { Project, ProjectFolder, User } from "../types";
+import type { Project, ProjectFolder, ProjectStatus, User } from "../types";
 
 const DEFAULT_PROJECT_DURATION_DAYS = 14;
 const ROOT_FOLDER_LABEL = "Корень";
@@ -111,13 +113,13 @@ export function ProjectsPage() {
   const [, setDraggingType] = useState<"project" | "folder" | null>(null);
   const [expandedFolderPaths, setExpandedFolderPaths] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | Project["status"]>("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | ProjectStatus>("all");
   const [editingProjectName, setEditingProjectName] = useState("");
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingProjectDescription, setEditingProjectDescription] = useState("");
   const [editingProjectStartDate, setEditingProjectStartDate] = useState("");
   const [editingProjectEndDate, setEditingProjectEndDate] = useState("");
-  const [editingProjectStatus, setEditingProjectStatus] = useState<Project["status"]>("active");
+  const [editingProjectStatus, setEditingProjectStatus] = useState<ProjectStatus>("active");
   const [editingProjectFolder, setEditingProjectFolder] = useState("");
   const projectListRef = useRef<HTMLUListElement | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
@@ -136,8 +138,8 @@ export function ProjectsPage() {
       }
       setProjects(projectsResponse.items);
       setFolders(Array.isArray(foldersResponse) ? foldersResponse : []);
-    } catch {
-      setError("Не удалось загрузить проекты");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось загрузить проекты"));
     }
   }, [statusFilter]);
 
@@ -239,8 +241,8 @@ export function ProjectsPage() {
       try {
         const response = await getUsers(1, 200);
         setUsersCatalog(response.items);
-      } catch {
-        setError("Не удалось загрузить список пользователей");
+      } catch (error) {
+        setError(getApiErrorMessage(error, "Не удалось загрузить список пользователей"));
       }
     };
     void loadUsers();
@@ -275,8 +277,8 @@ export function ProjectsPage() {
       setSelectedMemberIds([]);
       setSelectedFolder("");
       await loadProjects();
-    } catch {
-      setError("Не удалось создать проект");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось создать проект"));
     } finally {
       setCreatingProject(false);
     }
@@ -290,8 +292,8 @@ export function ProjectsPage() {
     try {
       await deleteProject(projectId);
       await loadProjects();
-    } catch {
-      setError("Не удалось удалить проект");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить проект"));
     }
   };
 
@@ -332,8 +334,8 @@ export function ProjectsPage() {
       setSelectedFolder(created.path);
       setCreateFolderOpen(false);
       await loadProjects();
-    } catch {
-      setError("Не удалось создать папку проекта");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось создать папку проекта"));
     } finally {
       setCreatingFolder(false);
     }
@@ -396,8 +398,8 @@ export function ProjectsPage() {
       setEditOpen(false);
       setEditingProjectId(null);
       await loadProjects();
-    } catch {
-      setError("Не удалось обновить проект");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить проект"));
     } finally {
       setUpdatingProject(false);
     }
@@ -409,8 +411,8 @@ export function ProjectsPage() {
     try {
       await updateProject(projectId, { folder: normalizedFolder });
       await loadProjects();
-    } catch {
-      setError("Не удалось перенести проект в папку");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось перенести проект в папку"));
     } finally {
       setDraggingProjectId(null);
       setDragOverFolderPath(null);
@@ -429,8 +431,8 @@ export function ProjectsPage() {
     try {
       await moveProjectFolder(folderId, { parent_id: targetParentId });
       await loadProjects();
-    } catch {
-      setError("Не удалось переместить папку");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось переместить папку"));
     } finally {
       setDraggingFolderId(null);
       setDraggingFolderPath(null);
@@ -843,9 +845,7 @@ export function ProjectsPage() {
                 secondaryTypographyProps={{ component: "div" }}
                 secondary={
                   <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 0.5, md: 1.5 }} alignItems={{ md: "center" }}>
-                    <Typography variant="caption" color="text.secondary">
-                      {project.status}
-                    </Typography>
+                    <Chip size="small" label={PROJECT_STATUS_LABELS[project.status]} sx={PROJECT_STATUS_CHIP_SX[project.status]} />
                     <Typography variant="caption" color="text.secondary">
                       {project.start_date || "дата не задана"}
                     </Typography>
@@ -1025,13 +1025,15 @@ export function ProjectsPage() {
               select
               label="Статус"
               value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as "all" | Project["status"])}
+              onChange={(event) => setStatusFilter(event.target.value as "all" | ProjectStatus)}
               sx={{ minWidth: 220 }}
             >
               <MenuItem value="all">Все статусы</MenuItem>
-              <MenuItem value="active">active</MenuItem>
-              <MenuItem value="completed">completed</MenuItem>
-              <MenuItem value="archived">archived</MenuItem>
+              {PROJECT_STATUS_ORDER.map((status) => (
+                <MenuItem key={status} value={status}>
+                  {PROJECT_STATUS_LABELS[status]}
+                </MenuItem>
+              ))}
             </TextField>
           </Stack>
         </Stack>
@@ -1234,11 +1236,13 @@ export function ProjectsPage() {
               select
               label="Статус"
               value={editingProjectStatus}
-              onChange={(event) => setEditingProjectStatus(event.target.value as Project["status"])}
+              onChange={(event) => setEditingProjectStatus(event.target.value as ProjectStatus)}
             >
-              <MenuItem value="active">active</MenuItem>
-              <MenuItem value="completed">completed</MenuItem>
-              <MenuItem value="archived">archived</MenuItem>
+              {PROJECT_STATUS_ORDER.map((status) => (
+                <MenuItem key={status} value={status}>
+                  {PROJECT_STATUS_LABELS[status]}
+                </MenuItem>
+              ))}
             </TextField>
             <TextField
               select

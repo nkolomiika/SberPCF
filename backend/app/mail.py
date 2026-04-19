@@ -24,7 +24,7 @@ async def send_plain_text_email(*, recipient_email: str, subject: str, body: str
     message["From"] = f"{settings.smtp_from_name} <{settings.smtp_from_email}>"
     message["To"] = recipient_email
     message["Subject"] = subject
-    message.set_content(body)
+    message.set_content(body, charset="utf-8")
     await aiosmtplib.send(
         message,
         hostname=settings.smtp_host,

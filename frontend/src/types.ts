@@ -25,6 +25,7 @@ export interface PasswordResetResult {
   ok: boolean;
   email_sent_to: string;
   must_change_password: boolean;
+  mail_preview_url: string | null;
 }
 
 export interface PaginatedResponse<T> {
@@ -35,6 +36,13 @@ export interface PaginatedResponse<T> {
   pages: number;
 }
 
+export type ProjectStatus =
+  | "active"
+  | "handover_to_development"
+  | "vulnerability_recheck"
+  | "completed"
+  | "archived";
+
 export interface Project {
   id: string;
   name: string;
@@ -42,17 +50,8 @@ export interface Project {
   description: string | null;
   start_date: string | null;
   end_date: string | null;
-  status: "active" | "completed" | "archived";
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ProjectFolder {
-  id: string;
-  name: string;
-  path: string;
-  parent_id: string | null;
+  timeline_frozen_at: string | null;
+  status: ProjectStatus;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -118,14 +117,30 @@ export interface Service {
   updated_at: string;
 }
 
+export interface EndpointRequestHeader {
+  name: string;
+  value: string;
+}
+
 export interface Endpoint {
   id: string;
   host_id: string;
   path: string;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | null;
   description: string | null;
+  query_params: EndpointQueryParam[];
+  request_body: string | null;
+  request_content_type: string | null;
+  request_headers?: EndpointRequestHeader[];
   created_at: string;
   updated_at: string;
+}
+
+export interface EndpointQueryParam {
+  name: string;
+  value: string | null;
+  required: boolean;
+  description: string | null;
 }
 
 export interface Vulnerability {
@@ -135,7 +150,7 @@ export interface Vulnerability {
   description: string | null;
   severity: "critical" | "high" | "medium" | "low" | "info";
   status: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
-  cvss_version: "3.1" | "4.0" | null;
+  cvss_version: "4.0" | null;
   cvss_score: number | null;
   cvss_vector: string | null;
   cwe_id: string | null;
@@ -153,6 +168,8 @@ export interface VulnerabilityWorkflowStep {
   title: string;
   description: string | null;
   image_file_ids: string[];
+  endpoint_id: string | null;
+  endpoint_request_raw: string | null;
 }
 
 export interface VulnerabilityAsset {
@@ -201,6 +218,14 @@ export interface ImportResult {
   errors: string[];
 }
 
+export interface OpenApiImportResult {
+  host_id: string;
+  spec_host: string | null;
+  endpoints_created: number;
+  endpoints_skipped: number;
+  errors: string[];
+}
+
 export interface Notification {
   id: string;
   type: string;
@@ -211,6 +236,7 @@ export interface Notification {
     vulnerability_id: string | null;
     vulnerability_title: string | null;
     project_id: string | null;
+    host_id: string | null;
     commenter_username: string | null;
   } | null;
 }

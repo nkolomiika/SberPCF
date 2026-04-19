@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { getMe, login, logout } from "./api";
+import { getApiErrorMessage, getMe, login, logout } from "./api";
 import type { User } from "./types";
 
 interface AuthState {
@@ -35,9 +35,10 @@ export const useAuthStore = create<AuthState>((set) => ({
       const me = await getMe();
       set({ user: me, isLoading: false });
       return me;
-    } catch {
-      set({ error: "Не удалось выполнить вход", isLoading: false });
-      throw new Error("login failed");
+    } catch (error) {
+      const message = getApiErrorMessage(error, "Не удалось выполнить вход");
+      set({ error: message, isLoading: false });
+      throw new Error(message);
     }
   },
   signOut: async () => {

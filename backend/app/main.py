@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -56,6 +57,35 @@ def _register_routes() -> None:
 
 
 def _register_error_handlers() -> None:
+    def _format_request_validation(exc: RequestValidationError) -> str:
+        messages: list[str] = []
+        for item in exc.errors():
+            raw_loc = [str(part) for part in item.get("loc", [])]
+            loc = ".".join(part for part in raw_loc if part not in {"body", "query", "path"})
+            error_type = item.get("type", "")
+            if error_type == "missing":
+                message = "Поле обязательно"
+            elif error_type == "string_too_short":
+                min_length = item.get("ctx", {}).get("min_length")
+                message = "Поле не может быть пустым" if min_length == 1 else f"Минимальная длина: {min_length}"
+            elif error_type == "string_too_long":
+                max_length = item.get("ctx", {}).get("max_length")
+                message = f"Максимальная длина: {max_length}"
+            elif error_type == "greater_than_equal":
+                value = item.get("ctx", {}).get("ge")
+                message = f"Значение должно быть не меньше {value}"
+            elif error_type == "less_than_equal":
+                value = item.get("ctx", {}).get("le")
+                message = f"Значение должно быть не больше {value}"
+            else:
+                message = item.get("msg", "Некорректные входные данные")
+            messages.append(f"{loc}: {message}" if loc else message)
+        return "; ".join(messages) or "Некорректные входные данные"
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": _format_request_validation(exc)})
+
     @app.exception_handler(NotFoundError)
     async def not_found_handler(_: Request, exc: NotFoundError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
@@ -87,7 +117,10 @@ async def startup() -> None:
     async with engine.begin() as conn:
         if conn.dialect.name == "postgresql":
             await conn.execute(text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'developer'"))
+            await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'handover_to_development'"))
+            await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'vulnerability_recheck'"))
             await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder VARCHAR(255) NOT NULL DEFAULT ''"))
+            await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS timeline_frozen_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE projects ALTER COLUMN folder SET DEFAULT ''"))
             await conn.execute(text("UPDATE projects SET folder = '' WHERE folder = 'Без папки'"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255)"))
@@ -99,12 +132,21 @@ async def startup() -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS workflow_steps JSON"))
+            await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS query_params JSON"))
+            await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_body TEXT"))
+            await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_content_type VARCHAR(127)"))
+            await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_headers JSON"))
             await conn.execute(text("UPDATE users SET tags = '[]'::json WHERE tags IS NULL"))
+            await conn.execute(text("UPDATE endpoints SET query_params = '[]'::json WHERE query_params IS NULL"))
+            await conn.execute(text("UPDATE endpoints SET request_headers = '[]'::json WHERE request_headers IS NULL"))
         elif conn.dialect.name == "sqlite":
             columns = (await conn.execute(text("PRAGMA table_info(projects)"))).fetchall()
             has_folder = any(row[1] == "folder" for row in columns)
+            has_timeline_frozen_at = any(row[1] == "timeline_frozen_at" for row in columns)
             if not has_folder:
                 await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT ''"))
+            if not has_timeline_frozen_at:
+                await conn.execute(text("ALTER TABLE projects ADD COLUMN timeline_frozen_at TIMESTAMP"))
         await conn.run_sync(Base.metadata.create_all)
     await audit_store.ensure_table()
     MinioStorage().ensure_bucket()

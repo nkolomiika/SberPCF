@@ -36,7 +36,7 @@ erDiagram
     users ||--o{ comment_mentions : "упомянут в"
 ```
 
-> **Примечание:** таблица `audit_logs` хранится в **ClickHouse**, а не в PostgreSQL, поэтому не отображается в ERD выше. Схема ClickHouse описана в отдельном разделе ниже.
+> **Примечание:** в приложении есть ORM-таблица `audit_logs` в PostgreSQL для гарантированной фиксации событий, а также ClickHouse-таблица `audit_logs` для аналитического чтения. В ERD выше ClickHouse не отображается, его схема описана в отдельном разделе ниже.
 
 ---
 
@@ -49,13 +49,22 @@ erDiagram
 | Колонка       | Тип                       | Ограничения              | Описание                          |
 |---------------|---------------------------|--------------------------|-----------------------------------|
 | id            | UUID                      | PK, DEFAULT gen_random_uuid() | Первичный ключ              |
-| username      | VARCHAR(100)              | NOT NULL, UNIQUE         | Имя пользователя (логин)          |
-| email         | VARCHAR(255)              | NOT NULL, UNIQUE         | Электронная почта                 |
-| password_hash | VARCHAR(255)              | NOT NULL                 | Хэш пароля (bcrypt)               |
-| role          | ENUM('admin','pentester') | NOT NULL, DEFAULT 'pentester' | Глобальная роль             |
-| is_active     | BOOLEAN                   | NOT NULL, DEFAULT TRUE   | Активен ли аккаунт                |
-| created_at    | TIMESTAMPTZ               | NOT NULL, DEFAULT now()  | Дата регистрации                  |
-| updated_at    | TIMESTAMPTZ               | NOT NULL, DEFAULT now()  | Дата последнего изменения         |
+| username            | VARCHAR(100)              | NOT NULL, UNIQUE         | Имя пользователя (логин)                      |
+| email               | VARCHAR(255)              | NOT NULL, UNIQUE         | Электронная почта                             |
+| full_name           | VARCHAR(255)              | NULLABLE                 | Отображаемое имя пользователя                 |
+| tags                | JSON / ARRAY(JSON text)   | NOT NULL, DEFAULT []     | Пользовательские теги профиля                 |
+| avatar_url          | VARCHAR(500)              | NULLABLE                 | Публичный URL/роут для выдачи аватара         |
+| avatar_minio_bucket | VARCHAR(63)               | NULLABLE                 | Бакет MinIO с аватаром                        |
+| avatar_minio_key    | TEXT                      | NULLABLE                 | Ключ объекта аватара в MinIO                  |
+| avatar_content_type | VARCHAR(127)              | NULLABLE                 | MIME-тип аватара                              |
+| avatar_uploaded_at  | TIMESTAMPTZ               | NULLABLE                 | Дата загрузки аватара                         |
+| password_hash       | VARCHAR(255)              | NOT NULL                 | Хэш пароля (bcrypt)                           |
+| role                | ENUM('admin','pentester','developer') | NOT NULL, DEFAULT 'pentester' | Глобальная роль |
+| is_active           | BOOLEAN                   | NOT NULL, DEFAULT TRUE   | Активен ли аккаунт                            |
+| must_change_password| BOOLEAN                   | NOT NULL, DEFAULT FALSE  | Требуется ли обязательная смена временного пароля |
+| password_changed_at | TIMESTAMPTZ               | NULLABLE                 | Последняя успешная смена постоянного пароля   |
+| created_at          | TIMESTAMPTZ               | NOT NULL, DEFAULT now()  | Дата регистрации                              |
+| updated_at          | TIMESTAMPTZ               | NOT NULL, DEFAULT now()  | Дата последнего изменения                     |
 
 **Индексы:** `email`, `username`
 
@@ -116,7 +125,6 @@ erDiagram
 | project_id | UUID         | NOT NULL, FK → projects.id | Проект                               |
 | ip_address | VARCHAR(45)  | NULLABLE                  | IP-адрес (IPv4 или IPv6)              |
 | hostname   | VARCHAR(255) | NULLABLE                  | Доменное имя / hostname               |
-| os         | VARCHAR(255) | NULLABLE                  | Операционная система                  |
 | status     | ENUM('up','down','unknown') | NOT NULL, DEFAULT 'unknown' | Статус доступности |
 | notes      | TEXT         | NULLABLE                  | Произвольные заметки                  |
 | created_at | TIMESTAMPTZ  | NOT NULL, DEFAULT now()   | Дата добавления                       |
@@ -187,6 +195,7 @@ erDiagram
 | cvss_vector          | VARCHAR(255)                                                   | NULLABLE                       | Векторная строка CVSS                 |
 | cwe_id               | VARCHAR(20)                                                    | NULLABLE                       | Идентификатор CWE (например, CWE-89)  |
 | status               | ENUM('open','in_progress','fixed','wont_fix','accepted_risk') | NOT NULL, DEFAULT 'open'       | Статус уязвимости                     |
+| workflow_steps       | JSON                                                           | NULLABLE                       | Структурированные этапы воспроизведения с `title`, `description`, `image_file_ids`; `image_file_ids` валидируются приложением и должны ссылаться только на `files` этой же уязвимости |
 | steps_to_reproduce   | TEXT                                                           | NULLABLE                       | Шаги воспроизведения                  |
 | impact               | TEXT                                                           | NULLABLE                       | Описание влияния                      |
 | recommendations      | TEXT                                                           | NULLABLE                       | Рекомендации по устранению            |
@@ -329,7 +338,6 @@ Vulnerability ──► vulnerability_assets (asset_type + asset_id)
 |---------------|------------------------------------------------|
 | LOGIN         | Успешный вход                                  |
 | LOGOUT        | Выход                                          |
-| LOGIN_FAILED  | Неудачная попытка входа                        |
 | CREATE        | Создание любой сущности                        |
 | UPDATE        | Редактирование любой сущности                  |
 | DELETE        | Удаление любой сущности                        |
@@ -372,14 +380,15 @@ WebSocket-подключение авторизуется access-токеном.
 3. Все ENUM-типы создавать через `CREATE TYPE` в PostgreSQL до создания таблиц.
 4. Таблица `vulnerability_assets` — полиморфная. Целостность `asset_id` гарантируется приложением, а не FK-ограничением БД.
 5. Файлы: при удалении записи из `files` приложение обязано также удалить объект из MinIO.
-6. `audit_logs.details` в ClickHouse хранится как `String` (сериализованный JSON). Парсинг на стороне приложения при чтении.
+6. В ClickHouse поле деталей хранится как `details_json` (`Nullable(String)`), в PostgreSQL — как JSON в `audit_logs.details`.
 7. Для полей `updated_at` рекомендуется использовать триггер `BEFORE UPDATE` для автоматического обновления.
 8. Миграции вести через Alembic (стандарт для Python/SQLAlchemy).
 9. `refresh_tokens`: сам токен в БД не хранится — только его SHA-256 хэш. При валидации входящий токен хэшируется и сравнивается с `token_hash`.
 10. `notifications`: при создании уведомления рекомендуется также отправлять WebSocket-push получателю (если он онлайн), чтобы счётчик непрочитанных обновился без перезагрузки.
-11. Импорт данных использует **собственный JSON-формат PCF**. Схема фиксируется в документации API. Сторонние форматы (Nmap, Burp) не поддерживаются.
-12. Регистрация пользователей закрыта — эндпоинт создания аккаунта доступен только с ролью `admin`.
-13. Аудит-логи пишутся в ClickHouse асинхронно. Недоступность ClickHouse не должна прерывать основные операции — рекомендуется fire-and-forget с логированием ошибки записи.
+11. Импорт данных использует **собственный JSON-формат PCF**. Схема фиксируется в документации API и валидируется на сервере через Pydantic-модели `PcfImportPayload`, `PcfImportHost`, `PcfImportPort`, `PcfImportService`, `PcfImportEndpoint`.
+12. Повторный импорт PCF JSON не должен дублировать уже существующие хосты/порты/сервисы/endpoints: приложение выполняет merge по идентифицирующим полям и создаёт только отсутствующие сущности.
+13. Регистрация пользователей закрыта — эндпоинт создания аккаунта доступен только с ролью `admin`.
+14. Аудит-логи гарантированно пишутся в PostgreSQL и дополнительно доставляются в ClickHouse. Недоступность ClickHouse не должна прерывать основные операции.
 
 ---
 
@@ -387,28 +396,27 @@ WebSocket-подключение авторизуется access-токеном.
 
 > **СУБД:** ClickHouse  
 > **Движок:** MergeTree (append-only, колоночное хранилище)  
-> **База данных:** `pcf_logs`
+> **База данных:** `pcf`
 
 ### Таблица `audit_logs`
 
 ```sql
-CREATE DATABASE IF NOT EXISTS pcf_logs;
+CREATE DATABASE IF NOT EXISTS pcf;
 
-CREATE TABLE pcf_logs.audit_logs
+CREATE TABLE pcf.audit_logs
 (
     id          UUID,
+    username    Nullable(String),
     user_id     Nullable(UUID),
     action      String,          -- LOGIN, LOGOUT, LOGIN_FAILED, CREATE, UPDATE, DELETE, STATUS_CHANGE, FILE_UPLOAD, FILE_DELETE
     entity_type Nullable(String),-- project, vulnerability, host, port, service, endpoint, comment, file
     entity_id   Nullable(UUID),
-    details     String,          -- JSON-строка (например, '{"old_status":"open","new_status":"fixed"}')
+    details_json Nullable(String), -- JSON-строка (например, '{"old_status":"open","new_status":"fixed"}')
     ip_address  Nullable(String),
     created_at  DateTime64(3, 'UTC')
 )
 ENGINE = MergeTree()
-PARTITION BY toYYYYMM(created_at)
-ORDER BY (created_at, action)
-SETTINGS index_granularity = 8192;
+ORDER BY (created_at, action, id);
 ```
 
 ### Особенности хранения
@@ -416,9 +424,9 @@ SETTINGS index_granularity = 8192;
 | Аспект | Решение |
 |--------|---------|
 | Первичный ключ | `id` (UUID) — уникальность на уровне приложения, ClickHouse не enforces PK |
-| Партиционирование | По месяцу (`toYYYYMM(created_at)`) — эффективная очистка старых данных |
-| Сортировка | `(created_at, action)` — ускоряет запросы по времени и типу события |
-| `details` | `String` (JSON) вместо JSONB — ClickHouse не имеет native JSON-типа с индексацией |
+| Партиционирование | Не используется, таблица создаётся обычным `MergeTree` |
+| Сортировка | `(created_at, action, id)` — ускоряет запросы по времени и типу события |
+| `details_json` | `Nullable(String)` c JSON-строкой; парсинг выполняется приложением при чтении |
 | Удаление строк | Не предусмотрено. При необходимости TTL: `TTL created_at + INTERVAL 1 YEAR` |
 | FK | Отсутствуют — ClickHouse не поддерживает внешние ключи |
 

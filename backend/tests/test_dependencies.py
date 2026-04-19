@@ -1,7 +1,7 @@
 import pytest
 from starlette.requests import Request
 
-from app.dependencies import enforce_csrf
+from app.dependencies import enforce_csrf, is_password_change_allowed_path
 from app.exceptions import ForbiddenError
 
 
@@ -39,3 +39,13 @@ async def test_enforce_csrf_rejects_unknown_origin_tc_sec_005() -> None:
 @pytest.mark.asyncio
 async def test_enforce_csrf_accepts_allowed_origin() -> None:
     await enforce_csrf(_request("DELETE"), origin="http://localhost:3000")
+
+
+def test_password_change_lock_allows_only_whitelisted_paths() -> None:
+    assert is_password_change_allowed_path("/api/v1/auth/force-change-password", "POST") is True
+    assert is_password_change_allowed_path("/api/v1/auth/logout", "POST") is True
+    assert is_password_change_allowed_path("/api/v1/users/me", "GET") is True
+    assert is_password_change_allowed_path("/api/v1/users/me/profile", "GET") is True
+    assert is_password_change_allowed_path("/api/v1/users/me", "PATCH") is False
+    assert is_password_change_allowed_path("/api/v1/users/me/password", "PATCH") is False
+    assert is_password_change_allowed_path("/api/v1/projects", "GET") is False

@@ -1,12 +1,12 @@
-import AttachFileIcon from "@mui/icons-material/AttachFile";
 import DeleteIcon from "@mui/icons-material/Delete";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditIcon from "@mui/icons-material/Edit";
 import AddIcon from "@mui/icons-material/Add";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
-import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import {
   Alert,
   Box,
@@ -28,24 +28,28 @@ import {
   ListItemText,
   Menu,
   MenuItem,
+  Paper,
   Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
   TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { load as parseYaml } from "js-yaml";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
-  addVulnerabilityAsset,
   createHost,
   createVulnerabilityComment,
   createEndpoint,
   createPort,
   createService,
   createVulnerability,
-  deleteVulnerabilityAsset,
   deleteVulnerabilityComment,
   deleteVulnerabilityFile,
   deleteEndpoint,
@@ -54,12 +58,13 @@ import {
   deleteService,
   deleteVulnerability,
   getVulnerability,
+  getApiErrorMessage,
   getServices,
   getHost,
   getHosts,
   getHostVulnerabilities,
+  importOpenApiFile,
   listVulnerabilityComments,
-  listVulnerabilityFiles,
   updateEndpoint,
   updateHost,
   updatePort,
@@ -68,11 +73,14 @@ import {
   updateVulnerability,
   uploadVulnerabilityFile,
 } from "../api";
+import { calculateCvssScore } from "../cvss";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
 import { useAuthStore } from "../store";
 import type {
   Endpoint,
+  EndpointQueryParam,
+  EndpointRequestHeader,
   Host,
   HostDetails,
   HostTreeStats,
@@ -81,15 +89,379 @@ import type {
   Vulnerability,
   VulnerabilityComment,
   VulnerabilityDetails,
-  VulnerabilityFile,
 } from "../types";
 
+/** Swagger UI–style colors for HTTP methods */
+const SWAGGER_METHOD_COLORS: Record<string, { main: string; contrast: string }> = {
+  GET: { main: "#61affe", contrast: "#fff" },
+  POST: { main: "#49cc90", contrast: "#fff" },
+  PUT: { main: "#fca130", contrast: "#fff" },
+  PATCH: { main: "#50e3c2", contrast: "#0d1b12" },
+  DELETE: { main: "#f93e3e", contrast: "#fff" },
+  HEAD: { main: "#9012fe", contrast: "#fff" },
+  OPTIONS: { main: "#0d5aa7", contrast: "#fff" },
+};
+const CVSS_VERSION = "4.0" as const;
+
+function swaggerMethodColors(method: string | null | undefined): { main: string; contrast: string } {
+  const key = (method || "GET").toUpperCase();
+  return SWAGGER_METHOD_COLORS[key] ?? { main: "rgba(100,116,139,0.85)", contrast: "#fff" };
+}
+
+function formatRequestBodyPreview(body: string | null | undefined): string {
+  if (!body?.trim()) {
+    return "";
+  }
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    return body;
+  }
+}
+
+function normalizeEndpointQueryParams(params: EndpointQueryParam[]): EndpointQueryParam[] {
+  return params
+    .map((param) => ({
+      name: param.name.trim(),
+      value: (param.value || "").trim() || null,
+      required: Boolean(param.required),
+      description: (param.description || "").trim() || null,
+    }))
+    .filter((param) => param.name);
+}
+
+/** Parse `a=b&c=d` or line-based query string into structured params */
+function queryStringToQueryParams(raw: string): EndpointQueryParam[] {
+  const t = raw.trim();
+  if (!t) {
+    return [];
+  }
+  const parts = t
+    .split(/[&\n\r]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const out: EndpointQueryParam[] = [];
+  for (const part of parts) {
+    const eq = part.indexOf("=");
+    if (eq === -1) {
+      out.push({ name: part, value: "", required: false, description: "" });
+    } else {
+      const name = part.slice(0, eq).trim();
+      if (name) {
+        out.push({
+          name,
+          value: part.slice(eq + 1).trim(),
+          required: false,
+          description: "",
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function queryParamsToQueryString(params: EndpointQueryParam[] | null | undefined): string {
+  if (!params?.length) {
+    return "";
+  }
+  return normalizeEndpointQueryParams(params)
+    .map((p) => `${p.name}=${p.value ?? ""}`)
+    .join("&");
+}
+
+const HTTP_HEADER_DROP = new Set([
+  "referer",
+  "referrer",
+  "connection",
+  "accept-encoding",
+  "accept-language",
+  "sec-fetch-dest",
+  "sec-fetch-mode",
+  "sec-fetch-site",
+  "sec-fetch-user",
+  "sec-ch-ua",
+  "sec-ch-ua-mobile",
+  "sec-ch-ua-platform",
+  "user-agent",
+  "host",
+]);
+
+function methodSupportsRequestBody(method: Exclude<Endpoint["method"], null>): boolean {
+  return method === "POST" || method === "PUT" || method === "PATCH";
+}
+
+function methodShowsQueryString(method: Exclude<Endpoint["method"], null>): boolean {
+  return method !== "POST";
+}
+
+function normalizeHostForCompare(value: string): string {
+  return value.trim().toLowerCase().replace(/:\d+$/, "");
+}
+
+function hostTokensMismatch(sourceHost: string | null | undefined, assetHost: string | null | undefined): boolean {
+  if (!sourceHost?.trim() || !assetHost?.trim()) {
+    return false;
+  }
+  return normalizeHostForCompare(sourceHost) !== normalizeHostForCompare(assetHost);
+}
+
+function parsePathAndQueryFromToken(pathToken: string): { path: string; queryParams: EndpointQueryParam[] } {
+  const t = pathToken.trim();
+  const toParams = (searchParams: URLSearchParams): EndpointQueryParam[] =>
+    Array.from(searchParams.entries()).map(([name, value]) => ({
+      name,
+      value,
+      required: false,
+      description: "",
+    }));
+  if (t.startsWith("http://") || t.startsWith("https://")) {
+    const u = new URL(t);
+    return { path: u.pathname || "/", queryParams: toParams(u.searchParams) };
+  }
+  const fake = `http://stub.local${t.startsWith("/") ? t : `/${t}`}`;
+  const u = new URL(fake);
+  return { path: u.pathname || "/", queryParams: toParams(u.searchParams) };
+}
+
+function sanitizeEndpointHeaderPairs(pairs: { name: string; value: string }[]): EndpointRequestHeader[] {
+  const out: EndpointRequestHeader[] = [];
+  let hadCookie = false;
+  for (const { name, value } of pairs) {
+    const ln = name.trim().toLowerCase();
+    if (HTTP_HEADER_DROP.has(ln)) {
+      continue;
+    }
+    if (ln === "cookie") {
+      hadCookie = true;
+      continue;
+    }
+    if (ln === "authorization") {
+      out.push({ name: "Authorization", value: "{YOUR_CREDENTIALS_HERE}" });
+      continue;
+    }
+    if (ln === "content-type") {
+      continue;
+    }
+    out.push({ name: name.trim(), value: value.trim() });
+  }
+  if (hadCookie) {
+    out.push({ name: "Cookie", value: "{YOUR_TOKENS_HERE}" });
+  }
+  return out;
+}
+
+function parseHeaderTextToPairs(text: string): { name: string; value: string }[] {
+  const out: { name: string; value: string }[] = [];
+  for (const line of text.split("\n")) {
+    const t = line.replace(/\r$/, "");
+    const idx = t.indexOf(":");
+    if (idx === -1 || !t.slice(0, idx).trim()) {
+      continue;
+    }
+    out.push({ name: t.slice(0, idx).trim(), value: t.slice(idx + 1).trim() });
+  }
+  return out;
+}
+
+function parseHeaderTextToSanitizedList(text: string): EndpointRequestHeader[] {
+  return sanitizeEndpointHeaderPairs(parseHeaderTextToPairs(text));
+}
+
+function headersArrayToText(headers: EndpointRequestHeader[] | null | undefined): string {
+  if (!headers?.length) {
+    return "";
+  }
+  return headers.map((h) => `${h.name}: ${h.value}`).join("\n");
+}
+
+function escapeForCurlDoubleQuotes(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n");
+}
+
+function buildDraftCurlLine({
+  method,
+  path,
+  queryString,
+  requestBody,
+  requestContentType,
+  requestHeaders,
+  hostTarget,
+}: {
+  method: Exclude<Endpoint["method"], null>;
+  path: string;
+  queryString: string;
+  requestBody: string;
+  requestContentType: string;
+  requestHeaders: EndpointRequestHeader[];
+  hostTarget: string;
+}): string {
+  const params = method === "POST" ? [] : normalizeEndpointQueryParams(queryStringToQueryParams(queryString));
+  const qs = new URLSearchParams();
+  for (const p of params) {
+    qs.append(p.name, p.value || "");
+  }
+  const pathOnly = (path.trim() || "/").split("?")[0];
+  const queryPart = qs.toString();
+  const url = `http://${hostTarget}${pathOnly}${queryPart ? `?${queryPart}` : ""}`;
+  const body = methodSupportsRequestBody(method) ? requestBody.trim() : "";
+  const ct = requestContentType.trim() || "application/json";
+  let curl = `curl -X ${method}`;
+  for (const h of requestHeaders) {
+    curl += ` -H "${escapeForCurlDoubleQuotes(h.name)}: ${escapeForCurlDoubleQuotes(h.value)}"`;
+  }
+  if (body) {
+    curl += ` -H "Content-Type: ${escapeForCurlDoubleQuotes(ct)}" -d "${escapeForCurlDoubleQuotes(body)}"`;
+  }
+  curl += ` "${url}"`;
+  return curl;
+}
+
+type ParsedRawHttpResult = {
+  method: Exclude<Endpoint["method"], null>;
+  path: string;
+  queryParams: EndpointQueryParam[];
+  requestBody: string;
+  requestContentType: string;
+  headerPairsRaw: { name: string; value: string }[];
+  sanitizedHeaders: EndpointRequestHeader[];
+  hostHeaderRaw: string | null;
+};
+
+function parseRawHttpRequest(rawRequest: string): ParsedRawHttpResult | null {
+  const normalized = rawRequest.replace(/\r/g, "");
+  const sep = normalized.indexOf("\n\n");
+  const headerBlock = sep === -1 ? normalized : normalized.slice(0, sep);
+  const body = sep === -1 ? "" : normalized.slice(sep + 2);
+  const lines = headerBlock.split("\n").filter((line) => line.length > 0);
+  if (!lines.length) {
+    return null;
+  }
+  const requestLineMatch = lines[0].match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)\s+HTTP\/\d(?:\.\d)?$/i);
+  if (!requestLineMatch) {
+    return null;
+  }
+  const method = requestLineMatch[1].toUpperCase() as Exclude<Endpoint["method"], null>;
+  const { path, queryParams } = parsePathAndQueryFromToken(requestLineMatch[2]);
+  const headerPairsRaw: { name: string; value: string }[] = [];
+  let requestContentType = "application/json";
+  let hostHeaderRaw: string | null = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const idx = line.indexOf(":");
+    if (idx === -1) {
+      continue;
+    }
+    const name = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    headerPairsRaw.push({ name, value });
+    const ln = name.toLowerCase();
+    if (ln === "content-type") {
+      requestContentType = value || "application/json";
+    }
+    if (ln === "host") {
+      hostHeaderRaw = value;
+    }
+  }
+  let requestBody = body;
+  if (!methodSupportsRequestBody(method)) {
+    requestBody = "";
+  }
+  const sanitizedHeaders = sanitizeEndpointHeaderPairs(headerPairsRaw);
+  return {
+    method,
+    path,
+    queryParams,
+    requestBody,
+    requestContentType,
+    headerPairsRaw,
+    sanitizedHeaders,
+    hostHeaderRaw,
+  };
+}
+
+/** Дерево путей эндпоинтов (как в Swagger): сегменты — «папки», лист — операции. */
+type EndpointPathTreeNode = {
+  segment: string;
+  pathKey: string;
+  children: EndpointPathTreeNode[];
+  endpointsAtNode: Endpoint[];
+};
+
+function normalizeUriPathForTree(p: string): string {
+  const raw = (p || "/").trim().replace(/\/+/g, "/");
+  if (!raw || raw === "/") {
+    return "/";
+  }
+  const withSlash = raw.startsWith("/") ? raw : `/${raw}`;
+  if (withSlash.length > 1 && withSlash.endsWith("/")) {
+    return withSlash.slice(0, -1) || "/";
+  }
+  return withSlash;
+}
+
+function endpointPathToSegments(p: string): string[] {
+  const n = normalizeUriPathForTree(p);
+  if (n === "/") {
+    return [];
+  }
+  return n.slice(1).split("/").filter(Boolean);
+}
+
+function buildEndpointPathTree(endpoints: Endpoint[]): EndpointPathTreeNode {
+  const root: EndpointPathTreeNode = { segment: "", pathKey: "", children: [], endpointsAtNode: [] };
+  for (const ep of endpoints) {
+    const segs = endpointPathToSegments(ep.path);
+    if (segs.length === 0) {
+      root.endpointsAtNode.push(ep);
+      continue;
+    }
+    let node = root;
+    let accum = "";
+    for (const seg of segs) {
+      accum = `${accum}/${seg}`;
+      let child = node.children.find((c) => c.segment === seg);
+      if (!child) {
+        child = { segment: seg, pathKey: accum, children: [], endpointsAtNode: [] };
+        node.children.push(child);
+      }
+      node = child;
+    }
+    node.endpointsAtNode.push(ep);
+  }
+  const sortRecursive = (n: EndpointPathTreeNode) => {
+    n.children.sort((a, b) => a.segment.localeCompare(b.segment, undefined, { sensitivity: "base" }));
+    n.endpointsAtNode.sort((a, b) => {
+      const cm = (a.method || "GET").localeCompare(b.method || "GET");
+      if (cm !== 0) {
+        return cm;
+      }
+      return a.path.localeCompare(b.path);
+    });
+    n.children.forEach(sortRecursive);
+  };
+  sortRecursive(root);
+  return root;
+}
+
+function collectExpandableFolderKeys(node: EndpointPathTreeNode): string[] {
+  const keys: string[] = [];
+  if (node.pathKey && node.children.length > 0) {
+    keys.push(node.pathKey);
+  }
+  for (const c of node.children) {
+    keys.push(...collectExpandableFolderKeys(c));
+  }
+  return keys;
+}
+
 export function HostDetailPage() {
-  const { projectId, hostId } = useParams<{ projectId: string; hostId: string }>();
+  const { projectId, hostId, vulnerabilityId } = useParams<{ projectId: string; hostId: string; vulnerabilityId?: string }>();
   const location = useLocation();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const storagePrefix = projectId && hostId ? `host-detail:${projectId}:${hostId}` : null;
+  const highlightedCommentId = new URLSearchParams(location.search).get("comment");
+  const isVulnerabilityRoute = Boolean(vulnerabilityId);
 
   const [host, setHost] = useState<HostDetails | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -97,7 +469,7 @@ export function HostDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
-  const [selectedSection, setSelectedSection] = useState<DetailSection>("overview");
+  const [selectedSection, setSelectedSection] = useState<DetailSection>(isVulnerabilityRoute ? "vulns" : "overview");
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [hostStatsById, setHostStatsById] = useState<Record<string, HostTreeStats>>({});
   const [isEditPortOpen, setEditPortOpen] = useState(false);
@@ -121,8 +493,12 @@ export function HostDetailPage() {
   const [editingEndpointId, setEditingEndpointId] = useState<string | null>(null);
   const [editingEndpointPath, setEditingEndpointPath] = useState("");
   const [editingEndpointMethod, setEditingEndpointMethod] = useState<Exclude<Endpoint["method"], null>>("GET");
-  const [editingEndpointDescription, setEditingEndpointDescription] = useState("");
-  const [editingEndpointRequestRaw, setEditingEndpointRequestRaw] = useState("");
+  const [editingEndpointImportRaw, setEditingEndpointImportRaw] = useState("");
+  const [editingEndpointQueryString, setEditingEndpointQueryString] = useState("");
+  const [editingEndpointHeadersText, setEditingEndpointHeadersText] = useState("");
+  const [editingEndpointImportHostWarn, setEditingEndpointImportHostWarn] = useState(false);
+  const [editingEndpointRequestBody, setEditingEndpointRequestBody] = useState("");
+  const [editingEndpointRequestContentType, setEditingEndpointRequestContentType] = useState("application/json");
   const [isEditVulnerabilityOpen, setEditVulnerabilityOpen] = useState(false);
   const [editingVulnerabilityId, setEditingVulnerabilityId] = useState<string | null>(null);
   const [editingVulnerabilityTitle, setEditingVulnerabilityTitle] = useState("");
@@ -136,8 +512,12 @@ export function HostDetailPage() {
   const [isCreateEndpointOpen, setCreateEndpointOpen] = useState(false);
   const [creatingEndpointPath, setCreatingEndpointPath] = useState("");
   const [creatingEndpointMethod, setCreatingEndpointMethod] = useState<Exclude<Endpoint["method"], null>>("GET");
-  const [creatingEndpointDescription, setCreatingEndpointDescription] = useState("");
-  const [creatingEndpointRequestRaw, setCreatingEndpointRequestRaw] = useState("");
+  const [creatingEndpointImportRaw, setCreatingEndpointImportRaw] = useState("");
+  const [creatingEndpointQueryString, setCreatingEndpointQueryString] = useState("");
+  const [creatingEndpointHeadersText, setCreatingEndpointHeadersText] = useState("");
+  const [creatingEndpointImportHostWarn, setCreatingEndpointImportHostWarn] = useState(false);
+  const [creatingEndpointRequestBody, setCreatingEndpointRequestBody] = useState("");
+  const [creatingEndpointRequestContentType, setCreatingEndpointRequestContentType] = useState("application/json");
   const [swaggerImporting, setSwaggerImporting] = useState(false);
   const [nmapImporting, setNmapImporting] = useState(false);
   const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
@@ -145,7 +525,6 @@ export function HostDetailPage() {
   const [creatingVulnerabilityDescription, setCreatingVulnerabilityDescription] = useState("");
   const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
   const [creatingVulnerabilityStatus, setCreatingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
-  const [creatingVulnerabilityCvssVersion, setCreatingVulnerabilityCvssVersion] = useState<"3.1" | "4.0" | "">("");
   const [creatingVulnerabilityCvssScore, setCreatingVulnerabilityCvssScore] = useState("");
   const [creatingVulnerabilityCvssVector, setCreatingVulnerabilityCvssVector] = useState("");
   const [creatingVulnerabilityCweId, setCreatingVulnerabilityCweId] = useState("");
@@ -156,7 +535,6 @@ export function HostDetailPage() {
   const [isEditHostOpen, setEditHostOpen] = useState(false);
   const [editingHostIp, setEditingHostIp] = useState("");
   const [editingHostName, setEditingHostName] = useState("");
-  const [editingHostStatus, setEditingHostStatus] = useState<Host["status"]>("unknown");
   const [editingHostNotes, setEditingHostNotes] = useState("");
   const [portActionsAnchorEl, setPortActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activePort, setActivePort] = useState<Port | null>(null);
@@ -167,18 +545,44 @@ export function HostDetailPage() {
   const [expandedPortIds, setExpandedPortIds] = useState<string[]>([]);
   const [expandedEndpointIds, setExpandedEndpointIds] = useState<string[]>([]);
   const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<string[]>([]);
+  const endpointPathTree = useMemo(() => buildEndpointPathTree(host?.endpoints ?? []), [host?.endpoints]);
+  const [endpointTreeExpandedKeys, setEndpointTreeExpandedKeys] = useState<Set<string>>(() => new Set());
   const [vulnDetailOpen, setVulnDetailOpen] = useState(false);
   const [activeVulnDetails, setActiveVulnDetails] = useState<VulnerabilityDetails | null>(null);
-  const [vulnFiles, setVulnFiles] = useState<VulnerabilityFile[]>([]);
   const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
-  const [linkAssetType, setLinkAssetType] = useState<"host" | "port" | "service" | "endpoint">("host");
-  const [linkAssetId, setLinkAssetId] = useState("");
   const [newComment, setNewComment] = useState("");
   const [vulnBusy, setVulnBusy] = useState(false);
   const [editCommentOpen, setEditCommentOpen] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingCommentContent, setEditingCommentContent] = useState("");
   const pendingSection = (location.state as { section?: DetailSection } | null)?.section;
+
+  const openHostSection = useCallback(
+    (section: DetailSection) => {
+      if (!projectId || !hostId) {
+        return;
+      }
+      if (isVulnerabilityRoute) {
+        navigate(`/projects/${projectId}/hosts/${hostId}`, { state: { section } });
+        return;
+      }
+      setSelectedSection(section);
+    },
+    [hostId, isVulnerabilityRoute, navigate, projectId]
+  );
+
+  const openVulnerabilityPage = useCallback(
+    (targetVulnerabilityId: string, commentId?: string | null) => {
+      if (!projectId || !hostId) {
+        return;
+      }
+      const query = commentId ? `?comment=${commentId}` : "";
+      navigate(`/projects/${projectId}/hosts/${hostId}/vulnerabilities/${targetVulnerabilityId}${query}`, {
+        state: { section: "vulns" satisfies DetailSection },
+      });
+    },
+    [hostId, navigate, projectId]
+  );
 
   const loadHost = useCallback(async () => {
     if (!projectId || !hostId) {
@@ -229,8 +633,8 @@ export function HostDetailPage() {
         }
       });
       setHostStatsById(mappedStats);
-    } catch {
-      setError("Не удалось загрузить страницу хоста.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось загрузить страницу хоста."));
     } finally {
       setLoading(false);
     }
@@ -258,6 +662,10 @@ export function HostDetailPage() {
     if (!storagePrefix) {
       return;
     }
+    if (isVulnerabilityRoute) {
+      setSelectedSection("vulns");
+      return;
+    }
     if (pendingSection) {
       setSelectedSection(pendingSection);
       return;
@@ -270,7 +678,7 @@ export function HostDetailPage() {
     if (storedCollapsed) {
       setSidebarCollapsed(storedCollapsed === "1");
     }
-  }, [pendingSection, storagePrefix]);
+  }, [isVulnerabilityRoute, pendingSection, storagePrefix]);
 
   useEffect(() => {
     if (!storagePrefix) {
@@ -340,7 +748,6 @@ export function HostDetailPage() {
     }
     setEditingHostIp(host.ip_address ?? "");
     setEditingHostName(host.hostname ?? "");
-    setEditingHostStatus(host.status);
     setEditingHostNotes(host.notes ?? "");
     closeHostActionsMenu();
     setEditHostOpen(true);
@@ -355,7 +762,6 @@ export function HostDetailPage() {
       const updatedHost = await updateHost(projectId, hostId, {
         ip_address: editingHostIp.trim() || undefined,
         hostname: editingHostName.trim() || undefined,
-        status: editingHostStatus,
         notes: editingHostNotes.trim() || undefined,
       });
       setHost((prev) =>
@@ -370,8 +776,8 @@ export function HostDetailPage() {
           : prev
       );
       setEditHostOpen(false);
-    } catch {
-      setError("Не удалось обновить информацию о хосте.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить информацию о хосте."));
     }
   };
 
@@ -412,25 +818,72 @@ export function HostDetailPage() {
     setExpanded((current) => (current.includes(id) ? current.filter((itemId) => itemId !== id) : [...current, id]));
   };
 
-  const buildEndpointRawRequest = (endpoint: Endpoint) => {
+  const toggleEndpointTreeFolder = useCallback((folderPathKey: string) => {
+    setEndpointTreeExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderPathKey)) {
+        next.delete(folderPathKey);
+      } else {
+        next.add(folderPathKey);
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    setEndpointTreeExpandedKeys(new Set(collectExpandableFolderKeys(endpointPathTree)));
+  }, [endpointPathTree]);
+
+  const buildEndpointRawRequestFromEndpoint = (endpoint: Endpoint) => {
     const method = endpoint.method ?? "GET";
     const hostHeader = host?.hostname || host?.ip_address || "example.local";
-    return `${method} ${endpoint.path} HTTP/1.1\nHost: ${hostHeader}\n\n`;
+    const query = new URLSearchParams();
+    for (const param of endpoint.query_params || []) {
+      if (param.name) {
+        query.append(param.name, param.value || "");
+      }
+    }
+    const requestTarget = query.toString() ? `${endpoint.path}?${query.toString()}` : endpoint.path;
+    const lines = [`${method} ${requestTarget} HTTP/1.1`, `Host: ${hostHeader}`];
+    for (const h of endpoint.request_headers || []) {
+      const ln = h.name.trim().toLowerCase();
+      if (ln === "host" || ln === "content-type") {
+        continue;
+      }
+      lines.push(`${h.name}: ${h.value}`);
+    }
+    const requestBody = methodSupportsRequestBody(method as Exclude<Endpoint["method"], null>) ? (endpoint.request_body || "") : "";
+    if (requestBody.trim()) {
+      lines.push(`Content-Type: ${endpoint.request_content_type || "application/json"}`);
+    }
+    return `${lines.join("\n")}\n\n${requestBody}`.trimEnd();
   };
 
   const buildEndpointCurl = (endpoint: Endpoint) => {
-    const method = endpoint.method ?? "GET";
     const hostTarget = host?.hostname || host?.ip_address || "example.local";
-    return `curl -X ${method} "http://${hostTarget}${endpoint.path}"`;
+    return buildDraftCurlLine({
+      method: (endpoint.method || "GET") as Exclude<Endpoint["method"], null>,
+      path: endpoint.path,
+      queryString: queryParamsToQueryString(endpoint.query_params),
+      requestBody: endpoint.request_body || "",
+      requestContentType: endpoint.request_content_type || "application/json",
+      requestHeaders: endpoint.request_headers || [],
+      hostTarget,
+    });
   };
 
   const copyEndpointRequest = async (format: "curl" | "raw") => {
     if (!activeEndpoint) {
       return;
     }
-    const text = format === "curl" ? buildEndpointCurl(activeEndpoint) : buildEndpointRawRequest(activeEndpoint);
-    await navigator.clipboard.writeText(text);
-    closeEndpointActions();
+    try {
+      const text = format === "curl" ? buildEndpointCurl(activeEndpoint) : buildEndpointRawRequestFromEndpoint(activeEndpoint);
+      await navigator.clipboard.writeText(text);
+      setInfoMessage(format === "curl" ? "cURL запрос скопирован." : "Raw HTTP запрос скопирован.");
+      closeEndpointActions();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось скопировать запрос в буфер обмена."));
+    }
   };
 
   const openPortEdit = (port: Port) => {
@@ -592,7 +1045,7 @@ export function HostDetailPage() {
       await loadHost();
       setInfoMessage(`Nmap импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}.`);
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "Не удалось импортировать порты из Nmap.");
+      setError(getApiErrorMessage(importError, "Не удалось импортировать порты из Nmap."));
     } finally {
       setNmapImporting(false);
     }
@@ -652,47 +1105,226 @@ export function HostDetailPage() {
     await loadHost();
   };
 
-  const parseRawHttpRequest = (rawRequest: string): { method: Exclude<Endpoint["method"], null>; path: string } | null => {
-    const firstLine = rawRequest.replace("\r", "").split("\n").map((line) => line.trim()).find(Boolean);
-    if (!firstLine) {
-      return null;
+  const buildEndpointRawRequestFromFields = ({
+    method,
+    path,
+    queryParams,
+    requestHeaders,
+    requestBody,
+    requestContentType,
+    hostLine,
+  }: {
+    method: Exclude<Endpoint["method"], null>;
+    path: string;
+    queryParams: EndpointQueryParam[];
+    requestHeaders: EndpointRequestHeader[];
+    requestBody: string;
+    requestContentType: string;
+    hostLine: string;
+  }) => {
+    const normalizedPath = path.trim() || "/";
+    const query = new URLSearchParams();
+    for (const param of normalizeEndpointQueryParams(queryParams)) {
+      query.append(param.name, param.value || "");
     }
-    const requestLineMatch = firstLine.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)\s+HTTP\/\d(?:\.\d)?$/i);
-    if (!requestLineMatch) {
-      return null;
+    const requestTarget = query.toString() ? `${normalizedPath}?${query.toString()}` : normalizedPath;
+    const lines = [`${method} ${requestTarget} HTTP/1.1`, `Host: ${hostLine}`];
+    for (const h of requestHeaders) {
+      const ln = h.name.trim().toLowerCase();
+      if (ln === "host" || ln === "content-type") {
+        continue;
+      }
+      lines.push(`${h.name}: ${h.value}`);
     }
-    return {
-      method: requestLineMatch[1].toUpperCase() as Exclude<Endpoint["method"], null>,
-      path: requestLineMatch[2],
-    };
+    const body = methodSupportsRequestBody(method) ? requestBody.trim() : "";
+    if (body) {
+      lines.push(`Content-Type: ${requestContentType.trim() || "application/json"}`);
+    }
+    return `${lines.join("\n")}\n\n${body}`.trimEnd();
   };
 
-  const applyParsedRequestToCreateEndpoint = (rawRequest: string) => {
-    setCreatingEndpointRequestRaw(rawRequest);
-    const parsed = parseRawHttpRequest(rawRequest);
+  const editingEndpointResolvedQueryParams = useMemo(
+    () =>
+      editingEndpointMethod === "POST"
+        ? []
+        : normalizeEndpointQueryParams(queryStringToQueryParams(editingEndpointQueryString)),
+    [editingEndpointMethod, editingEndpointQueryString]
+  );
+
+  const creatingEndpointResolvedQueryParams = useMemo(
+    () =>
+      creatingEndpointMethod === "POST"
+        ? []
+        : normalizeEndpointQueryParams(queryStringToQueryParams(creatingEndpointQueryString)),
+    [creatingEndpointMethod, creatingEndpointQueryString]
+  );
+
+  const endpointFormHostLine = host?.hostname || host?.ip_address || "example.local";
+
+  const creatingEndpointSanitizedHeaders = useMemo(
+    () => parseHeaderTextToSanitizedList(creatingEndpointHeadersText),
+    [creatingEndpointHeadersText]
+  );
+
+  const editingEndpointSanitizedHeaders = useMemo(
+    () => parseHeaderTextToSanitizedList(editingEndpointHeadersText),
+    [editingEndpointHeadersText]
+  );
+
+  const applyParsedRequestToCreateEndpoint = () => {
+    const parsed = parseRawHttpRequest(creatingEndpointImportRaw);
     if (!parsed) {
+      setError("Не удалось разобрать Raw HTTP. Первая строка должна быть вида: GET /path HTTP/1.1");
       return;
     }
+    setError(null);
     setCreatingEndpointMethod(parsed.method);
     setCreatingEndpointPath(parsed.path);
+    setCreatingEndpointRequestBody(parsed.requestBody);
+    setCreatingEndpointRequestContentType(parsed.requestContentType);
+    setCreatingEndpointHeadersText(headersArrayToText(parsed.sanitizedHeaders));
+    const assetHost = host?.hostname || host?.ip_address || "";
+    setCreatingEndpointImportHostWarn(hostTokensMismatch(parsed.hostHeaderRaw, assetHost));
+    if (parsed.method === "POST") {
+      setCreatingEndpointQueryString("");
+    } else {
+      setCreatingEndpointQueryString(queryParamsToQueryString(parsed.queryParams));
+    }
+    setInfoMessage("Поля заполнены из Raw HTTP.");
   };
 
-  const applyParsedRequestToEditEndpoint = (rawRequest: string) => {
-    setEditingEndpointRequestRaw(rawRequest);
-    const parsed = parseRawHttpRequest(rawRequest);
+  const applyParsedRequestToEditEndpoint = () => {
+    const parsed = parseRawHttpRequest(editingEndpointImportRaw);
     if (!parsed) {
+      setError("Не удалось разобрать Raw HTTP. Первая строка должна быть вида: GET /path HTTP/1.1");
       return;
     }
+    setError(null);
     setEditingEndpointMethod(parsed.method);
     setEditingEndpointPath(parsed.path);
+    setEditingEndpointRequestBody(parsed.requestBody);
+    setEditingEndpointRequestContentType(parsed.requestContentType);
+    setEditingEndpointHeadersText(headersArrayToText(parsed.sanitizedHeaders));
+    const assetHost = host?.hostname || host?.ip_address || "";
+    setEditingEndpointImportHostWarn(hostTokensMismatch(parsed.hostHeaderRaw, assetHost));
+    if (parsed.method === "POST") {
+      setEditingEndpointQueryString("");
+    } else {
+      setEditingEndpointQueryString(queryParamsToQueryString(parsed.queryParams));
+    }
+    setInfoMessage("Поля заполнены из Raw HTTP.");
+  };
+
+  const editingEndpointPreviewRequest = useMemo(
+    () =>
+      buildEndpointRawRequestFromFields({
+        method: editingEndpointMethod,
+        path: editingEndpointPath,
+        queryParams: editingEndpointResolvedQueryParams,
+        requestHeaders: editingEndpointSanitizedHeaders,
+        requestBody: editingEndpointRequestBody,
+        requestContentType: editingEndpointRequestContentType,
+        hostLine: endpointFormHostLine,
+      }),
+    [
+      editingEndpointMethod,
+      editingEndpointPath,
+      editingEndpointResolvedQueryParams,
+      editingEndpointSanitizedHeaders,
+      editingEndpointRequestBody,
+      editingEndpointRequestContentType,
+      endpointFormHostLine,
+    ]
+  );
+
+  const creatingEndpointPreviewRequest = useMemo(
+    () =>
+      buildEndpointRawRequestFromFields({
+        method: creatingEndpointMethod,
+        path: creatingEndpointPath,
+        queryParams: creatingEndpointResolvedQueryParams,
+        requestHeaders: creatingEndpointSanitizedHeaders,
+        requestBody: creatingEndpointRequestBody,
+        requestContentType: creatingEndpointRequestContentType,
+        hostLine: endpointFormHostLine,
+      }),
+    [
+      creatingEndpointMethod,
+      creatingEndpointPath,
+      creatingEndpointResolvedQueryParams,
+      creatingEndpointSanitizedHeaders,
+      creatingEndpointRequestBody,
+      creatingEndpointRequestContentType,
+      endpointFormHostLine,
+    ]
+  );
+
+  const copyCreatingEndpointDraft = async (format: "curl" | "raw") => {
+    const hostTarget = host?.hostname || host?.ip_address || "example.local";
+    try {
+      const text =
+        format === "raw"
+          ? creatingEndpointPreviewRequest
+          : buildDraftCurlLine({
+              method: creatingEndpointMethod,
+              path: creatingEndpointPath,
+              queryString: creatingEndpointQueryString,
+              requestBody: creatingEndpointRequestBody,
+              requestContentType: creatingEndpointRequestContentType,
+              requestHeaders: creatingEndpointSanitizedHeaders,
+              hostTarget,
+            });
+      await navigator.clipboard.writeText(text);
+      setInfoMessage(format === "curl" ? "cURL скопирован в буфер обмена." : "Raw HTTP скопирован в буфер обмена.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось скопировать в буфер обмена."));
+    }
+  };
+
+  const copyEditingEndpointDraft = async (format: "curl" | "raw") => {
+    const hostTarget = host?.hostname || host?.ip_address || "example.local";
+    try {
+      const text =
+        format === "raw"
+          ? editingEndpointPreviewRequest
+          : buildDraftCurlLine({
+              method: editingEndpointMethod,
+              path: editingEndpointPath,
+              queryString: editingEndpointQueryString,
+              requestBody: editingEndpointRequestBody,
+              requestContentType: editingEndpointRequestContentType,
+              requestHeaders: editingEndpointSanitizedHeaders,
+              hostTarget,
+            });
+      await navigator.clipboard.writeText(text);
+      setInfoMessage(format === "curl" ? "cURL скопирован в буфер обмена." : "Raw HTTP скопирован в буфер обмена.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось скопировать в буфер обмена."));
+    }
+  };
+
+  const openCreateEndpointDialog = () => {
+    setCreatingEndpointPath("");
+    setCreatingEndpointMethod("GET");
+    setCreatingEndpointImportRaw("");
+    setCreatingEndpointQueryString("");
+    setCreatingEndpointHeadersText("");
+    setCreatingEndpointImportHostWarn(false);
+    setCreatingEndpointRequestBody("");
+    setCreatingEndpointRequestContentType("application/json");
+    setCreateEndpointOpen(true);
   };
 
   const openEndpointEdit = (endpoint: Endpoint) => {
     setEditingEndpointId(endpoint.id);
     setEditingEndpointPath(endpoint.path);
     setEditingEndpointMethod(endpoint.method || "GET");
-    setEditingEndpointDescription(endpoint.description || "");
-    setEditingEndpointRequestRaw("");
+    setEditingEndpointQueryString(queryParamsToQueryString(endpoint.query_params));
+    setEditingEndpointHeadersText(headersArrayToText(endpoint.request_headers));
+    setEditingEndpointImportHostWarn(false);
+    setEditingEndpointRequestBody(endpoint.request_body || "");
+    setEditingEndpointRequestContentType(endpoint.request_content_type || "application/json");
+    setEditingEndpointImportRaw("");
     setEditEndpointOpen(true);
   };
 
@@ -700,14 +1332,21 @@ export function HostDetailPage() {
     if (!projectId || !hostId || !editingEndpointId) {
       return;
     }
+    const headers = parseHeaderTextToSanitizedList(editingEndpointHeadersText);
+    const bodyAllowed = methodSupportsRequestBody(editingEndpointMethod);
     await updateEndpoint(projectId, hostId, editingEndpointId, {
       path: editingEndpointPath,
       method: editingEndpointMethod,
-      description: editingEndpointDescription || undefined,
-      request_raw: editingEndpointRequestRaw.trim() || undefined,
+      description: null,
+      query_params:
+        editingEndpointMethod === "POST" ? [] : normalizeEndpointQueryParams(queryStringToQueryParams(editingEndpointQueryString)),
+      request_headers: headers,
+      request_body: bodyAllowed && editingEndpointRequestBody.trim() ? editingEndpointRequestBody.trim() : null,
+      request_content_type:
+        bodyAllowed && editingEndpointRequestBody.trim() ? editingEndpointRequestContentType.trim() || "application/json" : null,
     });
     setEditEndpointOpen(false);
-    setEditingEndpointRequestRaw("");
+    setEditingEndpointImportRaw("");
     await loadHost();
   };
 
@@ -726,17 +1365,28 @@ export function HostDetailPage() {
     if (!projectId || !hostId) {
       return;
     }
+    const headers = parseHeaderTextToSanitizedList(creatingEndpointHeadersText);
+    const bodyAllowed = methodSupportsRequestBody(creatingEndpointMethod);
     await createEndpoint(projectId, hostId, {
       path: creatingEndpointPath.trim() || undefined,
       method: creatingEndpointMethod,
-      description: creatingEndpointDescription.trim() || undefined,
-      request_raw: creatingEndpointRequestRaw.trim() || undefined,
+      description: null,
+      query_params:
+        creatingEndpointMethod === "POST" ? [] : normalizeEndpointQueryParams(queryStringToQueryParams(creatingEndpointQueryString)),
+      request_headers: headers,
+      request_body: bodyAllowed && creatingEndpointRequestBody.trim() ? creatingEndpointRequestBody.trim() : null,
+      request_content_type:
+        bodyAllowed && creatingEndpointRequestBody.trim() ? creatingEndpointRequestContentType.trim() || "application/json" : null,
     });
     setCreateEndpointOpen(false);
     setCreatingEndpointPath("");
     setCreatingEndpointMethod("GET");
-    setCreatingEndpointDescription("");
-    setCreatingEndpointRequestRaw("");
+    setCreatingEndpointImportRaw("");
+    setCreatingEndpointQueryString("");
+    setCreatingEndpointHeadersText("");
+    setCreatingEndpointImportHostWarn(false);
+    setCreatingEndpointRequestBody("");
+    setCreatingEndpointRequestContentType("application/json");
     await loadHost();
   };
 
@@ -748,146 +1398,16 @@ export function HostDetailPage() {
     setError(null);
     setInfoMessage(null);
     try {
-      const rawText = (await file.text()).replace(/^\uFEFF/, "");
-      let parsedSpec: unknown;
-      const lowerCaseName = file.name.toLowerCase();
-      const looksLikeYaml = lowerCaseName.endsWith(".yaml") || lowerCaseName.endsWith(".yml");
-      try {
-        parsedSpec = looksLikeYaml ? parseYaml(rawText) : JSON.parse(rawText);
-      } catch {
-        if (!looksLikeYaml) {
-          try {
-            parsedSpec = parseYaml(rawText);
-          } catch {
-            const looksLikeBrokenPseudoJson = /(^|\n)\s*swagger\s+2\.0\s*,?/i.test(rawText) && !/"swagger"\s*:\s*"2\.0"/i.test(rawText);
-            if (looksLikeBrokenPseudoJson) {
-              throw new Error("Swagger файл повреждён: отсутствуют JSON-кавычки/двоеточия. Сохрани файл как валидный JSON или YAML.");
-            }
-            throw new Error("Swagger/OpenAPI файл должен быть валидным JSON или YAML.");
-          }
-        } else {
-          throw new Error("Swagger/OpenAPI YAML файл невалиден.");
-        }
-      }
-      if (!parsedSpec || typeof parsedSpec !== "object") {
-        throw new Error("Некорректный Swagger/OpenAPI документ.");
-      }
-      const specObject = parsedSpec as { paths?: Record<string, unknown>; basePath?: string };
-      const paths = specObject.paths;
-      if (!paths || typeof paths !== "object") {
-        throw new Error("В Swagger/OpenAPI документе отсутствует объект paths.");
-      }
-      const basePath = (typeof specObject.basePath === "string" ? specObject.basePath : "").trim();
-
-      const extractHostFromSpec = () => {
-        const swaggerHost = typeof (specObject as { host?: unknown }).host === "string" ? String((specObject as { host?: string }).host).trim() : "";
-        if (swaggerHost) {
-          return swaggerHost.replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
-        }
-        const servers = (specObject as { servers?: Array<{ url?: unknown }> }).servers;
-        if (Array.isArray(servers)) {
-          for (const server of servers) {
-            if (!server || typeof server.url !== "string") {
-              continue;
-            }
-            try {
-              const parsed = new URL(server.url);
-              if (parsed.hostname) {
-                return parsed.hostname;
-              }
-            } catch {
-              // ignore invalid URL entries and continue
-            }
-          }
-        }
-        return "";
-      };
-
-      let targetHostId = hostId;
-      const specHost = extractHostFromSpec();
-      const currentHostTarget = (host?.hostname || host?.ip_address || "").toLowerCase();
-      const normalizedSpecHost = specHost.toLowerCase();
-      const shouldOfferCreateHost = Boolean(projectId && normalizedSpecHost && normalizedSpecHost !== currentHostTarget);
-      if (shouldOfferCreateHost && projectId) {
-        const shouldCreateHost = window.confirm(
-          `В Swagger найден хост "${specHost}". Создать новый хост и импортировать эндпоинты туда?\n\nНажми "Отмена", чтобы импортировать в текущий хост.`
-        );
-        if (shouldCreateHost) {
-          const isIpAddress = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(specHost);
-          const createdHost = await createHost(projectId, {
-            ip_address: isIpAddress ? specHost : undefined,
-            hostname: isIpAddress ? undefined : specHost,
-            notes: "Создано автоматически из Swagger/OpenAPI импорта",
-            status: "unknown",
-          });
-          targetHostId = createdHost.id;
-        }
-      }
-
-      if (!targetHostId) {
-        throw new Error("Не удалось определить хост для импорта.");
-      }
-
-      const methodOrder = ["get", "post", "put", "patch", "delete", "head", "options"] as const;
-      const methodSet = new Set(methodOrder);
-      const operations: Array<{ method: Exclude<Endpoint["method"], null>; path: string; description?: string }> = [];
-      Object.entries(paths as Record<string, unknown>).forEach(([pathValue, pathItem]) => {
-        if (!pathItem || typeof pathItem !== "object") {
-          return;
-        }
-        Object.entries(pathItem as Record<string, unknown>).forEach(([rawMethodName, operation]) => {
-          const methodName = rawMethodName.toLowerCase();
-          if (!methodSet.has(methodName as (typeof methodOrder)[number])) {
-            return;
-          }
-          if (!operation || typeof operation !== "object") {
-            return;
-          }
-          const opInfo = operation as { summary?: string; description?: string };
-          const combinedDescription = [opInfo.summary, opInfo.description].filter(Boolean).join("\n\n");
-          const normalizedPath = `${basePath}${pathValue}`.replace(/\/{2,}/g, "/");
-          operations.push({
-            method: methodName.toUpperCase() as Exclude<Endpoint["method"], null>,
-            path: normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`,
-            description: combinedDescription || undefined,
-          });
-        });
-      });
-      if (!operations.length) {
-        throw new Error("В Swagger/OpenAPI документе не найдено методов для импорта.");
-      }
-      const existingKeys = new Set(
-        (targetHostId === hostId ? host?.endpoints ?? [] : []).map((item) => `${item.method ?? "ANY"}:${item.path}`)
-      );
-      let created = 0;
-      let skipped = 0;
-      let failed = 0;
-      for (const operation of operations) {
-        const key = `${operation.method}:${operation.path}`;
-        if (existingKeys.has(key)) {
-          skipped += 1;
-          continue;
-        }
-        try {
-          await createEndpoint(projectId, targetHostId, operation);
-          existingKeys.add(key);
-          created += 1;
-        } catch {
-          failed += 1;
-        }
-      }
-      if (targetHostId === hostId) {
-        await loadHost();
-      } else {
-        navigate(`/projects/${projectId}/hosts/${targetHostId}`);
-      }
+      const result = await importOpenApiFile(projectId, hostId, file);
+      await loadHost();
       setInfoMessage(
-        `Swagger импорт завершен: добавлено ${created}, пропущено ${skipped}, ошибок ${failed}${
-          targetHostId !== hostId ? ` (в хост ${specHost || "из Swagger"})` : ""
-        }.`
+        `Swagger импорт завершен: добавлено ${result.endpoints_created}, пропущено ${result.endpoints_skipped}, предупреждений ${result.errors.length}.`
       );
+      if (result.errors.length) {
+        setError(result.errors.join("\n"));
+      }
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "Не удалось импортировать Swagger/OpenAPI.");
+      setError(getApiErrorMessage(importError, "Не удалось импортировать Swagger/OpenAPI."));
     } finally {
       setSwaggerImporting(false);
     }
@@ -931,26 +1451,25 @@ export function HostDetailPage() {
     if (!projectId || !hostId) {
       return;
     }
-    await createVulnerability(projectId, {
+    const created = await createVulnerability(projectId, {
       host_id: hostId,
       title: creatingVulnerabilityTitle.trim(),
-      description: creatingVulnerabilityDescription.trim() || undefined,
+      description: creatingVulnerabilityDescription.trim() || null,
       severity: creatingVulnerabilitySeverity,
       status: creatingVulnerabilityStatus,
-      cvss_version: creatingVulnerabilityCvssVersion || undefined,
-      cvss_score: creatingVulnerabilityCvssScore === "" ? undefined : Number(creatingVulnerabilityCvssScore),
-      cvss_vector: creatingVulnerabilityCvssVector.trim() || undefined,
-      cwe_id: creatingVulnerabilityCweId.trim() || undefined,
+      cvss_version: creatingVulnerabilityCvssVector.trim() ? CVSS_VERSION : null,
+      cvss_score: creatingVulnerabilityCvssScore === "" ? null : Number(creatingVulnerabilityCvssScore),
+      cvss_vector: creatingVulnerabilityCvssVector.trim() || null,
+      cwe_id: creatingVulnerabilityCweId.trim() || null,
       workflow_steps: creatingVulnerabilityStages,
-      impact: creatingVulnerabilityImpact.trim() || undefined,
-      recommendations: creatingVulnerabilityRecommendations.trim() || undefined,
+      impact: creatingVulnerabilityImpact.trim() || null,
+      recommendations: creatingVulnerabilityRecommendations.trim() || null,
     });
     setCreateVulnerabilityOpen(false);
     setCreatingVulnerabilityTitle("");
     setCreatingVulnerabilityDescription("");
     setCreatingVulnerabilitySeverity("medium");
     setCreatingVulnerabilityStatus("open");
-    setCreatingVulnerabilityCvssVersion("");
     setCreatingVulnerabilityCvssScore("");
     setCreatingVulnerabilityCvssVector("");
     setCreatingVulnerabilityCweId("");
@@ -958,46 +1477,21 @@ export function HostDetailPage() {
     setCreatingVulnerabilityImpact("");
     setCreatingVulnerabilityRecommendations("");
     await loadHost();
+    if (isVulnerabilityRoute) {
+      navigate(`/projects/${projectId}/hosts/${hostId}/vulnerabilities/${created.id}`, { replace: true, state: { section: "vulns" } });
+    }
   };
 
   const hostServices = useMemo(() => Object.values(servicesByPortId).flat(), [servicesByPortId]);
 
-  const linkAssetOptions = useMemo(() => {
-    if (linkAssetType === "host") {
-      return host ? [{ id: host.id, label: `Host: ${host.hostname || host.ip_address || host.id}` }] : [];
-    }
-    if (linkAssetType === "port") {
-      return (host?.ports ?? []).map((port) => ({
-        id: port.id,
-        label: `Port: ${port.port_number}/${port.protocol}`,
-      }));
-    }
-    if (linkAssetType === "service") {
-      return hostServices.map((service) => ({
-        id: service.id,
-        label: `Service: ${service.name}${service.version ? ` ${service.version}` : ""}`,
-      }));
-    }
-    return (host?.endpoints ?? []).map((endpoint) => ({
-      id: endpoint.id,
-      label: `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}`,
-    }));
-  }, [host, hostServices, linkAssetType]);
-
-  const resolveAssetLabel = (assetType: string, assetId: string) => {
-    if (assetType === "host") {
-      return `Host: ${host?.hostname || host?.ip_address || assetId}`;
-    }
-    if (assetType === "port") {
-      const port = host?.ports.find((item) => item.id === assetId);
-      return port ? `Port: ${port.port_number}/${port.protocol}` : `port:${assetId}`;
-    }
-    if (assetType === "service") {
-      const service = hostServices.find((item) => item.id === assetId);
-      return service ? `Service: ${service.name}${service.version ? ` ${service.version}` : ""}` : `service:${assetId}`;
-    }
-    const endpoint = host?.endpoints.find((item) => item.id === assetId);
-    return endpoint ? `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}` : `endpoint:${assetId}`;
+  const buildAutoCvssFields = (vector: string | null) => {
+    const normalizedVersion = vector?.trim() ? CVSS_VERSION : null;
+    const { score } = calculateCvssScore(normalizedVersion, vector);
+    return {
+      cvss_version: normalizedVersion,
+      cvss_vector: vector,
+      cvss_score: score,
+    };
   };
 
   useEffect(() => {
@@ -1018,7 +1512,7 @@ export function HostDetailPage() {
     // #endregion
   }, [vulnDetailOpen, activeVulnDetails?.id]);
 
-  const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
+  const loadVulnerabilityDetails = useCallback(async (vulnerabilityId: string) => {
     if (!projectId) {
       return;
     }
@@ -1040,13 +1534,11 @@ export function HostDetailPage() {
         }),
       }).catch(() => {});
       // #endregion
-      const [vulnDetail, files, commentsPage] = await Promise.all([
+      const [vulnDetail, commentsPage] = await Promise.all([
         getVulnerability(projectId, vulnerabilityId),
-        listVulnerabilityFiles(projectId, vulnerabilityId),
         listVulnerabilityComments(projectId, vulnerabilityId),
       ]);
       setActiveVulnDetails(vulnDetail);
-      setVulnFiles(files);
       setVulnComments(commentsPage.items);
       // #region agent log
       fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
@@ -1058,7 +1550,7 @@ export function HostDetailPage() {
           hypothesisId: "H4",
           location: "HostDetailPage.tsx:loadVulnerabilityDetails:success",
           message: "Host vulnerability details loaded",
-          data: { vulnerabilityId, filesCount: files.length, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
+          data: { vulnerabilityId, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
           timestamp: Date.now(),
         }),
       }).catch(() => {});
@@ -1087,11 +1579,35 @@ export function HostDetailPage() {
         }),
       }).catch(() => {});
       // #endregion
-      setError("Не удалось загрузить карточку уязвимости.");
+      setError(getApiErrorMessage(error, "Не удалось загрузить карточку уязвимости."));
     } finally {
       setVulnBusy(false);
     }
-  };
+  }, [hostId, projectId]);
+
+  useEffect(() => {
+    if (!vulnerabilityId) {
+      setVulnDetailOpen(false);
+      setActiveVulnDetails(null);
+      setVulnComments([]);
+      return;
+    }
+    setSelectedSection("vulns");
+    void loadVulnerabilityDetails(vulnerabilityId);
+  }, [loadVulnerabilityDetails, vulnerabilityId]);
+
+  useEffect(() => {
+    if (!highlightedCommentId || !activeVulnDetails || !vulnComments.some((comment) => comment.id === highlightedCommentId)) {
+      return;
+    }
+    const element = document.getElementById(`comment-${highlightedCommentId}`);
+    if (!element) {
+      return;
+    }
+    window.setTimeout(() => {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
+  }, [activeVulnDetails, highlightedCommentId, vulnComments]);
 
   const saveActiveVulnerability = async () => {
     if (!projectId || !activeVulnDetails) {
@@ -1102,22 +1618,22 @@ export function HostDetailPage() {
     try {
       const updated = await updateVulnerability(projectId, activeVulnDetails.id, {
         title: activeVulnDetails.title,
-        description: activeVulnDetails.description || undefined,
+        description: activeVulnDetails.description || null,
         severity: activeVulnDetails.severity,
         status: activeVulnDetails.status,
-        cvss_version: activeVulnDetails.cvss_version || undefined,
-        cvss_score: activeVulnDetails.cvss_score ?? undefined,
-        cvss_vector: activeVulnDetails.cvss_vector || undefined,
-        cwe_id: activeVulnDetails.cwe_id || undefined,
+        cvss_version: activeVulnDetails.cvss_vector?.trim() ? CVSS_VERSION : null,
+        cvss_score: activeVulnDetails.cvss_score,
+        cvss_vector: activeVulnDetails.cvss_vector,
+        cwe_id: activeVulnDetails.cwe_id,
         workflow_steps: activeVulnDetails.workflow_steps,
-        steps_to_reproduce: activeVulnDetails.steps_to_reproduce || undefined,
-        impact: activeVulnDetails.impact || undefined,
-        recommendations: activeVulnDetails.recommendations || undefined,
+        steps_to_reproduce: activeVulnDetails.steps_to_reproduce || null,
+        impact: activeVulnDetails.impact || null,
+        recommendations: activeVulnDetails.recommendations || null,
       });
       setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated } : prev));
       await loadHost();
-    } catch {
-      setError("Не удалось сохранить уязвимость.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось сохранить уязвимость."));
     } finally {
       setVulnBusy(false);
     }
@@ -1131,79 +1647,11 @@ export function HostDetailPage() {
     setError(null);
     try {
       await deleteVulnerability(projectId, activeVulnDetails.id);
-      setVulnDetailOpen(false);
+      closeVulnerabilityView();
       setActiveVulnDetails(null);
       await loadHost();
-    } catch {
-      setError("Не удалось удалить уязвимость.");
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const uploadFileToActiveVuln = async (file: File | null) => {
-    if (!projectId || !activeVulnDetails || !file) {
-      return;
-    }
-    setVulnBusy(true);
-    try {
-      await uploadVulnerabilityFile(projectId, activeVulnDetails.id, file);
-      const files = await listVulnerabilityFiles(projectId, activeVulnDetails.id);
-      setVulnFiles(files);
-    } catch {
-      setError("Не удалось загрузить файл.");
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const removeVulnerabilityFile = async (fileId: string) => {
-    if (!projectId || !activeVulnDetails) {
-      return;
-    }
-    setVulnBusy(true);
-    try {
-      await deleteVulnerabilityFile(projectId, activeVulnDetails.id, fileId);
-      const files = await listVulnerabilityFiles(projectId, activeVulnDetails.id);
-      setVulnFiles(files);
-    } catch {
-      setError("Не удалось удалить файл.");
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const addAssetLinkToActiveVuln = async () => {
-    if (!projectId || !activeVulnDetails || !linkAssetId) {
-      return;
-    }
-    setVulnBusy(true);
-    try {
-      await addVulnerabilityAsset(projectId, activeVulnDetails.id, {
-        asset_type: linkAssetType,
-        asset_id: linkAssetId,
-      });
-      await loadVulnerabilityDetails(activeVulnDetails.id);
-      await loadHost();
-      setLinkAssetId("");
-    } catch {
-      setError("Не удалось привязать актив к уязвимости.");
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const removeAssetLinkFromActiveVuln = async (assetLinkId: string) => {
-    if (!projectId || !activeVulnDetails) {
-      return;
-    }
-    setVulnBusy(true);
-    try {
-      await deleteVulnerabilityAsset(projectId, activeVulnDetails.id, assetLinkId);
-      await loadVulnerabilityDetails(activeVulnDetails.id);
-      await loadHost();
-    } catch {
-      setError("Не удалось удалить привязку актива.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить уязвимость."));
     } finally {
       setVulnBusy(false);
     }
@@ -1215,12 +1663,11 @@ export function HostDetailPage() {
     }
     setVulnBusy(true);
     try {
-      await createVulnerabilityComment(projectId, activeVulnDetails.id, newComment.trim());
-      const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
-      setVulnComments(commentsPage.items);
+      const created = await createVulnerabilityComment(projectId, activeVulnDetails.id, newComment.trim());
+      setVulnComments((prev) => [...prev, created]);
       setNewComment("");
-    } catch {
-      setError("Не удалось добавить комментарий.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось добавить комментарий."));
     } finally {
       setVulnBusy(false);
     }
@@ -1233,10 +1680,9 @@ export function HostDetailPage() {
     setVulnBusy(true);
     try {
       await deleteVulnerabilityComment(projectId, activeVulnDetails.id, commentId);
-      const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
-      setVulnComments(commentsPage.items);
-    } catch {
-      setError("Не удалось удалить комментарий.");
+      setVulnComments((prev) => prev.filter((comment) => comment.id !== commentId));
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить комментарий."));
     } finally {
       setVulnBusy(false);
     }
@@ -1254,14 +1700,13 @@ export function HostDetailPage() {
     }
     setVulnBusy(true);
     try {
-      await updateVulnerabilityComment(projectId, activeVulnDetails.id, editingCommentId, editingCommentContent.trim());
-      const commentsPage = await listVulnerabilityComments(projectId, activeVulnDetails.id);
-      setVulnComments(commentsPage.items);
+      const updated = await updateVulnerabilityComment(projectId, activeVulnDetails.id, editingCommentId, editingCommentContent.trim());
+      setVulnComments((prev) => prev.map((comment) => (comment.id === updated.id ? updated : comment)));
       setEditCommentOpen(false);
       setEditingCommentId(null);
       setEditingCommentContent("");
-    } catch {
-      setError("Не удалось обновить комментарий.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить комментарий."));
     } finally {
       setVulnBusy(false);
     }
@@ -1284,6 +1729,592 @@ export function HostDetailPage() {
     fixed: { bgcolor: "rgba(76,175,80,0.16)", color: "#a5d6a7", border: "1px solid rgba(76,175,80,0.38)" },
     wont_fix: { bgcolor: "rgba(156,39,176,0.16)", color: "#ce93d8", border: "1px solid rgba(156,39,176,0.38)" },
     accepted_risk: { bgcolor: "rgba(96,125,139,0.2)", color: "#b0bec5", border: "1px solid rgba(96,125,139,0.38)" },
+  };
+
+  const renderEndpointPaper = (endpoint: Endpoint): ReactNode => {
+    const methodColors = swaggerMethodColors(endpoint.method);
+    const expanded = expandedEndpointIds.includes(endpoint.id);
+    const segs = endpointPathToSegments(endpoint.path);
+    const shortTitle = segs.length ? segs[segs.length - 1]! : "/";
+    const fullPathDisplay = normalizeUriPathForTree(endpoint.path);
+    const hasParams = !!endpoint.query_params?.length;
+    const hasBody = !!(endpoint.request_body && endpoint.request_body.trim());
+    const showBodySection = methodSupportsRequestBody((endpoint.method || "GET") as Exclude<Endpoint["method"], null>);
+    const hasSavedHeaders = !!(endpoint.request_headers && endpoint.request_headers.length > 0);
+    return (
+      <Paper
+        key={endpoint.id}
+        variant="outlined"
+        sx={{
+          borderRadius: 1,
+          overflow: "hidden",
+          borderColor: "rgba(126,224,255,0.16)",
+          borderLeft: `4px solid ${methodColors.main}`,
+          backgroundColor: "rgba(8,17,31,0.35)",
+          "& .endpoint-actions": {
+            opacity: 0,
+            pointerEvents: "none",
+            transition: "opacity 0.15s ease-in-out",
+          },
+          "&:hover .endpoint-actions": {
+            opacity: 1,
+            pointerEvents: "auto",
+          },
+        }}
+      >
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={1}
+          onClick={() => toggleExpandedId(endpoint.id, setExpandedEndpointIds)}
+          sx={{
+            px: 1.5,
+            py: 1.1,
+            cursor: "pointer",
+            flexWrap: "wrap",
+            rowGap: 0.5,
+            backgroundColor: expanded ? "rgba(126,224,255,0.06)" : "transparent",
+          }}
+        >
+          <Chip
+            size="small"
+            label={(endpoint.method || "GET").toUpperCase()}
+            sx={{
+              fontWeight: 800,
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              letterSpacing: 0.4,
+              bgcolor: methodColors.main,
+              color: methodColors.contrast,
+              borderRadius: 0.75,
+              height: 26,
+            }}
+          />
+          <Stack spacing={0.15} sx={{ minWidth: 0 }}>
+            <Typography
+              component="span"
+              sx={{
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                fontWeight: 700,
+                fontSize: "0.95rem",
+                lineHeight: 1.2,
+              }}
+            >
+              {shortTitle}
+            </Typography>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", wordBreak: "break-all", lineHeight: 1.2 }}
+            >
+              {fullPathDisplay}
+            </Typography>
+          </Stack>
+          <Box sx={{ flex: "1 1 40px" }} />
+          <Stack direction="row" spacing={0.25} alignItems="center" className="endpoint-actions" onClick={(e) => e.stopPropagation()}>
+            <Tooltip title="Действия">
+              <IconButton size="small" onClick={(event) => openEndpointActions(event, endpoint)}>
+                <MoreVertIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+          <ExpandMoreIcon
+            fontSize="small"
+            sx={{
+              color: "text.secondary",
+              transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform 0.2s ease",
+            }}
+          />
+        </Stack>
+
+        <Collapse in={expanded} timeout="auto" unmountOnExit>
+          <Box sx={{ px: 2, pb: 2, pt: 0, borderTop: "1px solid rgba(126,224,255,0.1)" }}>
+            {hasParams ? (
+              <>
+                <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 1.25, mb: 1 }}>
+                  Параметры
+                </Typography>
+              <TableContainer
+                component={Paper}
+                variant="outlined"
+                sx={{ borderColor: "rgba(126,224,255,0.14)", backgroundColor: "rgba(8,17,31,0.45)" }}
+              >
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 700, width: "34%", borderColor: "rgba(126,224,255,0.12)" }}>Имя</TableCell>
+                      <TableCell sx={{ fontWeight: 700, borderColor: "rgba(126,224,255,0.12)" }}>Описание</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {endpoint.query_params!.map((param, index) => (
+                      <TableRow key={`${endpoint.id}-${param.name}-${index}`}>
+                        <TableCell
+                          sx={{
+                            verticalAlign: "top",
+                            borderColor: "rgba(126,224,255,0.1)",
+                            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          }}
+                        >
+                          <Box component="span" fontWeight={700}>
+                            {param.name}
+                            {param.required ? (
+                              <Box component="span" sx={{ color: "error.main", ml: 0.25 }}>
+                                *
+                              </Box>
+                            ) : null}
+                          </Box>
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            string · query
+                          </Typography>
+                          <Typography variant="caption" display="block" color="text.disabled">
+                            {param.required ? "обязательный" : "необязательный"}
+                          </Typography>
+                        </TableCell>
+                        <TableCell sx={{ verticalAlign: "top", borderColor: "rgba(126,224,255,0.1)" }}>
+                          {param.description && (
+                            <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                              {param.description}
+                            </Typography>
+                          )}
+                          <Typography variant="body2" component="div">
+                            <Box component="span" color="text.secondary">
+                              Значение:{" "}
+                            </Box>
+                            <Box component="span" sx={{ fontFamily: "ui-monospace, monospace", wordBreak: "break-all" }}>
+                              {param.value || "—"}
+                            </Box>
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+              </>
+            ) : null}
+
+            {hasSavedHeaders && (
+              <>
+                <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 2.5, mb: 1 }}>
+                  Заголовки
+                </Typography>
+                <TableContainer
+                  component={Paper}
+                  variant="outlined"
+                  sx={{ borderColor: "rgba(126,224,255,0.14)", backgroundColor: "rgba(8,17,31,0.45)" }}
+                >
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell sx={{ fontWeight: 700, width: "28%", borderColor: "rgba(126,224,255,0.12)" }}>Имя</TableCell>
+                        <TableCell sx={{ fontWeight: 700, borderColor: "rgba(126,224,255,0.12)" }}>Значение</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {endpoint.request_headers!.map((h, index) => (
+                        <TableRow key={`${endpoint.id}-hdr-${index}`}>
+                          <TableCell
+                            sx={{
+                              verticalAlign: "top",
+                              borderColor: "rgba(126,224,255,0.1)",
+                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                            }}
+                          >
+                            {h.name}
+                          </TableCell>
+                          <TableCell
+                            sx={{
+                              verticalAlign: "top",
+                              borderColor: "rgba(126,224,255,0.1)",
+                              wordBreak: "break-word",
+                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                              fontSize: "0.8125rem",
+                            }}
+                          >
+                            {h.value}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </>
+            )}
+
+            {showBodySection && (hasBody || endpoint.request_content_type) && (
+              <>
+                <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 2.5, mb: 1 }}>
+                  Тело запроса
+                </Typography>
+                {endpoint.request_content_type && (
+                  <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Тип содержимого
+                    </Typography>
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={endpoint.request_content_type}
+                      sx={{ fontFamily: "ui-monospace, monospace", borderColor: "rgba(126,224,255,0.25)" }}
+                    />
+                  </Stack>
+                )}
+                {hasBody ? (
+                  <>
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.75 }}>
+                      Пример значения
+                    </Typography>
+                    <Paper
+                      variant="outlined"
+                      sx={{
+                        m: 0,
+                        p: 1.5,
+                        borderColor: "rgba(126,224,255,0.14)",
+                        backgroundColor: "rgba(15,23,42,0.92)",
+                        overflowX: "auto",
+                      }}
+                    >
+                      <Box
+                        component="pre"
+                        sx={{
+                          m: 0,
+                          fontSize: "0.8125rem",
+                          lineHeight: 1.55,
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          color: "#e2e8f0",
+                        }}
+                      >
+                        {formatRequestBodyPreview(endpoint.request_body)}
+                      </Box>
+                    </Paper>
+                  </>
+                ) : (
+                  <Typography variant="body2" color="text.disabled" fontStyle="italic">
+                    Тело запроса не задано (указан только тип содержимого)
+                  </Typography>
+                )}
+              </>
+            )}
+          </Box>
+        </Collapse>
+      </Paper>
+    );
+  };
+
+  const renderEndpointPathTree = (root: EndpointPathTreeNode): ReactNode => {
+    const walk = (node: EndpointPathTreeNode, depth: number): ReactNode => {
+      const isRoot = node.pathKey === "";
+      const papers = node.endpointsAtNode.map((ep) => renderEndpointPaper(ep));
+      if (isRoot) {
+        return (
+          <Stack spacing={1.25} key="ep-tree-root">
+            {papers}
+            {node.children.map((child) => (
+              <Box key={child.pathKey}>{walk(child, 1)}</Box>
+            ))}
+          </Stack>
+        );
+      }
+      if (node.children.length === 0) {
+        return (
+          <Stack key={node.pathKey} spacing={1.25}>
+            {papers}
+          </Stack>
+        );
+      }
+      const expanded = endpointTreeExpandedKeys.has(node.pathKey);
+      return (
+        <Box key={node.pathKey}>
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0.75}
+            onClick={() => toggleEndpointTreeFolder(node.pathKey)}
+            sx={{
+              cursor: "pointer",
+              py: 0.65,
+              px: 0.5,
+              borderRadius: 0.75,
+              pl: Math.min(depth, 6) * 1.25,
+              "&:hover": { backgroundColor: "rgba(126,224,255,0.06)" },
+            }}
+          >
+            <ExpandMoreIcon
+              fontSize="small"
+              sx={{
+                color: "text.secondary",
+                transform: expanded ? "rotate(0deg)" : "rotate(-90deg)",
+                transition: "transform 0.2s ease",
+              }}
+            />
+            <Typography fontWeight={700} sx={{ fontFamily: "ui-monospace, monospace", fontSize: "0.9rem" }}>
+              {node.segment}
+            </Typography>
+          </Stack>
+          <Collapse in={expanded} timeout="auto" unmountOnExit>
+            <Stack
+              spacing={1.25}
+              sx={{
+                pl: 1.5,
+                ml: Math.min(depth, 6) * 1.25 + 0.75,
+                borderLeft: "1px solid rgba(126,224,255,0.12)",
+                mt: 0.5,
+              }}
+            >
+              {papers}
+              {node.children.map((child) => (
+                <Box key={child.pathKey}>{walk(child, depth + 1)}</Box>
+              ))}
+            </Stack>
+          </Collapse>
+        </Box>
+      );
+    };
+    return walk(root, 0);
+  };
+
+  const closeVulnerabilityView = () => {
+    if (projectId && hostId && isVulnerabilityRoute) {
+      navigate(`/projects/${projectId}/hosts/${hostId}`, { state: { section: "vulns" } });
+      return;
+    }
+    setVulnDetailOpen(false);
+  };
+
+  const renderCommentsSection = (): ReactNode => (
+    <Stack spacing={1.25} sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+      <Typography variant="subtitle1" fontWeight={700}>
+        Комментарии ({vulnComments.length})
+      </Typography>
+      <TextField
+        label="Комментарий (@username только для участников проекта)"
+        multiline
+        minRows={3}
+        value={newComment}
+        onChange={(event) => setNewComment(event.target.value)}
+        helperText="Поле вынесено выше, чтобы обсуждение было видно во время редактирования карточки."
+      />
+      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1}>
+        <Typography variant="caption" color="text.secondary">
+          Упоминания отправляются только участникам текущего проекта.
+        </Typography>
+        <Button variant="contained" disabled={!newComment.trim() || vulnBusy} onClick={() => void addCommentToActiveVuln()}>
+          Добавить комментарий
+        </Button>
+      </Stack>
+      <List dense disablePadding>
+        {vulnComments.map((comment) => {
+          const isHighlighted = highlightedCommentId === comment.id;
+          return (
+            <ListItem
+              id={`comment-${comment.id}`}
+              key={comment.id}
+              alignItems="flex-start"
+              sx={{
+                border: isHighlighted ? "1px solid rgba(76,175,80,0.65)" : undefined,
+                backgroundColor: isHighlighted ? "rgba(76,175,80,0.08)" : undefined,
+                scrollMarginTop: 96,
+              }}
+              secondaryAction={
+                user?.role === "admin" || user?.id === comment.user_id ? (
+                  <Stack direction="row" spacing={0.5}>
+                    <IconButton size="small" onClick={() => openCommentEdit(comment)}>
+                      <EditIcon fontSize="small" />
+                    </IconButton>
+                    <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
+                      <DeleteOutlineIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                ) : null
+              }
+            >
+              <ListItemText primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`} secondary={comment.content} />
+            </ListItem>
+          );
+        })}
+        {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
+      </List>
+    </Stack>
+  );
+
+  const renderVulnerabilityDetailsContent = (): ReactNode => {
+    if (!activeVulnDetails) {
+      return <Typography color="text.secondary">Уязвимость не выбрана.</Typography>;
+    }
+
+    return (
+      <Stack spacing={2} sx={{ mt: 0.5 }}>
+        <Grid container spacing={2}>
+          <Grid size={{ xs: 12, md: 8 }}>
+            <TextField
+              label="Название"
+              fullWidth
+              value={activeVulnDetails.title}
+              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, title: event.target.value } : prev))}
+            />
+          </Grid>
+          <Grid size={{ xs: 12, md: 2 }}>
+            <TextField
+              select
+              label="Критичность"
+              fullWidth
+              value={activeVulnDetails.severity}
+              onChange={(event) =>
+                setActiveVulnDetails((prev) => (prev ? { ...prev, severity: event.target.value as Vulnerability["severity"] } : prev))
+              }
+            >
+              <MenuItem value="critical">critical</MenuItem>
+              <MenuItem value="high">high</MenuItem>
+              <MenuItem value="medium">medium</MenuItem>
+              <MenuItem value="low">low</MenuItem>
+              <MenuItem value="info">info</MenuItem>
+            </TextField>
+          </Grid>
+          <Grid size={{ xs: 12, md: 2 }}>
+            <TextField
+              select
+              label="Статус"
+              fullWidth
+              value={activeVulnDetails.status}
+              onChange={(event) =>
+                setActiveVulnDetails((prev) => (prev ? { ...prev, status: event.target.value as Vulnerability["status"] } : prev))
+              }
+            >
+              <MenuItem value="open">open</MenuItem>
+              <MenuItem value="in_progress">in_progress</MenuItem>
+              <MenuItem value="fixed">fixed</MenuItem>
+              <MenuItem value="wont_fix">wont_fix</MenuItem>
+              <MenuItem value="accepted_risk">accepted_risk</MenuItem>
+            </TextField>
+          </Grid>
+          <Grid size={{ xs: 12 }}>
+            <TextField
+              label="Описание"
+              fullWidth
+              multiline
+              minRows={3}
+              value={activeVulnDetails.description || ""}
+              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, description: event.target.value || null } : prev))}
+            />
+          </Grid>
+          <Grid size={{ xs: 12 }}>
+            {renderCommentsSection()}
+          </Grid>
+          <Grid size={{ xs: 12, md: 3 }}>
+            <TextField
+              label="CVSS версия"
+              fullWidth
+              value={CVSS_VERSION}
+              slotProps={{ input: { readOnly: true } }}
+              helperText="В карточке поддерживается только CVSS 4.0"
+            />
+          </Grid>
+          <Grid size={{ xs: 12, md: 3 }}>
+            <TextField
+              label="CVSS score"
+              type="number"
+              fullWidth
+              value={activeVulnDetails.cvss_score ?? ""}
+              slotProps={{ input: { readOnly: true } }}
+              helperText="Рассчитывается автоматически по версии и вектору"
+            />
+          </Grid>
+          <Grid size={{ xs: 12, md: 6 }}>
+            <TextField
+              label="CVSS vector"
+              fullWidth
+              value={activeVulnDetails.cvss_vector || ""}
+              onChange={(event) =>
+                setActiveVulnDetails((prev) => (prev ? { ...prev, ...buildAutoCvssFields(event.target.value || null) } : prev))
+              }
+            />
+          </Grid>
+          <Grid size={{ xs: 12 }}>
+            <TextField
+              label="CWE ID"
+              fullWidth
+              value={activeVulnDetails.cwe_id || ""}
+              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cwe_id: event.target.value || null } : prev))}
+            />
+          </Grid>
+          <Grid size={{ xs: 12 }}>
+            <VulnerabilityStagesEditor
+              stages={activeVulnDetails.workflow_steps || []}
+              endpoints={host?.endpoints || []}
+              hostLabel={host?.hostname || host?.ip_address || undefined}
+              busy={vulnBusy}
+              onChange={(nextStages) =>
+                setActiveVulnDetails((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        workflow_steps: nextStages,
+                      }
+                    : prev
+                )
+              }
+              onUploadImage={async (stageId, file) => {
+                if (!projectId || !activeVulnDetails) {
+                  return;
+                }
+                try {
+                  const uploadedFile = await uploadVulnerabilityFile(projectId, activeVulnDetails.id, file);
+                  const nextWorkflowSteps = (activeVulnDetails.workflow_steps || []).map((stage) =>
+                    stage.id === stageId ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] } : stage
+                  );
+                  const updated = await updateVulnerability(projectId, activeVulnDetails.id, { workflow_steps: nextWorkflowSteps });
+                  setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
+                } catch {
+                  setError("Не удалось загрузить картинку этапа.");
+                }
+              }}
+              onRemoveImage={async (_stageId, fileId) => {
+                if (!projectId || !activeVulnDetails) {
+                  return;
+                }
+                try {
+                  await deleteVulnerabilityFile(projectId, activeVulnDetails.id, fileId);
+                  const nextWorkflowSteps = (activeVulnDetails.workflow_steps || []).map((stage) => ({
+                    ...stage,
+                    image_file_ids: stage.image_file_ids.filter((imageFileId) => imageFileId !== fileId),
+                  }));
+                  const updated = await updateVulnerability(projectId, activeVulnDetails.id, { workflow_steps: nextWorkflowSteps });
+                  setActiveVulnDetails((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
+                } catch {
+                  setError("Не удалось удалить картинку этапа.");
+                }
+              }}
+            />
+          </Grid>
+          <Grid size={{ xs: 12 }}>
+            <TextField
+              label="Влияние"
+              fullWidth
+              multiline
+              minRows={2}
+              value={activeVulnDetails.impact || ""}
+              onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev))}
+            />
+          </Grid>
+          <Grid size={{ xs: 12 }}>
+            <TextField
+              label="Рекомендации"
+              fullWidth
+              multiline
+              minRows={2}
+              value={activeVulnDetails.recommendations || ""}
+              onChange={(event) =>
+                setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: event.target.value || null } : prev))
+              }
+            />
+          </Grid>
+        </Grid>
+
+      </Stack>
+    );
   };
 
   if (loading) {
@@ -1340,7 +2371,7 @@ export function HostDetailPage() {
           vulnerabilitiesCount={vulnerabilitiesCount}
           hostStatsById={hostStatsById}
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-          onSelectSection={setSelectedSection}
+          onSelectSection={openHostSection}
           onSelectProjectOverview={() => navigate(`/projects/${projectId}`)}
           onSelectHost={() => undefined}
           onOpenHost={(nextHostId, section) => navigate(`/projects/${projectId}/hosts/${nextHostId}`, { state: { section } })}
@@ -1350,7 +2381,7 @@ export function HostDetailPage() {
           <Grid container spacing={2}>
             <Grid size={{ xs: 12, md: 4 }}>
               <Card
-                onClick={() => setSelectedSection("ports")}
+                onClick={() => openHostSection("ports")}
                 sx={{
                   cursor: "pointer",
                   border: selectedSection === "ports" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
@@ -1367,7 +2398,7 @@ export function HostDetailPage() {
             </Grid>
             <Grid size={{ xs: 12, md: 4 }}>
               <Card
-                onClick={() => setSelectedSection("endpoints")}
+                onClick={() => openHostSection("endpoints")}
                 sx={{
                   cursor: "pointer",
                   border: selectedSection === "endpoints" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
@@ -1384,7 +2415,7 @@ export function HostDetailPage() {
             </Grid>
             <Grid size={{ xs: 12, md: 4 }}>
               <Card
-                onClick={() => setSelectedSection("vulns")}
+                onClick={() => openHostSection("vulns")}
                 sx={{
                   cursor: "pointer",
                   border: selectedSection === "vulns" ? "1px solid rgba(126,224,255,0.45)" : "1px solid rgba(126,224,255,0.16)",
@@ -1445,7 +2476,11 @@ export function HostDetailPage() {
                       </IconButton>
                     </Tooltip>
                     <Tooltip title="Добавить порт">
-                      <IconButton size="small" onClick={() => setCreatePortOpen(true)}>
+                      <IconButton
+                        size="small"
+                        onClick={() => setCreatePortOpen(true)}
+                        sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                      >
                         <AddIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
@@ -1504,6 +2539,7 @@ export function HostDetailPage() {
                                   event.stopPropagation();
                                   openCreateServiceDialog(port.id);
                                 }}
+                                sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
                               >
                                 <AddIcon fontSize="small" />
                               </IconButton>
@@ -1623,55 +2659,19 @@ export function HostDetailPage() {
                       </IconButton>
                     </Tooltip>
                     <Tooltip title="Добавить эндпоинт">
-                      <IconButton size="small" onClick={() => setCreateEndpointOpen(true)}>
+                      <IconButton
+                        size="small"
+                        onClick={openCreateEndpointDialog}
+                        sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                      >
                         <AddIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
                   </Stack>
                 </Stack>
-                <Stack spacing={1}>
-                  {host?.endpoints.map((endpoint) => (
-                    <Box
-                      key={endpoint.id}
-                      onClick={() => toggleExpandedId(endpoint.id, setExpandedEndpointIds)}
-                      sx={{
-                        border: "1px solid rgba(126,224,255,0.12)",
-                        p: 1.4,
-                        borderRadius: 0,
-                        backgroundColor: "rgba(8,17,31,0.24)",
-                        cursor: "pointer",
-                        "& .endpoint-actions": {
-                          opacity: 0,
-                          pointerEvents: "none",
-                          transition: "opacity 0.15s ease-in-out",
-                        },
-                        "&:hover .endpoint-actions": {
-                          opacity: 1,
-                          pointerEvents: "auto",
-                        },
-                      }}
-                    >
-                      <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
-                        <Stack direction="row" spacing={1} alignItems="center">
-                          <Chip size="small" label={endpoint.method || "ANY"} />
-                          <Typography fontWeight={600}>{endpoint.path}</Typography>
-                        </Stack>
-                        <Stack direction="row" spacing={0.4} className="endpoint-actions">
-                          <Tooltip title="Действия">
-                            <IconButton size="small" onClick={(event) => openEndpointActions(event, endpoint)}>
-                              <MoreVertIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        </Stack>
-                      </Stack>
-                      <Collapse in={expandedEndpointIds.includes(endpoint.id)} timeout="auto" unmountOnExit>
-                        <Typography mt={0.8} color="text.secondary" variant="body2">
-                          {endpoint.description || "Описание не указано"}
-                        </Typography>
-                      </Collapse>
-                    </Box>
-                  ))}
-                  {!host?.endpoints.length && <Typography color="text.secondary">Эндпоинты для этого хоста пока не добавлены.</Typography>}
+                <Stack spacing={1.25}>
+                  {host?.endpoints?.length ? renderEndpointPathTree(endpointPathTree) : null}
+                  {!host?.endpoints?.length && <Typography color="text.secondary">Эндпоинты для этого хоста пока не добавлены.</Typography>}
                 </Stack>
                 <Menu
                   anchorEl={endpointActionsAnchorEl}
@@ -1723,11 +2723,56 @@ export function HostDetailPage() {
                     Уязвимости хоста
                   </Typography>
                   <Tooltip title="Добавить уязвимость">
-                    <IconButton size="small" onClick={() => setCreateVulnerabilityOpen(true)}>
+                    <IconButton
+                      size="small"
+                      onClick={() => setCreateVulnerabilityOpen(true)}
+                      sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                    >
                       <AddIcon fontSize="small" />
                     </IconButton>
                   </Tooltip>
                 </Stack>
+                {isVulnerabilityRoute && (
+                  <Card sx={{ mb: 2, border: "1px solid rgba(126,224,255,0.18)", backgroundColor: "rgba(8,17,31,0.32)" }}>
+                    <CardContent>
+                      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1} mb={2}>
+                        <Button startIcon={<ArrowBackIcon />} onClick={closeVulnerabilityView}>
+                          Назад
+                        </Button>
+                        <Stack direction="row" spacing={1}>
+                          <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setCreateVulnerabilityOpen(true)}>
+                            Новая уязвимость
+                          </Button>
+                        </Stack>
+                      </Stack>
+                      {renderVulnerabilityDetailsContent()}
+                      <Divider sx={{ my: 2 }} />
+                      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="flex-end" spacing={1.5}>
+                        <Button
+                          color="error"
+                          variant="outlined"
+                          size="large"
+                          sx={{ minWidth: { sm: 180 } }}
+                          onClick={() => void removeActiveVulnerability()}
+                          disabled={!activeVulnDetails || vulnBusy}
+                        >
+                          Удалить
+                        </Button>
+                        <Button
+                          variant="contained"
+                          size="large"
+                          sx={{ minWidth: { sm: 200 } }}
+                          onClick={() => void saveActiveVulnerability()}
+                          disabled={!activeVulnDetails || vulnBusy}
+                        >
+                          Сохранить изменения
+                        </Button>
+                      </Stack>
+                    </CardContent>
+                  </Card>
+                )}
+                {!isVulnerabilityRoute && (
+                <>
                 <Stack spacing={1}>
                   {vulnerabilities.map((item) => (
                     <Box
@@ -1796,7 +2841,7 @@ export function HostDetailPage() {
                                   }),
                                 }).catch(() => {});
                                 // #endregion
-                                void loadVulnerabilityDetails(item.id);
+                                openVulnerabilityPage(item.id);
                               }}
                             >
                               Открыть карточку
@@ -1818,7 +2863,7 @@ export function HostDetailPage() {
                   <MenuItem
                     onClick={() => {
                       if (activeVulnerability) {
-                        void loadVulnerabilityDetails(activeVulnerability.id);
+                        openVulnerabilityPage(activeVulnerability.id);
                       }
                       closeVulnerabilityActions();
                     }}
@@ -1849,6 +2894,8 @@ export function HostDetailPage() {
                     Удалить
                   </MenuItem>
                 </Menu>
+                </>
+                )}
               </CardContent>
             </Card>
           )}
@@ -1861,11 +2908,6 @@ export function HostDetailPage() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="IP-адрес" value={editingHostIp} onChange={(event) => setEditingHostIp(event.target.value)} />
             <TextField label="Hostname" value={editingHostName} onChange={(event) => setEditingHostName(event.target.value)} />
-            <TextField select label="Статус" value={editingHostStatus} onChange={(event) => setEditingHostStatus(event.target.value as Host["status"])}>
-              <MenuItem value="up">up</MenuItem>
-              <MenuItem value="down">down</MenuItem>
-              <MenuItem value="unknown">unknown</MenuItem>
-            </TextField>
             <TextField
               multiline
               minRows={4}
@@ -1977,24 +3019,45 @@ export function HostDetailPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={isEditEndpointOpen} onClose={() => setEditEndpointOpen(false)} fullWidth>
+      <Dialog open={isEditEndpointOpen} onClose={() => setEditEndpointOpen(false)} fullWidth maxWidth="md">
         <DialogTitle>Редактировать эндпоинт</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField
-              multiline
-              minRows={6}
-              label="Raw HTTP request (опционально)"
-              placeholder={"POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}"}
-              value={editingEndpointRequestRaw}
-              onChange={(event) => applyParsedRequestToEditEndpoint(event.target.value)}
-            />
+            <Stack spacing={1}>
+              <TextField
+                multiline
+                minRows={4}
+                label="Вставить Raw HTTP запрос"
+                placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
+                value={editingEndpointImportRaw}
+                onChange={(event) => setEditingEndpointImportRaw(event.target.value)}
+              />
+              <Button variant="outlined" onClick={applyParsedRequestToEditEndpoint}>
+                Разобрать и заполнить поля
+              </Button>
+            </Stack>
+            <Divider />
+            {editingEndpointImportHostWarn && (
+              <Alert severity="warning">
+                Заголовок Host из запроса не совпадает с хостом актива ({endpointFormHostLine}). Проверьте путь и целевой хост.
+              </Alert>
+            )}
             <TextField label="Путь" value={editingEndpointPath} onChange={(event) => setEditingEndpointPath(event.target.value)} />
             <TextField
               select
               label="HTTP-метод"
               value={editingEndpointMethod}
-              onChange={(event) => setEditingEndpointMethod(event.target.value as Exclude<Endpoint["method"], null>)}
+              onChange={(event) => {
+                const next = event.target.value as Exclude<Endpoint["method"], null>;
+                setEditingEndpointMethod(next);
+                if (next === "POST") {
+                  setEditingEndpointQueryString("");
+                }
+                if (!methodSupportsRequestBody(next)) {
+                  setEditingEndpointRequestBody("");
+                  setEditingEndpointRequestContentType("application/json");
+                }
+              }}
             >
               {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((method) => (
                 <MenuItem key={method} value={method}>
@@ -2002,13 +3065,80 @@ export function HostDetailPage() {
                 </MenuItem>
               ))}
             </TextField>
+            {methodShowsQueryString(editingEndpointMethod) && (
+              <TextField
+                multiline
+                minRows={2}
+                label="Параметры запроса (query string)"
+                placeholder="foo=bar&limit=10"
+                helperText="Пары имя=значение, разделитель & или новая строка"
+                value={editingEndpointQueryString}
+                onChange={(event) => setEditingEndpointQueryString(event.target.value)}
+              />
+            )}
             <TextField
               multiline
-              minRows={3}
-              label="Описание"
-              value={editingEndpointDescription}
-              onChange={(event) => setEditingEndpointDescription(event.target.value)}
+              minRows={4}
+              label="Заголовки"
+              placeholder={"Accept: application/json\nCookie: ... (будет заменён на плейсхолдер при сохранении)"}
+              helperText="Каждый заголовок с новой строки: Name: value. Cookie и Authorization при сохранении очищаются."
+              value={editingEndpointHeadersText}
+              onChange={(event) => setEditingEndpointHeadersText(event.target.value)}
+              sx={{ "& textarea": { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } }}
             />
+            {methodSupportsRequestBody(editingEndpointMethod) && (
+              <>
+                <TextField
+                  select
+                  label="Content-Type"
+                  value={editingEndpointRequestContentType}
+                  onChange={(event) => setEditingEndpointRequestContentType(event.target.value)}
+                >
+                  {["application/json", "application/x-www-form-urlencoded", "multipart/form-data", "text/plain", "application/xml"].map(
+                    (contentType) => (
+                      <MenuItem key={contentType} value={contentType}>
+                        {contentType}
+                      </MenuItem>
+                    )
+                  )}
+                </TextField>
+                <TextField
+                  multiline
+                  minRows={6}
+                  label="Тело запроса"
+                  placeholder='{"user":"admin"}'
+                  value={editingEndpointRequestBody}
+                  onChange={(event) => setEditingEndpointRequestBody(event.target.value)}
+                />
+              </>
+            )}
+            <Paper variant="outlined" sx={{ p: 1.5, borderColor: "rgba(126,224,255,0.14)" }}>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                Предпросмотр Raw HTTP
+              </Typography>
+              <Box
+                component="pre"
+                sx={{
+                  m: 0,
+                  maxHeight: 220,
+                  overflow: "auto",
+                  fontSize: "0.75rem",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {editingEndpointPreviewRequest}
+              </Box>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 1.5 }}>
+                <Button size="small" variant="outlined" onClick={() => void copyEditingEndpointDraft("raw")}>
+                  Скопировать как Raw
+                </Button>
+                <Button size="small" variant="outlined" onClick={() => void copyEditingEndpointDraft("curl")}>
+                  Скопировать как cURL
+                </Button>
+              </Stack>
+            </Paper>
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -2019,24 +3149,45 @@ export function HostDetailPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={isCreateEndpointOpen} onClose={() => setCreateEndpointOpen(false)} fullWidth>
+      <Dialog open={isCreateEndpointOpen} onClose={() => setCreateEndpointOpen(false)} fullWidth maxWidth="md">
         <DialogTitle>Добавить эндпоинт</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField
-              multiline
-              minRows={6}
-              label="Raw HTTP request (опционально)"
-              placeholder={"POST /api/login HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"user\":\"admin\"}"}
-              value={creatingEndpointRequestRaw}
-              onChange={(event) => applyParsedRequestToCreateEndpoint(event.target.value)}
-            />
+            <Stack spacing={1}>
+              <TextField
+                multiline
+                minRows={4}
+                label="Вставить Raw HTTP запрос"
+                placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
+                value={creatingEndpointImportRaw}
+                onChange={(event) => setCreatingEndpointImportRaw(event.target.value)}
+              />
+              <Button variant="outlined" onClick={applyParsedRequestToCreateEndpoint}>
+                Разобрать и заполнить поля
+              </Button>
+            </Stack>
+            <Divider />
+            {creatingEndpointImportHostWarn && (
+              <Alert severity="warning">
+                Заголовок Host из запроса не совпадает с хостом актива ({endpointFormHostLine}). Проверьте путь и целевой хост.
+              </Alert>
+            )}
             <TextField label="Путь" value={creatingEndpointPath} onChange={(event) => setCreatingEndpointPath(event.target.value)} />
             <TextField
               select
               label="HTTP-метод"
               value={creatingEndpointMethod}
-              onChange={(event) => setCreatingEndpointMethod(event.target.value as Exclude<Endpoint["method"], null>)}
+              onChange={(event) => {
+                const next = event.target.value as Exclude<Endpoint["method"], null>;
+                setCreatingEndpointMethod(next);
+                if (next === "POST") {
+                  setCreatingEndpointQueryString("");
+                }
+                if (!methodSupportsRequestBody(next)) {
+                  setCreatingEndpointRequestBody("");
+                  setCreatingEndpointRequestContentType("application/json");
+                }
+              }}
             >
               {["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((method) => (
                 <MenuItem key={method} value={method}>
@@ -2044,323 +3195,99 @@ export function HostDetailPage() {
                 </MenuItem>
               ))}
             </TextField>
+            {methodShowsQueryString(creatingEndpointMethod) && (
+              <TextField
+                multiline
+                minRows={2}
+                label="Параметры запроса (query string)"
+                placeholder="foo=bar&limit=10"
+                helperText="Пары имя=значение, разделитель & или новая строка"
+                value={creatingEndpointQueryString}
+                onChange={(event) => setCreatingEndpointQueryString(event.target.value)}
+              />
+            )}
             <TextField
               multiline
-              minRows={3}
-              label="Описание"
-              value={creatingEndpointDescription}
-              onChange={(event) => setCreatingEndpointDescription(event.target.value)}
+              minRows={4}
+              label="Заголовки"
+              placeholder={"Accept: application/json\nAuthorization: Bearer ..."}
+              helperText="Каждый заголовок с новой строки: Name: value. Cookie и Authorization при сохранении очищаются."
+              value={creatingEndpointHeadersText}
+              onChange={(event) => setCreatingEndpointHeadersText(event.target.value)}
+              sx={{ "& textarea": { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } }}
             />
+            {methodSupportsRequestBody(creatingEndpointMethod) && (
+              <>
+                <TextField
+                  select
+                  label="Content-Type"
+                  value={creatingEndpointRequestContentType}
+                  onChange={(event) => setCreatingEndpointRequestContentType(event.target.value)}
+                >
+                  {["application/json", "application/x-www-form-urlencoded", "multipart/form-data", "text/plain", "application/xml"].map(
+                    (contentType) => (
+                      <MenuItem key={contentType} value={contentType}>
+                        {contentType}
+                      </MenuItem>
+                    )
+                  )}
+                </TextField>
+                <TextField
+                  multiline
+                  minRows={6}
+                  label="Тело запроса"
+                  placeholder='{"user":"admin"}'
+                  value={creatingEndpointRequestBody}
+                  onChange={(event) => setCreatingEndpointRequestBody(event.target.value)}
+                />
+              </>
+            )}
+            <Paper variant="outlined" sx={{ p: 1.5, borderColor: "rgba(126,224,255,0.14)" }}>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                Предпросмотр Raw HTTP
+              </Typography>
+              <Box
+                component="pre"
+                sx={{
+                  m: 0,
+                  maxHeight: 220,
+                  overflow: "auto",
+                  fontSize: "0.75rem",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {creatingEndpointPreviewRequest}
+              </Box>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 1.5 }}>
+                <Button size="small" variant="outlined" onClick={() => void copyCreatingEndpointDraft("raw")}>
+                  Скопировать как Raw
+                </Button>
+                <Button size="small" variant="outlined" onClick={() => void copyCreatingEndpointDraft("curl")}>
+                  Скопировать как cURL
+                </Button>
+              </Stack>
+            </Paper>
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreateEndpointOpen(false)}>Отмена</Button>
-          <Button
-            variant="contained"
-            onClick={() => void createHostEndpoint()}
-            disabled={!creatingEndpointPath.trim() && !creatingEndpointRequestRaw.trim()}
-          >
+          <Button variant="contained" onClick={() => void createHostEndpoint()} disabled={!creatingEndpointPath.trim()}>
             Создать
           </Button>
         </DialogActions>
       </Dialog>
 
-      <Dialog open={vulnDetailOpen} onClose={() => setVulnDetailOpen(false)} fullWidth maxWidth="lg">
+      <Dialog open={!isVulnerabilityRoute && vulnDetailOpen} onClose={closeVulnerabilityView} fullWidth maxWidth="lg">
         <DialogTitle>Карточка уязвимости</DialogTitle>
-        <DialogContent>
-          {!activeVulnDetails ? (
-            <Typography color="text.secondary">Уязвимость не выбрана.</Typography>
-          ) : (
-            <Stack spacing={2} sx={{ mt: 0.5 }}>
-              <Grid container spacing={2}>
-                <Grid size={{ xs: 12, md: 8 }}>
-                  <TextField
-                    label="Название"
-                    fullWidth
-                    value={activeVulnDetails.title}
-                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, title: event.target.value } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, md: 2 }}>
-                  <TextField
-                    select
-                    label="Критичность"
-                    fullWidth
-                    value={activeVulnDetails.severity}
-                    onChange={(event) =>
-                      setActiveVulnDetails((prev) => (prev ? { ...prev, severity: event.target.value as Vulnerability["severity"] } : prev))
-                    }
-                  >
-                    <MenuItem value="critical">critical</MenuItem>
-                    <MenuItem value="high">high</MenuItem>
-                    <MenuItem value="medium">medium</MenuItem>
-                    <MenuItem value="low">low</MenuItem>
-                    <MenuItem value="info">info</MenuItem>
-                  </TextField>
-                </Grid>
-                <Grid size={{ xs: 12, md: 2 }}>
-                  <TextField
-                    select
-                    label="Статус"
-                    fullWidth
-                    value={activeVulnDetails.status}
-                    onChange={(event) =>
-                      setActiveVulnDetails((prev) => (prev ? { ...prev, status: event.target.value as Vulnerability["status"] } : prev))
-                    }
-                  >
-                    <MenuItem value="open">open</MenuItem>
-                    <MenuItem value="in_progress">in_progress</MenuItem>
-                    <MenuItem value="fixed">fixed</MenuItem>
-                    <MenuItem value="wont_fix">wont_fix</MenuItem>
-                    <MenuItem value="accepted_risk">accepted_risk</MenuItem>
-                  </TextField>
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Описание"
-                    fullWidth
-                    multiline
-                    minRows={3}
-                    value={activeVulnDetails.description || ""}
-                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, description: event.target.value || null } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, md: 3 }}>
-                  <TextField
-                    select
-                    label="CVSS версия"
-                    fullWidth
-                    value={activeVulnDetails.cvss_version || ""}
-                    onChange={(event) =>
-                      setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_version: (event.target.value as "3.1" | "4.0" | "") || null } : prev))
-                    }
-                  >
-                    <MenuItem value="">-</MenuItem>
-                    <MenuItem value="3.1">3.1</MenuItem>
-                    <MenuItem value="4.0">4.0</MenuItem>
-                  </TextField>
-                </Grid>
-                <Grid size={{ xs: 12, md: 3 }}>
-                  <TextField
-                    label="CVSS score"
-                    type="number"
-                    fullWidth
-                    value={activeVulnDetails.cvss_score ?? ""}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_score: value === "" ? null : Number(value) } : prev));
-                    }}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, md: 6 }}>
-                  <TextField
-                    label="CVSS vector"
-                    fullWidth
-                    value={activeVulnDetails.cvss_vector || ""}
-                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cvss_vector: event.target.value || null } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="CWE ID"
-                    fullWidth
-                    value={activeVulnDetails.cwe_id || ""}
-                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, cwe_id: event.target.value || null } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  <VulnerabilityStagesEditor
-                    stages={activeVulnDetails.workflow_steps || []}
-                    busy={vulnBusy}
-                    onChange={(nextStages) =>
-                      setActiveVulnDetails((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              workflow_steps: nextStages,
-                            }
-                          : prev
-                      )
-                    }
-                    onUploadImage={async (stageId, file) => {
-                      if (!projectId || !activeVulnDetails) {
-                        return;
-                      }
-                      try {
-                        const uploadedFile = await uploadVulnerabilityFile(projectId, activeVulnDetails.id, file);
-                        setVulnFiles((prev) => [uploadedFile, ...prev]);
-                        setActiveVulnDetails((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                workflow_steps: (prev.workflow_steps || []).map((stage) =>
-                                  stage.id === stageId
-                                    ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] }
-                                    : stage
-                                ),
-                              }
-                            : prev
-                        );
-                      } catch {
-                        setError("Не удалось загрузить картинку этапа.");
-                      }
-                    }}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Влияние"
-                    fullWidth
-                    multiline
-                    minRows={2}
-                    value={activeVulnDetails.impact || ""}
-                    onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev))}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  <TextField
-                    label="Рекомендации"
-                    fullWidth
-                    multiline
-                    minRows={2}
-                    value={activeVulnDetails.recommendations || ""}
-                    onChange={(event) =>
-                      setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: event.target.value || null } : prev))
-                    }
-                  />
-                </Grid>
-              </Grid>
-
-              <Divider />
-              <Stack spacing={1}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  Привязанные активы ({activeVulnDetails.assets.length})
-                </Typography>
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
-                  <TextField
-                    select
-                    label="Тип актива"
-                    value={linkAssetType}
-                    onChange={(event) => {
-                      setLinkAssetType(event.target.value as "host" | "port" | "service" | "endpoint");
-                      setLinkAssetId("");
-                    }}
-                    sx={{ minWidth: 180 }}
-                  >
-                    <MenuItem value="host">host</MenuItem>
-                    <MenuItem value="port">port</MenuItem>
-                    <MenuItem value="service">service</MenuItem>
-                    <MenuItem value="endpoint">endpoint</MenuItem>
-                  </TextField>
-                  <TextField
-                    select
-                    label="Актив"
-                    value={linkAssetId}
-                    onChange={(event) => setLinkAssetId(event.target.value)}
-                    fullWidth
-                    disabled={linkAssetOptions.length === 0}
-                  >
-                    {linkAssetOptions.map((option) => (
-                      <MenuItem key={option.id} value={option.id}>
-                        {option.label}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-                  <Button variant="outlined" disabled={!linkAssetId || vulnBusy} onClick={() => void addAssetLinkToActiveVuln()}>
-                    Привязать
-                  </Button>
-                </Stack>
-                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                  {activeVulnDetails.assets.map((assetLink) => (
-                    <Chip
-                      key={assetLink.id}
-                      label={resolveAssetLabel(assetLink.asset_type, assetLink.asset_id)}
-                      onDelete={() => void removeAssetLinkFromActiveVuln(assetLink.id)}
-                    />
-                  ))}
-                  {activeVulnDetails.assets.length === 0 && <Typography color="text.secondary">Связанные активы пока не добавлены.</Typography>}
-                </Stack>
-              </Stack>
-
-              <Divider />
-              <Stack spacing={1}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  Файлы ({vulnFiles.length})
-                </Typography>
-                <Button component="label" variant="outlined" startIcon={<AttachFileIcon />}>
-                  Загрузить файл
-                  <input hidden type="file" onChange={(event) => void uploadFileToActiveVuln(event.target.files?.[0] ?? null)} />
-                </Button>
-                <List dense disablePadding>
-                  {vulnFiles.map((file) => (
-                    <ListItem
-                      key={file.id}
-                      secondaryAction={
-                        <Stack direction="row" spacing={0.5}>
-                          <IconButton size="small" component="a" href={`/api/v1/files/${file.id}/download`} target="_blank" rel="noreferrer">
-                            <OpenInNewIcon fontSize="small" />
-                          </IconButton>
-                          <IconButton size="small" onClick={() => void removeVulnerabilityFile(file.id)}>
-                            <DeleteOutlineIcon fontSize="small" />
-                          </IconButton>
-                        </Stack>
-                      }
-                    >
-                      <ListItemText primary={file.original_name} secondary={`${file.content_type} • ${Math.round(file.size_bytes / 1024)} KB`} />
-                    </ListItem>
-                  ))}
-                  {vulnFiles.length === 0 && <Typography color="text.secondary">Файлы не загружены.</Typography>}
-                </List>
-              </Stack>
-
-              <Divider />
-              <Stack spacing={1}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  Комментарии ({vulnComments.length})
-                </Typography>
-                <TextField
-                  label="Новый комментарий (поддержка @username)"
-                  multiline
-                  minRows={2}
-                  value={newComment}
-                  onChange={(event) => setNewComment(event.target.value)}
-                />
-                <Button variant="contained" disabled={!newComment.trim() || vulnBusy} onClick={() => void addCommentToActiveVuln()}>
-                  Добавить комментарий
-                </Button>
-                <List dense disablePadding>
-                  {vulnComments.map((comment) => (
-                    <ListItem
-                      key={comment.id}
-                      alignItems="flex-start"
-                      secondaryAction={
-                        user?.role === "admin" || user?.id === comment.user_id ? (
-                          <Stack direction="row" spacing={0.5}>
-                            <IconButton size="small" onClick={() => openCommentEdit(comment)}>
-                              <EditIcon fontSize="small" />
-                            </IconButton>
-                            <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
-                              <DeleteOutlineIcon fontSize="small" />
-                            </IconButton>
-                          </Stack>
-                        ) : null
-                      }
-                    >
-                      <ListItemText primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`} secondary={comment.content} />
-                    </ListItem>
-                  ))}
-                  {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
-                </List>
-              </Stack>
-            </Stack>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setVulnDetailOpen(false)}>Закрыть</Button>
+        <DialogContent>{renderVulnerabilityDetailsContent()}</DialogContent>
+        <DialogActions sx={{ px: 3, pb: 3, pt: 1.5 }}>
+          <Button onClick={closeVulnerabilityView}>Закрыть</Button>
           <Button color="error" variant="outlined" onClick={() => void removeActiveVulnerability()} disabled={!activeVulnDetails || vulnBusy}>
             Удалить
           </Button>
-          <Button variant="contained" onClick={() => void saveActiveVulnerability()} disabled={!activeVulnDetails || vulnBusy}>
+          <Button variant="contained" size="large" sx={{ minWidth: 180 }} onClick={() => void saveActiveVulnerability()} disabled={!activeVulnDetails || vulnBusy}>
             Сохранить
           </Button>
         </DialogActions>
@@ -2473,29 +3400,36 @@ export function HostDetailPage() {
               <MenuItem value="accepted_risk">accepted_risk</MenuItem>
             </TextField>
             <TextField
-              select
               label="CVSS версия"
-              value={creatingVulnerabilityCvssVersion}
-              onChange={(event) => setCreatingVulnerabilityCvssVersion(event.target.value as "3.1" | "4.0" | "")}
-            >
-              <MenuItem value="">-</MenuItem>
-              <MenuItem value="3.1">3.1</MenuItem>
-              <MenuItem value="4.0">4.0</MenuItem>
-            </TextField>
+              value={CVSS_VERSION}
+              slotProps={{ input: { readOnly: true } }}
+              helperText="Для новых уязвимостей используется только CVSS 4.0"
+            />
             <TextField
               label="CVSS score"
               type="number"
               inputProps={{ min: 0, max: 10, step: 0.1 }}
               value={creatingVulnerabilityCvssScore}
-              onChange={(event) => setCreatingVulnerabilityCvssScore(event.target.value)}
+              slotProps={{ input: { readOnly: true } }}
+              helperText="Рассчитывается автоматически по версии и вектору"
             />
             <TextField
               label="CVSS vector"
               value={creatingVulnerabilityCvssVector}
-              onChange={(event) => setCreatingVulnerabilityCvssVector(event.target.value)}
+              onChange={(event) => {
+                const nextVector = event.target.value;
+                const { score } = calculateCvssScore(CVSS_VERSION, nextVector || null);
+                setCreatingVulnerabilityCvssVector(nextVector);
+                setCreatingVulnerabilityCvssScore(score === null ? "" : String(score));
+              }}
             />
             <TextField label="CWE ID" value={creatingVulnerabilityCweId} onChange={(event) => setCreatingVulnerabilityCweId(event.target.value)} />
-            <VulnerabilityStagesEditor stages={creatingVulnerabilityStages} onChange={setCreatingVulnerabilityStages} />
+            <VulnerabilityStagesEditor
+              stages={creatingVulnerabilityStages}
+              endpoints={host?.endpoints || []}
+              hostLabel={host?.hostname || host?.ip_address || undefined}
+              onChange={setCreatingVulnerabilityStages}
+            />
             <TextField multiline minRows={3} label="Влияние" value={creatingVulnerabilityImpact} onChange={(event) => setCreatingVulnerabilityImpact(event.target.value)} />
             <TextField
               multiline
@@ -2506,9 +3440,9 @@ export function HostDetailPage() {
             />
           </Stack>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ px: 3, pb: 3, pt: 1.5 }}>
           <Button onClick={() => setCreateVulnerabilityOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={() => void createHostVulnerability()} disabled={!creatingVulnerabilityTitle.trim()}>
+          <Button variant="contained" size="large" sx={{ minWidth: 180 }} onClick={() => void createHostVulnerability()} disabled={!creatingVulnerabilityTitle.trim()}>
             Создать
           </Button>
         </DialogActions>

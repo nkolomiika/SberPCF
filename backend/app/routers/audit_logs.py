@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit_store import audit_store
@@ -55,6 +55,7 @@ async def list_audit_logs(
 
     stmt = select(AuditLog, User.username).outerjoin(User, User.id == AuditLog.user_id)
     conditions = []
+    conditions.append(not_(and_(AuditLog.action == "LOGIN", AuditLog.details["source"].as_string() == "refresh")))
     if user_id:
         conditions.append(AuditLog.user_id == user_id)
     if username:

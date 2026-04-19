@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_project_access
+from app.dependencies import enforce_csrf, get_current_user, require_project_access
 from app.models import User
 from app.services import ReportService
 
@@ -22,6 +22,7 @@ MEDIA_TYPE_BY_FORMAT = {
 async def generate_report(
     project_id: UUID,
     output_format: str = Query(..., alias="format"),
+    _: None = Depends(enforce_csrf),
     _user: User = Depends(get_current_user),
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),

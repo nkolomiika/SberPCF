@@ -26,7 +26,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
-import { createUser, deleteUser, getUsers, resetUserPassword, updateUser } from "../api";
+import { createUser, deleteUser, getApiErrorMessage, getUsers, resetUserPassword, updateUser } from "../api";
 import type { User, UserRole } from "../types";
 
 const ROLE_OPTIONS: Array<{ value: UserRole; label: string }> = [
@@ -61,20 +61,29 @@ export function UsersAdminPage() {
   const [createSendInviteEmail, setCreateSendInviteEmail] = useState(true);
 
   const [editUsername, setEditUsername] = useState("");
-  const [editEmail, setEditEmail] = useState("");
   const [editFullName, setEditFullName] = useState("");
   const [editTagsText, setEditTagsText] = useState("");
   const [editRole, setEditRole] = useState<UserRole>("pentester");
   const [editIsActive, setEditIsActive] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await getUsers(1, 200);
-      setUsers(response.items);
+      const pageSize = 200;
+      let page = 1;
+      let pages = 1;
+      const nextUsers: User[] = [];
+      do {
+        const response = await getUsers(page, pageSize);
+        nextUsers.push(...response.items);
+        pages = response.pages;
+        page += 1;
+      } while (page <= pages);
+      setUsers(nextUsers);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Не удалось загрузить пользователей.");
+      setError(getApiErrorMessage(loadError, "Не удалось загрузить пользователей."));
     } finally {
       setLoading(false);
     }
@@ -85,6 +94,15 @@ export function UsersAdminPage() {
   }, [loadUsers]);
 
   const activeUsers = useMemo(() => users.filter((user) => user.is_active).length, [users]);
+  const filteredUsers = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) {
+      return users;
+    }
+    return users.filter((user) =>
+      [user.username, user.full_name || "", user.email, roleLabel(user.role), ...user.tags].some((value) => value.toLowerCase().includes(query))
+    );
+  }, [searchQuery, users]);
 
   const closeCreateDialog = () => {
     setCreateOpen(false);
@@ -119,7 +137,6 @@ export function UsersAdminPage() {
   const openEditDialog = (user: User) => {
     setActiveUser(user);
     setEditUsername(user.username);
-    setEditEmail(user.email);
     setEditFullName(user.full_name ?? "");
     setEditTagsText(user.tags.join(", "));
     setEditRole(user.role);
@@ -147,7 +164,7 @@ export function UsersAdminPage() {
       closeCreateDialog();
       await loadUsers();
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Не удалось создать пользователя.");
+      setError(getApiErrorMessage(submitError, "Не удалось создать пользователя."));
     }
   };
 
@@ -158,7 +175,6 @@ export function UsersAdminPage() {
     try {
       await updateUser(activeUser.id, {
         username: editUsername.trim(),
-        email: editEmail.trim(),
         full_name: editFullName.trim() || undefined,
         tags: parseTags(editTagsText),
         role: editRole,
@@ -168,7 +184,7 @@ export function UsersAdminPage() {
       closeEditDialog();
       await loadUsers();
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Не удалось обновить пользователя.");
+      setError(getApiErrorMessage(submitError, "Не удалось обновить пользователя."));
     }
   };
 
@@ -178,11 +194,15 @@ export function UsersAdminPage() {
     }
     try {
       const result = await resetUserPassword(activeUser.id);
-      setInfoMessage(`Временный пароль для ${activeUser.username} отправлен на ${result.email_sent_to}.`);
+      setInfoMessage(
+        result.mail_preview_url
+          ? `Временный пароль для ${activeUser.username} отправлен в локальный почтовый inbox: ${result.mail_preview_url}. Адрес получателя: ${result.email_sent_to}.`
+          : `Временный пароль для ${activeUser.username} отправлен на ${result.email_sent_to}.`
+      );
       closeResetDialog();
       await loadUsers();
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Не удалось сбросить пароль.");
+      setError(getApiErrorMessage(submitError, "Не удалось сбросить пароль."));
     }
   };
 
@@ -195,7 +215,7 @@ export function UsersAdminPage() {
       setInfoMessage("Пользователь удалён.");
       await loadUsers();
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить пользователя.");
+      setError(getApiErrorMessage(deleteError, "Не удалось удалить пользователя."));
     }
   };
 
@@ -220,6 +240,7 @@ export function UsersAdminPage() {
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
             <Chip label={`Всего: ${users.length}`} variant="outlined" />
             <Chip label={`Активных: ${activeUsers}`} variant="outlined" />
+            <Chip label={`Показано: ${filteredUsers.length}`} variant="outlined" />
           </Stack>
         </Stack>
         <Tooltip title="Действия">
@@ -246,8 +267,15 @@ export function UsersAdminPage() {
         </MenuItem>
       </Menu>
 
+      <TextField
+        placeholder="Поиск по имени, логину, email, роли или тегу"
+        value={searchQuery}
+        onChange={(event) => setSearchQuery(event.target.value)}
+        fullWidth
+      />
+
       <Stack spacing={1.5}>
-        {users.map((user) => (
+        {filteredUsers.map((user) => (
           <Card
             key={user.id}
             sx={{
@@ -264,21 +292,23 @@ export function UsersAdminPage() {
               },
             }}
           >
-            <CardContent sx={{ p: 2 }}>
-              <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={1.5}>
-                <Stack spacing={0.8} sx={{ minWidth: 0 }}>
-                  <Stack direction="row" spacing={1.2} alignItems="center">
-                    <Avatar src={user.avatar_url ?? undefined}>{(user.full_name || user.username)[0]?.toUpperCase()}</Avatar>
-                    <Stack spacing={0.3} sx={{ minWidth: 0 }}>
-                      <Typography variant="h6" noWrap>
+            <CardContent sx={{ p: 1.25 }}>
+              <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={1}>
+                <Stack spacing={0.45} sx={{ minWidth: 0 }}>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Avatar src={user.avatar_url ?? undefined} sx={{ width: 32, height: 32, fontSize: 14 }}>
+                      {(user.full_name || user.username)[0]?.toUpperCase()}
+                    </Avatar>
+                    <Stack spacing={0.15} sx={{ minWidth: 0 }}>
+                      <Typography variant="body1" fontWeight={600} noWrap>
                         {user.full_name || user.username}
                       </Typography>
-                      <Typography color="text.secondary" noWrap>
+                      <Typography variant="caption" color="text.secondary" noWrap>
                         @{user.username}
                       </Typography>
                     </Stack>
                   </Stack>
-                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
                     <Chip size="small" label={roleLabel(user.role)} />
                     <Chip
                       size="small"
@@ -291,8 +321,10 @@ export function UsersAdminPage() {
                       <Chip key={`${user.id}-${tag}`} size="small" variant="outlined" label={tag} />
                     ))}
                   </Stack>
-                  <Typography color="text.secondary">{user.email}</Typography>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" color="text.secondary" noWrap>
+                    {user.email}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
                     Создан: {new Date(user.created_at).toLocaleString()}
                   </Typography>
                 </Stack>
@@ -312,6 +344,7 @@ export function UsersAdminPage() {
             </CardContent>
           </Card>
         ))}
+        {filteredUsers.length === 0 && <Typography color="text.secondary">Пользователи не найдены.</Typography>}
       </Stack>
 
       <Menu
@@ -405,7 +438,7 @@ export function UsersAdminPage() {
         <DialogTitle>Редактировать пользователя</DialogTitle>
         <DialogContent sx={{ display: "grid", gap: 2, pt: 2 }}>
           <TextField label="Логин" value={editUsername} onChange={(event) => setEditUsername(event.target.value)} fullWidth />
-          <TextField label="Email" value={editEmail} onChange={(event) => setEditEmail(event.target.value)} fullWidth />
+          <TextField label="Email" value={activeUser?.email ?? ""} fullWidth disabled helperText="Email может изменить только сам пользователь в профиле." />
           <TextField label="Имя" value={editFullName} onChange={(event) => setEditFullName(event.target.value)} fullWidth />
           <TextField label="Теги" value={editTagsText} onChange={(event) => setEditTagsText(event.target.value)} helperText="Через запятую" fullWidth />
           <TextField select label="Роль" value={editRole} onChange={(event) => setEditRole(event.target.value as UserRole)} fullWidth>
@@ -428,7 +461,7 @@ export function UsersAdminPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={closeEditDialog}>Отмена</Button>
-          <Button variant="contained" onClick={() => void handleUpdateUser()} disabled={!editUsername.trim() || !editEmail.trim()}>
+          <Button variant="contained" onClick={() => void handleUpdateUser()} disabled={!editUsername.trim()}>
             Сохранить
           </Button>
         </DialogActions>

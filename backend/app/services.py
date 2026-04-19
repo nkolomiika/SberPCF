@@ -4,21 +4,77 @@ import asyncio
 import json
 import re
 import secrets
+from pathlib import Path
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
+from urllib.parse import parse_qsl, urlparse, urlsplit
 from uuid import UUID, uuid4
+from xml.sax.saxutils import escape
 
 import magic
+import yaml
+
+# region agent log
+def _write_debug_log(message: str, data: dict, hypothesis_id: str) -> None:
+    payload = {
+        "sessionId": "a74592",
+        "runId": "cvss-import-debug",
+        "hypothesisId": hypothesis_id,
+        "location": "backend/app/services.py:cvss-import",
+        "message": message,
+        "data": data,
+        "timestamp": int(datetime.now(UTC).timestamp() * 1000),
+    }
+    log_path = Path("/workspace/debug-a74592.log")
+    if not log_path.parent.exists():
+        log_path = Path(__file__).resolve().parents[2] / "debug-a74592.log"
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+try:
+    _write_debug_log(
+        "Attempting cvss import",
+        {
+            "cwd": str(Path.cwd()),
+            "pythonExecutable": __import__("sys").executable,
+            "workspaceMounted": Path("/workspace").exists(),
+            "servicesFile": str(Path(__file__).resolve()),
+        },
+        "H1",
+    )
+    from cvss import CVSS4
+except Exception as exc:
+    _write_debug_log(
+        "cvss import failed",
+        {
+            "errorType": type(exc).__name__,
+            "errorMessage": str(exc),
+            "cwd": str(Path.cwd()),
+            "pythonExecutable": __import__("sys").executable,
+            "workspaceMounted": Path("/workspace").exists(),
+            "requirementsExists": Path("/app/requirements.txt").exists(),
+        },
+        "H2",
+    )
+    raise
+# endregion
 from docx import Document
+from docx.shared import Inches
 from fastapi import UploadFile
+from PIL import Image as PillowImage, ImageOps, UnidentifiedImageError
+from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Image as PlatypusImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.audit_store import audit_store
 from app.config import get_settings
-from app.enums import AssetType, NotificationType, UserRole
+from app.enums import AssetType, NotificationType, ProjectStatus, UserRole
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError
 from app.models import (
     AuditLog,
@@ -47,6 +103,8 @@ from app.schemas import (
     MentionOut,
     NotificationContext,
     NotificationOut,
+    OpenApiImportResult,
+    PcfImportPayload,
 )
 from app.security import (
     create_access_token,
@@ -133,7 +191,6 @@ class AuthService:
         """Проверяет учётные данные и создаёт пару токенов."""
         user = await self.db.scalar(select(User).where(User.username == username))
         if not user or not verify_password(password, user.password_hash):
-            await self.audit.log("LOGIN_FAILED", details={"username": username}, ip_address=ip_address)
             raise UnauthorizedError("Неверный логин или пароль")
         if not user.is_active:
             raise UnauthorizedError("Пользователь деактивирован")
@@ -169,7 +226,6 @@ class AuthService:
         user = await self.db.scalar(select(User).where(User.id == user_id))
         if not user or not user.is_active:
             raise UnauthorizedError("Пользователь деактивирован")
-        await self.audit.log("LOGIN", user_id=user_id, details={"source": "refresh"}, ip_address=ip_address)
         return create_access_token(user_id), user.must_change_password
 
     async def logout(self, user_id: UUID, ip_address: str | None = None) -> None:
@@ -217,6 +273,16 @@ class UserService:
     @staticmethod
     def _generate_temporary_password() -> str:
         return secrets.token_urlsafe(12)
+
+    @staticmethod
+    def _ensure_mail_delivery_enabled() -> None:
+        if not settings.mail_enabled:
+            raise ValidationError("Отправка email отключена. Включите SMTP/mail worker или задайте пароль вручную.")
+
+    @staticmethod
+    def ensure_can_view_avatar(requester: User, target_user_id: UUID) -> None:
+        if requester.role != UserRole.ADMIN and requester.id != target_user_id:
+            raise ForbiddenError("Недостаточно прав для просмотра чужого аватара")
 
     async def _ensure_unique_identity(
         self,
@@ -325,6 +391,8 @@ class UserService:
         await self._ensure_unique_identity(username=payload["username"], email=payload["email"])
         send_invite_email = bool(payload.get("send_invite_email"))
         temporary_password = payload.get("password")
+        if send_invite_email:
+            self._ensure_mail_delivery_enabled()
         if not temporary_password and not send_invite_email:
             raise ValidationError("Нужно указать пароль или включить отправку приглашения на email")
         generated_password = False
@@ -365,9 +433,11 @@ class UserService:
     async def update_user(self, user_id: UUID, payload: dict, actor_id: UUID, ip_address: str | None = None) -> User:
         """Обновляет данные пользователя."""
         user = await self.get_user(user_id)
+        submitted_email = payload.pop("email", None)
+        if submitted_email is not None and submitted_email != user.email:
+            raise ValidationError("Администратор не может менять email пользователя. Пользователь должен изменить его сам.")
         username = payload.get("username", user.username)
-        email = payload.get("email", user.email)
-        await self._ensure_unique_identity(username=username, email=email, exclude_user_id=user.id)
+        await self._ensure_unique_identity(username=username, email=user.email, exclude_user_id=user.id)
         if "tags" in payload:
             payload["tags"] = self._normalize_tags(payload.get("tags"))
         for key, value in payload.items():
@@ -404,6 +474,7 @@ class UserService:
 
     async def reset_password(self, user_id: UUID, actor_id: UUID, ip_address: str | None = None) -> User:
         """Сбрасывает пароль пользователя, выставляет временный пароль и отправляет его по почте."""
+        self._ensure_mail_delivery_enabled()
         user = await self.get_user(user_id)
         temporary_password = self._generate_temporary_password()
         user.password_hash = hash_password(temporary_password)
@@ -453,6 +524,8 @@ class UserService:
 
     async def force_change_password(self, user_id: UUID, *, new_password: str, ip_address: str | None = None) -> User:
         user = await self.get_user(user_id)
+        if not user.must_change_password:
+            raise ForbiddenError("Принудительная смена пароля не требуется")
         user.password_hash = hash_password(new_password)
         user.must_change_password = False
         user.password_changed_at = datetime.now(UTC)
@@ -568,9 +641,19 @@ class ProjectService:
         next_end_date = payload.get("end_date", project.end_date)
         self._validate_project_dates(next_start_date, next_end_date)
         old_status = project.status
+        next_status = payload.get("status")
+        if next_status is not None:
+            if next_status == ProjectStatus.ACTIVE:
+                payload["timeline_frozen_at"] = None
+            elif old_status == ProjectStatus.ACTIVE:
+                payload["timeline_frozen_at"] = datetime.now(UTC)
+            elif "timeline_frozen_at" not in payload:
+                payload["timeline_frozen_at"] = project.timeline_frozen_at
         for key, value in payload.items():
             if value is not None:
                 setattr(project, key, value)
+            elif key == "timeline_frozen_at":
+                setattr(project, key, None)
         await self.db.commit()
         await self.db.refresh(project)
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="project", entity_id=project.id, ip_address=ip_address)
@@ -759,14 +842,134 @@ class AssetService:
         self.audit = AuditService(db)
 
     @staticmethod
+    def _normalize_endpoint_query_params(raw_params: list[dict] | None) -> list[dict]:
+        normalized: list[dict] = []
+        for item in raw_params or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            value = item.get("value")
+            description = item.get("description")
+            normalized.append(
+                {
+                    "name": name,
+                    "value": None if value is None else str(value),
+                    "required": bool(item.get("required", False)),
+                    "description": None if description in (None, "") else str(description).strip(),
+                }
+            )
+        return normalized
+
+    _HTTP_HEADER_DROP = frozenset(
+        {
+            "referer",
+            "referrer",
+            "connection",
+            "accept-encoding",
+            "accept-language",
+            "sec-fetch-dest",
+            "sec-fetch-mode",
+            "sec-fetch-site",
+            "sec-fetch-user",
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "sec-ch-ua-platform",
+            "user-agent",
+            "host",
+        }
+    )
+
+    _METHODS_WITHOUT_BODY = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
+
+    @staticmethod
+    def _normalize_endpoint_headers(raw_headers: list[dict] | None) -> list[dict]:
+        normalized: list[dict] = []
+        for item in raw_headers or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            value = item.get("value")
+            normalized.append({"name": name, "value": "" if value is None else str(value)})
+        return normalized
+
+    @staticmethod
+    def _sanitize_parsed_header_pairs(pairs: list[tuple[str, str]]) -> list[dict]:
+        """Strip noisy/sensitive headers; Cookie/Authorization placeholders."""
+        out: list[dict] = []
+        had_cookie = False
+        for name, value in pairs:
+            ln = name.strip().lower()
+            if ln in AssetService._HTTP_HEADER_DROP:
+                continue
+            if ln == "cookie":
+                had_cookie = True
+                continue
+            if ln == "authorization":
+                out.append({"name": "Authorization", "value": "{YOUR_CREDENTIALS_HERE}"})
+                continue
+            if ln == "content-type":
+                continue
+            out.append({"name": name.strip(), "value": value.strip()})
+        if had_cookie:
+            out.append({"name": "Cookie", "value": "{YOUR_TOKENS_HERE}"})
+        return out
+
+    @staticmethod
+    def _sanitize_stored_header_items(raw: list[dict] | None) -> list[dict]:
+        pairs: list[tuple[str, str]] = []
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            value = str(item.get("value") or "")
+            pairs.append((name, value))
+        return AssetService._sanitize_parsed_header_pairs(pairs)
+
+    @staticmethod
+    def _parse_request_target_token(path_token: str) -> tuple[str, list[tuple[str, str]]]:
+        token = path_token.strip()
+        if token.startswith("http://") or token.startswith("https://"):
+            u = urlparse(token)
+            return u.path or "/", list(parse_qsl(u.query, keep_blank_values=True))
+        fake = "http://stub.local" + (token if token.startswith("/") else "/" + token)
+        u = urlparse(fake)
+        return u.path or "/", list(parse_qsl(u.query, keep_blank_values=True))
+
+    @staticmethod
+    def _apply_structured_request_payload(payload: dict) -> dict:
+        if "query_params" in payload:
+            payload["query_params"] = AssetService._normalize_endpoint_query_params(payload.get("query_params"))
+        if "request_headers" in payload and payload.get("request_headers") is not None:
+            normalized = AssetService._normalize_endpoint_headers(payload.get("request_headers"))
+            payload["request_headers"] = AssetService._sanitize_stored_header_items(normalized)
+        if "request_body" in payload and payload.get("request_body") is not None:
+            request_body = str(payload.get("request_body", ""))
+            payload["request_body"] = request_body if request_body.strip() else None
+        if "request_content_type" in payload and payload.get("request_content_type") is not None:
+            content_type = str(payload.get("request_content_type", "")).strip()
+            payload["request_content_type"] = content_type or None
+        return payload
+
+    @staticmethod
     def _apply_raw_request_payload(payload: dict) -> dict:
         request_raw = payload.get("request_raw")
         if not request_raw:
+            payload.pop("request_raw", None)
             return payload
-        lines = [line.strip() for line in str(request_raw).replace("\r", "").split("\n") if line.strip()]
-        if not lines:
+        raw_request = str(request_raw).replace("\r", "")
+        parts = re.split(r"\n\s*\n", raw_request, maxsplit=1)
+        header_block = parts[0]
+        body = parts[1] if len(parts) > 1 else ""
+        header_lines = header_block.split("\n")
+        if not header_lines or not header_lines[0].strip():
             raise ValidationError("request_raw пустой")
-        request_line = lines[0].split()
+        request_line = header_lines[0].split()
         if len(request_line) < 3:
             raise ValidationError("request_raw должен содержать request line вида 'METHOD /path HTTP/1.1'")
         method, path_value, http_part = request_line[0].upper(), request_line[1], request_line[2].upper()
@@ -775,10 +978,34 @@ class AssetService:
             raise ValidationError("request_raw содержит неподдерживаемый HTTP-метод")
         if not http_part.startswith("HTTP/"):
             raise ValidationError("request_raw должен содержать HTTP-версию в request line")
+        path_only, query_pairs = AssetService._parse_request_target_token(path_value)
         payload["method"] = method
-        payload["path"] = path_value
-        if not payload.get("description"):
-            payload["description"] = str(request_raw).strip()
+        payload["path"] = path_only
+        if "query_params" not in payload or not payload.get("query_params"):
+            payload["query_params"] = [
+                {"name": key, "value": value, "required": False, "description": None} for key, value in query_pairs
+            ]
+        header_pairs: list[tuple[str, str]] = []
+        for line in header_lines[1:]:
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            h_name, _, h_val = line.partition(":")
+            header_pairs.append((h_name.strip(), h_val))
+        content_type = None
+        for name, value in header_pairs:
+            if name.lower() == "content-type":
+                content_type = value.strip() or None
+                break
+        if ("request_body" not in payload or payload.get("request_body") is None) and body.strip():
+            payload["request_body"] = body
+        if ("request_content_type" not in payload or payload.get("request_content_type") is None) and content_type:
+            payload["request_content_type"] = content_type
+        if "request_headers" not in payload or not payload.get("request_headers"):
+            payload["request_headers"] = AssetService._sanitize_parsed_header_pairs(header_pairs)
+        if method in AssetService._METHODS_WITHOUT_BODY:
+            payload["request_body"] = None
+            payload["request_content_type"] = None
         payload.pop("request_raw", None)
         return payload
 
@@ -843,6 +1070,10 @@ class AssetService:
                     "path": endpoint.path,
                     "method": endpoint.method,
                     "description": endpoint.description,
+                    "query_params": endpoint.query_params or [],
+                    "request_body": endpoint.request_body,
+                    "request_content_type": endpoint.request_content_type,
+                    "request_headers": endpoint.request_headers or [],
                     "created_at": endpoint.created_at,
                     "updated_at": endpoint.updated_at,
                 }
@@ -972,7 +1203,9 @@ class AssetService:
 
     async def create_endpoint(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Endpoint:
         await self._get_host(project_id, host_id)
-        payload = self._apply_raw_request_payload(dict(payload))
+        payload = self._apply_structured_request_payload(self._apply_raw_request_payload(dict(payload)))
+        if payload.get("request_headers") is None:
+            payload["request_headers"] = []
         endpoint = Endpoint(host_id=host_id, **payload)
         self.db.add(endpoint)
         await self.db.commit()
@@ -983,12 +1216,12 @@ class AssetService:
 
     async def update_endpoint(self, project_id: UUID, host_id: UUID, endpoint_id: UUID, payload: dict, actor_id: UUID) -> Endpoint:
         await self._get_host(project_id, host_id)
-        payload = self._apply_raw_request_payload(dict(payload))
+        payload = self._apply_structured_request_payload(self._apply_raw_request_payload(dict(payload)))
         endpoint = await self.db.scalar(select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id)))
         if not endpoint:
             raise NotFoundError("Endpoint не найден")
         for key, value in payload.items():
-            if value is not None:
+            if key in {"description", "request_body", "request_content_type", "query_params", "request_headers"} or value is not None:
                 setattr(endpoint, key, value)
         await self.db.commit()
         await self.db.refresh(endpoint)
@@ -1022,10 +1255,11 @@ class VulnerabilityService:
 
     @staticmethod
     def _hydrate_workflow_steps(vuln: Vulnerability) -> None:
-        if vuln.workflow_steps:
+        if vuln.workflow_steps is not None:
             return
+        hydrated_steps: list[dict]
         if vuln.steps_to_reproduce:
-            vuln.workflow_steps = [
+            hydrated_steps = [
                 {
                     "id": str(uuid4()),
                     "title": "Этап 1",
@@ -1033,8 +1267,12 @@ class VulnerabilityService:
                     "image_file_ids": [],
                 }
             ]
-            return
-        vuln.workflow_steps = []
+        else:
+            hydrated_steps = []
+        if hasattr(vuln, "_sa_instance_state"):
+            set_committed_value(vuln, "workflow_steps", hydrated_steps)
+        else:
+            vuln.workflow_steps = hydrated_steps
 
     @staticmethod
     def _normalize_workflow_steps(steps: list[dict] | None) -> list[dict]:
@@ -1042,14 +1280,19 @@ class VulnerabilityService:
         for raw_step in steps or []:
             title = str(raw_step.get("title", "")).strip()
             description = str(raw_step.get("description", "")).strip()
-            if not title and not description:
+            endpoint_request_raw = str(raw_step.get("endpoint_request_raw", "")).strip()
+            endpoint_id = raw_step.get("endpoint_id")
+            image_file_ids = [str(file_id) for file_id in raw_step.get("image_file_ids", []) if file_id]
+            if not title and not description and not image_file_ids and not endpoint_id and not endpoint_request_raw:
                 continue
             normalized.append(
                 {
                     "id": str(raw_step.get("id") or uuid4()),
                     "title": title or "Этап",
                     "description": description or None,
-                    "image_file_ids": [str(file_id) for file_id in raw_step.get("image_file_ids", []) if file_id],
+                    "image_file_ids": image_file_ids,
+                    "endpoint_id": str(endpoint_id) if endpoint_id else None,
+                    "endpoint_request_raw": endpoint_request_raw or None,
                 }
             )
         return normalized
@@ -1065,10 +1308,111 @@ class VulnerabilityService:
             block = f"{index}. {title}"
             if description:
                 block = f"{block}\n{description}"
+            if step.get("endpoint_id") or step.get("endpoint_request_raw"):
+                block = f"{block}\n[Endpoint: привязан]"
             if step.get("image_file_ids"):
                 block = f"{block}\n[Изображений: {len(step['image_file_ids'])}]"
             blocks.append(block)
         return "\n\n".join(blocks)
+
+    @staticmethod
+    def _normalize_cvss_vector(version: str | None, vector: str | None) -> str | None:
+        if not version or not vector:
+            return None
+        raw = vector.strip()
+        if not raw:
+            return None
+        normalized = re.sub(r"^CVSS:\d\.\d/", f"CVSS:{version}/", raw)
+        if not normalized.startswith("CVSS:"):
+            normalized = f"CVSS:{version}/{normalized.lstrip('/')}"
+        return normalized
+
+    @staticmethod
+    def _calculate_cvss_score(version: str | None, vector: str | None) -> tuple[str | None, float | None]:
+        normalized_vector = VulnerabilityService._normalize_cvss_vector(version, vector)
+        if not normalized_vector:
+            return None, None
+        try:
+            if version == "4.0":
+                score = float(CVSS4(normalized_vector).scores()[0])
+            else:
+                raise ValidationError("Поддерживается только CVSS 4.0")
+        except Exception as exc:
+            raise ValidationError(f"Некорректный CVSS вектор: {exc}") from exc
+        return normalized_vector, score
+
+    async def _resolve_workflow_step_endpoints(self, project_id: UUID, host_id: UUID, steps: list[dict]) -> list[dict]:
+        resolved_steps: list[dict] = []
+        for step in steps:
+            next_step = dict(step)
+            endpoint_id_raw = next_step.get("endpoint_id")
+            endpoint_request_raw = next_step.get("endpoint_request_raw")
+            endpoint_id = UUID(str(endpoint_id_raw)) if endpoint_id_raw else None
+            if endpoint_id:
+                endpoint = await self.db.scalar(
+                    select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id))
+                )
+                if not endpoint:
+                    raise ValidationError("Выбранный endpoint не принадлежит текущему хосту")
+                next_step["endpoint_id"] = str(endpoint.id)
+            if endpoint_request_raw:
+                endpoint_payload = AssetService._apply_structured_request_payload(
+                    AssetService._apply_raw_request_payload({"request_raw": endpoint_request_raw})
+                )
+                existing_endpoint = await self.db.scalar(
+                    select(Endpoint).where(
+                        and_(
+                            Endpoint.host_id == host_id,
+                            Endpoint.path == endpoint_payload["path"],
+                            Endpoint.method == endpoint_payload.get("method"),
+                        )
+                    )
+                )
+                endpoint = existing_endpoint
+                if endpoint is None:
+                    if endpoint_payload.get("request_headers") is None:
+                        endpoint_payload["request_headers"] = []
+                    endpoint = Endpoint(host_id=host_id, **endpoint_payload)
+                    self.db.add(endpoint)
+                    await self.db.flush()
+                next_step["endpoint_id"] = str(endpoint.id)
+                next_step["endpoint_request_raw"] = str(endpoint_request_raw).strip()
+            resolved_steps.append(next_step)
+        return resolved_steps
+
+    async def _get_primary_host_id(self, vuln_id: UUID) -> UUID:
+        host_id = await self.db.scalar(
+            select(VulnerabilityAsset.asset_id)
+            .where(and_(VulnerabilityAsset.vulnerability_id == vuln_id, VulnerabilityAsset.asset_type == AssetType.HOST))
+            .limit(1)
+        )
+        if not host_id:
+            raise ValidationError("Уязвимость должна быть привязана хотя бы к одному хосту")
+        return host_id
+
+    async def _validate_workflow_step_images(self, vulnerability_id: UUID | None, steps: list[dict] | None) -> None:
+        image_ids = {
+            UUID(str(file_id))
+            for step in steps or []
+            for file_id in step.get("image_file_ids", [])
+            if file_id
+        }
+        if not image_ids:
+            return
+        if vulnerability_id is None:
+            raise ValidationError("Нельзя указывать image_file_ids до загрузки файлов уязвимости")
+        existing_ids = set(
+            (
+                await self.db.scalars(
+                    select(File.id).where(and_(File.vulnerability_id == vulnerability_id, File.id.in_(list(image_ids))))
+                )
+            ).all()
+        )
+        missing_ids = sorted(str(file_id) for file_id in image_ids - existing_ids)
+        if missing_ids:
+            raise ValidationError(
+                f"workflow_steps.image_file_ids содержат файлы, не принадлежащие уязвимости: {', '.join(missing_ids)}"
+            )
 
     async def list(self, project_id: UUID, page: int, size: int, severity: str | None, status: str | None) -> tuple[list[Vulnerability], int]:
         query = select(Vulnerability).where(Vulnerability.project_id == project_id)
@@ -1099,7 +1443,6 @@ class VulnerabilityService:
                     VulnerabilityAsset.asset_id == host_id,
                 )
             )
-            .distinct()
         )
         if severity:
             query = query.where(Vulnerability.severity == severity)
@@ -1116,8 +1459,14 @@ class VulnerabilityService:
         if not host_id:
             raise ValidationError("Уязвимость должна быть привязана к конкретному хосту")
         await self._assert_asset_in_project(project_id, AssetType.HOST, host_id)
+        normalized_vector, calculated_score = self._calculate_cvss_score(payload.get("cvss_version"), payload.get("cvss_vector"))
+        if normalized_vector is not None:
+            payload["cvss_vector"] = normalized_vector
+            payload["cvss_score"] = calculated_score
         if "workflow_steps" in payload:
             payload["workflow_steps"] = self._normalize_workflow_steps(payload.get("workflow_steps"))
+            payload["workflow_steps"] = await self._resolve_workflow_step_endpoints(project_id, host_id, payload["workflow_steps"])
+            await self._validate_workflow_step_images(None, payload["workflow_steps"])
             payload["steps_to_reproduce"] = self._workflow_steps_to_text(payload["workflow_steps"])
         vuln = Vulnerability(project_id=project_id, created_by=actor_id, **payload)
         self.db.add(vuln)
@@ -1144,13 +1493,25 @@ class VulnerabilityService:
 
     async def update(self, project_id: UUID, vuln_id: UUID, payload: dict, actor_id: UUID) -> Vulnerability:
         vuln = await self._get_vuln(project_id, vuln_id)
+        next_cvss_version = payload.get("cvss_version", vuln.cvss_version.value if vuln.cvss_version else None)
+        next_cvss_vector = payload.get("cvss_vector", vuln.cvss_vector)
+        normalized_vector, calculated_score = self._calculate_cvss_score(next_cvss_version, next_cvss_vector)
+        if normalized_vector is not None:
+            payload["cvss_vector"] = normalized_vector
+            payload["cvss_score"] = calculated_score
+        elif "cvss_vector" in payload and not payload.get("cvss_vector"):
+            payload["cvss_score"] = None
         if "workflow_steps" in payload:
             payload["workflow_steps"] = self._normalize_workflow_steps(payload.get("workflow_steps"))
+            host_id = await self._get_primary_host_id(vuln.id)
+            payload["workflow_steps"] = await self._resolve_workflow_step_endpoints(project_id, host_id, payload["workflow_steps"])
+            await self._validate_workflow_step_images(vuln.id, payload["workflow_steps"])
             payload["steps_to_reproduce"] = self._workflow_steps_to_text(payload["workflow_steps"])
+        clearable_fields = {"description", "cvss_version", "cvss_score", "cvss_vector", "cwe_id", "impact", "recommendations"}
         for key, value in payload.items():
             if key == "steps_to_reproduce" and "workflow_steps" in payload:
                 setattr(vuln, key, value)
-            elif value is not None:
+            elif key in clearable_fields or value is not None:
                 setattr(vuln, key, value)
         await self.db.commit()
         await self.db.refresh(vuln)
@@ -1354,11 +1715,17 @@ class CommentService:
             raise NotFoundError("Уязвимость не найдена")
         return vuln
 
-    async def _extract_mentions(self, content: str) -> list[User]:
+    async def _extract_mentions(self, project_id: UUID, content: str) -> list[User]:
         usernames = set(MENTION_RE.findall(content))
         if not usernames:
             return []
-        rows = (await self.db.scalars(select(User).where(User.username.in_(list(usernames))))).all()
+        rows = (
+            await self.db.scalars(
+                select(User)
+                .join(ProjectMember, ProjectMember.user_id == User.id)
+                .where(and_(ProjectMember.project_id == project_id, User.username.in_(list(usernames))))
+            )
+        ).all()
         return list(rows)
 
     async def list(self, vuln_id: UUID, page: int, size: int) -> tuple[list[CommentOut], int]:
@@ -1402,7 +1769,7 @@ class CommentService:
         comment = Comment(vulnerability_id=vuln.id, user_id=actor.id, content=content)
         self.db.add(comment)
         await self.db.flush()
-        mentioned_users = await self._extract_mentions(content)
+        mentioned_users = await self._extract_mentions(project_id, content)
         mention_models: list[MentionOut] = []
         for user in mentioned_users:
             self.db.add(CommentMention(comment_id=comment.id, user_id=user.id))
@@ -1452,7 +1819,7 @@ class CommentService:
             raise ForbiddenError("Можно редактировать только свой комментарий")
         comment.content = content
         await self.db.execute(delete(CommentMention).where(CommentMention.comment_id == comment.id))
-        mentioned_users = await self._extract_mentions(content)
+        mentioned_users = await self._extract_mentions(project_id, content)
         mention_models: list[MentionOut] = []
         for user in mentioned_users:
             self.db.add(CommentMention(comment_id=comment.id, user_id=user.id))
@@ -1522,6 +1889,18 @@ class NotificationService:
         for item in notifications:
             context = None
             if item.comment_id:
+                host_id = await self.db.scalar(
+                    select(VulnerabilityAsset.asset_id)
+                    .join(Vulnerability, Vulnerability.id == VulnerabilityAsset.vulnerability_id)
+                    .where(
+                        and_(
+                            VulnerabilityAsset.asset_type == AssetType.HOST,
+                            Vulnerability.id
+                            == select(Comment.vulnerability_id).where(Comment.id == item.comment_id).scalar_subquery(),
+                        )
+                    )
+                    .limit(1)
+                )
                 row = await self.db.execute(
                     select(Comment, Vulnerability, User)
                     .join(Vulnerability, Vulnerability.id == Comment.vulnerability_id)
@@ -1535,6 +1914,7 @@ class NotificationService:
                         vulnerability_id=vuln.id,
                         vulnerability_title=vuln.title,
                         project_id=vuln.project_id,
+                        host_id=host_id,
                         commenter_username=commenter.username,
                     )
             result.append(
@@ -1576,83 +1956,445 @@ class ImportService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
+    async def _find_matching_host(self, project_id: UUID, host_data) -> Host | None:
+        clauses = []
+        if host_data.ip_address:
+            clauses.append(Host.ip_address == host_data.ip_address)
+        if host_data.hostname:
+            clauses.append(Host.hostname == host_data.hostname)
+        if not clauses:
+            return None
+        matches = list(
+            (
+                await self.db.scalars(
+                    select(Host).where(and_(Host.project_id == project_id, or_(*clauses)))
+                )
+            ).all()
+        )
+        if not matches:
+            return None
+        exact_matches = [
+            host for host in matches if host.ip_address == host_data.ip_address and host.hostname == host_data.hostname
+        ]
+        if exact_matches:
+            return exact_matches[0]
+        if len(matches) == 1:
+            return matches[0]
+        raise ValidationError(
+            f"Найдено несколько host для ip/hostname ({host_data.ip_address or '-'} / {host_data.hostname or '-'})"
+        )
+
+    @staticmethod
+    def _merge_host_fields(host: Host, host_data) -> None:
+        if not host.ip_address and host_data.ip_address:
+            host.ip_address = host_data.ip_address
+        if not host.hostname and host_data.hostname:
+            host.hostname = host_data.hostname
+        if host.status.value == "unknown" and host_data.status.value != "unknown":
+            host.status = host_data.status
+        if not host.notes and host_data.notes:
+            host.notes = host_data.notes
+
+    @staticmethod
+    def _merge_service_fields(service: Service, service_data) -> None:
+        if not service.version and service_data.version:
+            service.version = service_data.version
+        if not service.banner and service_data.banner:
+            service.banner = service_data.banner
+
+    @staticmethod
+    def _merge_endpoint_fields(endpoint: Endpoint, endpoint_payload: dict) -> None:
+        if not endpoint.description and endpoint_payload.get("description"):
+            endpoint.description = endpoint_payload["description"]
+        if not endpoint.query_params and endpoint_payload.get("query_params"):
+            endpoint.query_params = endpoint_payload["query_params"]
+        if not endpoint.request_body and endpoint_payload.get("request_body"):
+            endpoint.request_body = endpoint_payload["request_body"]
+        if not endpoint.request_content_type and endpoint_payload.get("request_content_type"):
+            endpoint.request_content_type = endpoint_payload["request_content_type"]
+        if not endpoint.request_headers and endpoint_payload.get("request_headers"):
+            endpoint.request_headers = endpoint_payload["request_headers"]
+
+    @staticmethod
+    def _decode_text_payload(payload: bytes) -> str:
+        try:
+            return payload.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ValidationError("Файл должен быть в кодировке UTF-8") from exc
+
+    @staticmethod
+    def _load_json_or_yaml_document(raw_text: str) -> dict:
+        try:
+            parsed = json.loads(raw_text)
+        except Exception:
+            try:
+                parsed = yaml.safe_load(raw_text)
+            except Exception as exc:
+                raise ValidationError("Swagger/OpenAPI файл должен быть валидным JSON или YAML") from exc
+        if not isinstance(parsed, dict):
+            raise ValidationError("Swagger/OpenAPI документ должен быть объектом")
+        return parsed
+
+    @staticmethod
+    def _resolve_json_pointer(document: dict, ref: str) -> object:
+        if not ref.startswith("#/"):
+            raise ValidationError("Поддерживаются только локальные $ref вида '#/...'")
+        current: object = document
+        for raw_token in ref[2:].split("/"):
+            token = raw_token.replace("~1", "/").replace("~0", "~")
+            if not isinstance(current, dict) or token not in current:
+                raise ValidationError(f"Swagger/OpenAPI содержит битую ссылку $ref: {ref}")
+            current = current[token]
+        return current
+
+    @classmethod
+    def _resolve_openapi_ref(cls, document: dict, value: object, depth: int = 0) -> object:
+        if depth > 20:
+            raise ValidationError("Swagger/OpenAPI содержит слишком глубокую цепочку $ref")
+        if isinstance(value, dict) and "$ref" in value:
+            ref = value.get("$ref")
+            if not isinstance(ref, str):
+                raise ValidationError("Некорректный $ref в Swagger/OpenAPI документе")
+            resolved = cls._resolve_json_pointer(document, ref)
+            if isinstance(resolved, dict):
+                merged = dict(resolved)
+                merged.update({key: item for key, item in value.items() if key != "$ref"})
+                return cls._resolve_openapi_ref(document, merged, depth + 1)
+            return cls._resolve_openapi_ref(document, resolved, depth + 1)
+        return value
+
+    @staticmethod
+    def _normalize_openapi_path(path_value: str, prefix: str) -> str:
+        combined = f"{prefix.rstrip('/')}/{path_value.lstrip('/')}" if prefix else path_value
+        normalized = re.sub(r"/{2,}", "/", combined.strip() or "/")
+        return normalized if normalized.startswith("/") else f"/{normalized}"
+
+    @staticmethod
+    def _extract_openapi_host(document: dict) -> str | None:
+        swagger_host = str(document.get("host") or "").strip()
+        if swagger_host:
+            return re.sub(r"^https?://", "", swagger_host, flags=re.IGNORECASE).split("/", 1)[0]
+        servers = document.get("servers")
+        if not isinstance(servers, list):
+            return None
+        for server in servers:
+            if not isinstance(server, dict):
+                continue
+            raw_url = str(server.get("url") or "").strip()
+            if not raw_url or "://" not in raw_url:
+                continue
+            parsed = urlsplit(raw_url)
+            if parsed.netloc:
+                return parsed.netloc
+        return None
+
+    @staticmethod
+    def _extract_openapi_path_prefix(document: dict) -> str:
+        base_path = str(document.get("basePath") or "").strip()
+        if base_path:
+            return base_path
+        servers = document.get("servers")
+        if not isinstance(servers, list):
+            return ""
+        for server in servers:
+            if not isinstance(server, dict):
+                continue
+            raw_url = str(server.get("url") or "").strip()
+            if not raw_url:
+                continue
+            parsed = urlsplit(raw_url if "://" in raw_url else f"https://placeholder.local{raw_url}")
+            if parsed.path and parsed.path != "/":
+                return parsed.path
+        return ""
+
+    @staticmethod
+    def _serialize_openapi_example(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        return str(value)
+
+    @classmethod
+    def _extract_openapi_query_params(cls, document: dict, path_item: dict, operation: dict) -> list[dict]:
+        collected: list[dict] = []
+        seen: set[str] = set()
+        for source in (path_item.get("parameters"), operation.get("parameters")):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                resolved = cls._resolve_openapi_ref(document, item)
+                if not isinstance(resolved, dict) or str(resolved.get("in") or "").lower() != "query":
+                    continue
+                name = str(resolved.get("name") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                collected.append(
+                    {
+                        "name": name,
+                        "value": None,
+                        "required": bool(resolved.get("required")),
+                        "description": str(resolved.get("description") or "").strip() or None,
+                    }
+                )
+        return collected
+
+    @classmethod
+    def _extract_openapi_request_details(cls, document: dict, operation: dict) -> tuple[str | None, str | None]:
+        request_body = operation.get("requestBody")
+        if not request_body:
+            return None, None
+        resolved = cls._resolve_openapi_ref(document, request_body)
+        if not isinstance(resolved, dict):
+            return None, None
+        content = resolved.get("content")
+        if not isinstance(content, dict) or not content:
+            return None, None
+        for content_type, content_schema in content.items():
+            normalized_type = str(content_type or "").strip() or None
+            if not isinstance(content_schema, dict):
+                return normalized_type, None
+            if "example" in content_schema:
+                return normalized_type, cls._serialize_openapi_example(content_schema.get("example"))
+            examples = content_schema.get("examples")
+            if isinstance(examples, dict):
+                for example in examples.values():
+                    if isinstance(example, dict) and "value" in example:
+                        return normalized_type, cls._serialize_openapi_example(example.get("value"))
+            schema = content_schema.get("schema")
+            resolved_schema = cls._resolve_openapi_ref(document, schema) if schema else None
+            if isinstance(resolved_schema, dict) and "example" in resolved_schema:
+                return normalized_type, cls._serialize_openapi_example(resolved_schema.get("example"))
+            return normalized_type, None
+        return None, None
+
+    async def import_openapi(self, project_id: UUID, host_id: UUID, payload: bytes, actor_id: UUID) -> OpenApiImportResult:
+        host = await self.db.scalar(select(Host).where(and_(Host.id == host_id, Host.project_id == project_id)))
+        if not host:
+            raise NotFoundError("Хост не найден")
+
+        raw_text = self._decode_text_payload(payload)
+        document = self._load_json_or_yaml_document(raw_text)
+        paths = document.get("paths")
+        if not isinstance(paths, dict) or not paths:
+            raise ValidationError("В Swagger/OpenAPI документе отсутствует объект paths")
+
+        spec_host = self._extract_openapi_host(document)
+        result = OpenApiImportResult(
+            host_id=host.id,
+            spec_host=spec_host,
+            endpoints_created=0,
+            endpoints_skipped=0,
+            errors=[],
+        )
+        current_host_targets = {value.lower() for value in (host.hostname, host.ip_address) if value}
+        if spec_host and current_host_targets and spec_host.lower() not in current_host_targets:
+            result.errors.append(
+                f"В спецификации указан host '{spec_host}', но импорт выполнен в текущий хост '{host.hostname or host.ip_address}'."
+            )
+
+        supported_methods = {"get", "post", "put", "patch", "delete", "head", "options"}
+        path_prefix = self._extract_openapi_path_prefix(document)
+
+        try:
+            for path_value, raw_path_item in paths.items():
+                if not isinstance(path_value, str) or not path_value.strip():
+                    continue
+                path_item = self._resolve_openapi_ref(document, raw_path_item)
+                if not isinstance(path_item, dict):
+                    result.errors.append(f"Раздел paths['{path_value}'] имеет некорректную структуру и был пропущен.")
+                    continue
+                for raw_method_name, raw_operation in path_item.items():
+                    if not isinstance(raw_method_name, str):
+                        continue
+                    method_name = raw_method_name.lower()
+                    if method_name in {"parameters"} or method_name.startswith("x-"):
+                        continue
+                    if method_name not in supported_methods:
+                        result.errors.append(f"Метод '{raw_method_name}' для '{path_value}' не поддерживается и был пропущен.")
+                        continue
+                    operation = self._resolve_openapi_ref(document, raw_operation)
+                    if not isinstance(operation, dict):
+                        result.errors.append(f"Операция '{raw_method_name}' для '{path_value}' имеет некорректную структуру.")
+                        continue
+                    request_content_type, request_body = self._extract_openapi_request_details(document, operation)
+                    endpoint_payload = {
+                        "path": self._normalize_openapi_path(path_value, path_prefix),
+                        "method": method_name.upper(),
+                        "description": "\n\n".join(
+                            part for part in [str(operation.get("summary") or "").strip(), str(operation.get("description") or "").strip()] if part
+                        )
+                        or None,
+                        "query_params": self._extract_openapi_query_params(document, path_item, operation),
+                        "request_body": request_body,
+                        "request_content_type": request_content_type,
+                        "request_headers": [],
+                    }
+                    endpoint = await self.db.scalar(
+                        select(Endpoint).where(
+                            and_(
+                                Endpoint.host_id == host.id,
+                                Endpoint.path == endpoint_payload["path"],
+                                Endpoint.method == endpoint_payload["method"],
+                            )
+                        )
+                    )
+                    if endpoint is None:
+                        self.db.add(
+                            Endpoint(
+                                host_id=host.id,
+                                path=endpoint_payload["path"],
+                                method=endpoint_payload["method"],
+                                description=endpoint_payload["description"],
+                                query_params=endpoint_payload["query_params"],
+                                request_body=endpoint_payload["request_body"],
+                                request_content_type=endpoint_payload["request_content_type"],
+                                request_headers=[],
+                            )
+                        )
+                        result.endpoints_created += 1
+                    else:
+                        self._merge_endpoint_fields(endpoint, endpoint_payload)
+                        result.endpoints_skipped += 1
+
+            if result.endpoints_created == 0 and result.endpoints_skipped == 0:
+                raise ValidationError("В Swagger/OpenAPI документе не найдено методов для импорта")
+
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
+
+        await AuditService(self.db).log(
+            "CREATE",
+            user_id=actor_id,
+            entity_type="openapi_import",
+            details=result.model_dump(mode="json"),
+        )
+        await ws_manager.broadcast(
+            project_id,
+            {"event": "updated", "entity": "endpoint", "project_id": str(project_id), "data": {"host_id": str(host_id), "imported": True}},
+        )
+        return result
+
     async def import_json(self, project_id: UUID, payload: bytes, actor_id: UUID) -> ImportResult:
         """Импортирует данные атомарно: при ошибке откатывает всё."""
         try:
             parsed = json.loads(payload.decode("utf-8"))
         except Exception as exc:
             raise ValidationError("Невалидный JSON-файл") from exc
-        if not isinstance(parsed, dict) or "hosts" not in parsed or not isinstance(parsed["hosts"], list):
-            raise ValidationError("JSON должен содержать массив hosts")
+        try:
+            import_payload = PcfImportPayload.model_validate(parsed)
+        except Exception as exc:
+            raise ValidationError(f"JSON импорта не соответствует схеме PCF: {exc}") from exc
 
         result = ImportResult(hosts_created=0, ports_created=0, services_created=0, endpoints_created=0, errors=[])
         try:
-            for host_data in parsed["hosts"]:
-                host = Host(
-                    project_id=project_id,
-                    ip_address=host_data.get("ip_address"),
-                    hostname=host_data.get("hostname"),
-                    status=host_data.get("status", "unknown"),
-                    notes=host_data.get("notes"),
-                )
-                self.db.add(host)
-                await self.db.flush()
-                result.hosts_created += 1
+            for host_data in import_payload.hosts:
+                host = await self._find_matching_host(project_id, host_data)
+                if host is None:
+                    host = Host(
+                        project_id=project_id,
+                        ip_address=host_data.ip_address,
+                        hostname=host_data.hostname,
+                        status=host_data.status,
+                        notes=host_data.notes,
+                    )
+                    self.db.add(host)
+                    await self.db.flush()
+                    result.hosts_created += 1
+                else:
+                    self._merge_host_fields(host, host_data)
 
-                for port_data in host_data.get("ports", []):
-                    duplicate = await self.db.scalar(
+                for port_data in host_data.ports:
+                    port = await self.db.scalar(
                         select(Port).where(
                             and_(
                                 Port.host_id == host.id,
-                                Port.port_number == port_data["port_number"],
-                                Port.protocol == port_data.get("protocol", "tcp"),
+                                Port.port_number == port_data.port_number,
+                                Port.protocol == port_data.protocol,
                             )
                         )
                     )
-                    if duplicate:
-                        raise ValidationError(
-                            f"Дубликат порта {port_data['port_number']}/{port_data.get('protocol', 'tcp')} для host {host.id}"
+                    if port is None:
+                        port = Port(
+                            host_id=host.id,
+                            port_number=port_data.port_number,
+                            protocol=port_data.protocol,
+                            state=port_data.state,
                         )
-                    port = Port(
-                        host_id=host.id,
-                        port_number=port_data["port_number"],
-                        protocol=port_data.get("protocol", "tcp"),
-                        state=port_data.get("state", "open"),
-                    )
-                    self.db.add(port)
-                    await self.db.flush()
-                    result.ports_created += 1
+                        self.db.add(port)
+                        await self.db.flush()
+                        result.ports_created += 1
 
-                    for service_data in port_data.get("services", []):
-                        self.db.add(
-                            Service(
-                                port_id=port.id,
-                                name=service_data["name"],
-                                version=service_data.get("version"),
-                                banner=service_data.get("banner"),
+                    for service_data in port_data.services:
+                        service = await self.db.scalar(
+                            select(Service).where(
+                                and_(
+                                    Service.port_id == port.id,
+                                    Service.name == service_data.name,
+                                )
                             )
                         )
-                        result.services_created += 1
+                        if service is None:
+                            self.db.add(
+                                Service(
+                                    port_id=port.id,
+                                    name=service_data.name,
+                                    version=service_data.version,
+                                    banner=service_data.banner,
+                                )
+                            )
+                            result.services_created += 1
+                        else:
+                            self._merge_service_fields(service, service_data)
 
-                for endpoint_data in host_data.get("endpoints", []):
+                for endpoint_data in host_data.endpoints:
                     endpoint_payload = {
-                        "path": endpoint_data.get("path"),
-                        "method": endpoint_data.get("method"),
-                        "description": endpoint_data.get("description"),
-                        "request_raw": endpoint_data.get("request_raw") or endpoint_data.get("raw_request") or endpoint_data.get("request"),
+                        "path": endpoint_data.path,
+                        "method": endpoint_data.method,
+                        "description": endpoint_data.description,
+                        "request_raw": endpoint_data.request_raw,
+                        "query_params": [item.model_dump() for item in endpoint_data.query_params],
+                        "request_body": endpoint_data.request_body,
+                        "request_content_type": endpoint_data.request_content_type,
+                        "request_headers": [item.model_dump() for item in endpoint_data.request_headers],
                     }
                     endpoint_payload = AssetService._apply_raw_request_payload(endpoint_payload)
+                    endpoint_payload = AssetService._apply_structured_request_payload(endpoint_payload)
                     if not endpoint_payload.get("path"):
                         raise ValidationError("Каждый endpoint должен содержать path или request_raw")
-                    self.db.add(
-                        Endpoint(
-                            host_id=host.id,
-                            path=endpoint_payload["path"],
-                            method=endpoint_payload.get("method"),
-                            description=endpoint_payload.get("description"),
+                    if endpoint_payload.get("request_headers") is None:
+                        endpoint_payload["request_headers"] = []
+                    endpoint = await self.db.scalar(
+                        select(Endpoint).where(
+                            and_(
+                                Endpoint.host_id == host.id,
+                                Endpoint.path == endpoint_payload["path"],
+                                Endpoint.method == endpoint_payload.get("method"),
+                            )
                         )
                     )
-                    result.endpoints_created += 1
+                    if endpoint is None:
+                        self.db.add(
+                            Endpoint(
+                                host_id=host.id,
+                                path=endpoint_payload["path"],
+                                method=endpoint_payload.get("method"),
+                                description=endpoint_payload.get("description"),
+                                query_params=endpoint_payload.get("query_params") or [],
+                                request_body=endpoint_payload.get("request_body"),
+                                request_content_type=endpoint_payload.get("request_content_type"),
+                                request_headers=endpoint_payload.get("request_headers") or [],
+                            )
+                        )
+                        result.endpoints_created += 1
+                    else:
+                        self._merge_endpoint_fields(endpoint, endpoint_payload)
 
             await self.db.commit()
         except Exception:
@@ -1669,6 +2411,7 @@ class ReportService:
 
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
+        self.storage = MinioStorage()
 
     async def _collect_project_data(self, project_id: UUID) -> dict:
         project = await self.db.scalar(select(Project).where(Project.id == project_id))
@@ -1710,11 +2453,8 @@ class ReportService:
             "files": files,
         }
 
-    async def generate_markdown(self, project_id: UUID) -> bytes:
-        """Генерирует Markdown-отчёт."""
-        data = await self._collect_project_data(project_id)
-        project: Project = data["project"]
-        vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
+    @staticmethod
+    def _build_report_indexes(data: dict) -> dict:
         hosts: list[Host] = data["hosts"]
         ports: list[Port] = data["ports"]
         vulnerability_assets: list[VulnerabilityAsset] = data["vulnerability_assets"]
@@ -1729,11 +2469,107 @@ class ReportService:
         files_by_vuln_id: dict[UUID, list[File]] = {}
         for file_meta in files:
             files_by_vuln_id.setdefault(file_meta.vulnerability_id, []).append(file_meta)
+        files_by_id = {file_meta.id: file_meta for file_meta in files}
         severity_stats: dict[str, int] = {}
         status_stats: dict[str, int] = {}
-        for vuln in vulnerabilities:
+        for vuln in data["vulnerabilities"]:
             severity_stats[vuln.severity.value] = severity_stats.get(vuln.severity.value, 0) + 1
             status_stats[vuln.status.value] = status_stats.get(vuln.status.value, 0) + 1
+        return {
+            "host_by_id": host_by_id,
+            "ports_by_host_id": ports_by_host_id,
+            "assets_by_vuln_id": assets_by_vuln_id,
+            "files_by_vuln_id": files_by_vuln_id,
+            "files_by_id": files_by_id,
+            "severity_stats": severity_stats,
+            "status_stats": status_stats,
+        }
+
+    @staticmethod
+    def _report_text(value: object | None, fallback: str = "-") -> str:
+        text = str(value).strip() if value is not None else ""
+        return text or fallback
+
+    @staticmethod
+    def _report_paragraph(value: object | None, fallback: str = "-") -> str:
+        return escape(ReportService._report_text(value, fallback)).replace("\n", "<br/>")
+
+    @staticmethod
+    def _host_label(host: Host | None, fallback: object) -> str:
+        if not host:
+            return str(fallback)
+        return host.hostname or host.ip_address or str(host.id)
+
+    @staticmethod
+    def _ports_summary(host_ports: list[Port]) -> str:
+        return ", ".join(
+            f"{port.port_number}/{port.protocol.value if hasattr(port.protocol, 'value') else port.protocol}" for port in host_ports
+        ) or "-"
+
+    @staticmethod
+    def _linked_assets_for_vuln(vuln: Vulnerability, indexes: dict) -> list[str]:
+        linked_assets: list[str] = []
+        for asset in indexes["assets_by_vuln_id"].get(vuln.id, []):
+            if asset.asset_type == AssetType.HOST:
+                linked_assets.append(ReportService._host_label(indexes["host_by_id"].get(asset.asset_id), f"host:{asset.asset_id}"))
+            else:
+                linked_assets.append(f"{asset.asset_type.value}:{asset.asset_id}")
+        return linked_assets
+
+    @staticmethod
+    def _resolve_step_files(step: dict, files_by_id: dict[UUID, File]) -> list[File]:
+        resolved: list[File] = []
+        for raw_file_id in step.get("image_file_ids", []):
+            try:
+                file_id = UUID(str(raw_file_id))
+            except (TypeError, ValueError):
+                continue
+            file_meta = files_by_id.get(file_id)
+            if file_meta:
+                resolved.append(file_meta)
+        return resolved
+
+    @staticmethod
+    def _is_image_file(file_meta: File) -> bool:
+        return file_meta.content_type.startswith("image/")
+
+    @staticmethod
+    def _normalize_report_image_bytes(image_bytes: bytes) -> bytes | None:
+        try:
+            with PillowImage.open(BytesIO(image_bytes)) as image:
+                normalized = ImageOps.exif_transpose(image)
+                output = BytesIO()
+                save_image = normalized.convert("RGBA") if normalized.mode in {"P", "LA"} else normalized
+                save_format = "PNG" if "A" in save_image.getbands() else "JPEG"
+                if save_format == "JPEG":
+                    save_image = save_image.convert("RGB")
+                    save_image.save(output, format=save_format, quality=90)
+                else:
+                    save_image.save(output, format=save_format)
+                return output.getvalue()
+        except (UnidentifiedImageError, OSError, ValueError):
+            return None
+
+    async def _download_report_images(self, files: list[File]) -> dict[UUID, bytes]:
+        image_bytes: dict[UUID, bytes] = {}
+        for file_meta in files:
+            if not self._is_image_file(file_meta):
+                continue
+            try:
+                raw_bytes = await asyncio.to_thread(self.storage.download_bytes, file_meta.minio_key)
+            except Exception:
+                continue
+            normalized_bytes = await asyncio.to_thread(self._normalize_report_image_bytes, raw_bytes)
+            if normalized_bytes:
+                image_bytes[file_meta.id] = normalized_bytes
+        return image_bytes
+
+    def _render_markdown_from_data(self, data: dict) -> bytes:
+        project: Project = data["project"]
+        vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
+        hosts: list[Host] = data["hosts"]
+        ports: list[Port] = data["ports"]
+        indexes = self._build_report_indexes(data)
 
         lines = [
             f"# Отчёт по проекту {project.name}",
@@ -1745,32 +2581,33 @@ class ReportService:
             "",
             "## Статистика уязвимостей по критичности",
         ]
-        for key, value in severity_stats.items():
+        for key, value in indexes["severity_stats"].items():
             lines.append(f"- {key}: {value}")
         lines += ["", "## Статистика уязвимостей по статусу"]
-        for key, value in status_stats.items():
+        for key, value in indexes["status_stats"].items():
             lines.append(f"- {key}: {value}")
         lines += ["", "## Активы", f"- Хосты: {len(hosts)}", f"- Порты: {len(ports)}", ""]
         if hosts:
             lines += ["### Сводка по хостам", "", "| Хост | IP/Hostname | Порты |", "| --- | --- | --- |"]
             for host in hosts:
-                host_label = host.hostname or host.ip_address or str(host.id)
-                target_value = host.ip_address or host.hostname or "-"
-                host_ports = ports_by_host_id.get(host.id, [])
-                ports_summary = ", ".join(
-                    f"{port.port_number}/{port.protocol.value if hasattr(port.protocol, 'value') else port.protocol}" for port in host_ports
+                lines.append(
+                    f"| {self._host_label(host, host.id)} | {host.ip_address or host.hostname or '-'} | {self._ports_summary(indexes['ports_by_host_id'].get(host.id, []))} |"
                 )
-                lines.append(f"| {host_label} | {target_value} | {ports_summary or '-'} |")
         lines += ["", "## Уязвимости"]
         for vuln in vulnerabilities:
-            linked_assets: list[str] = []
-            for asset in assets_by_vuln_id.get(vuln.id, []):
-                if asset.asset_type == AssetType.HOST:
-                    host = host_by_id.get(asset.asset_id)
-                    linked_assets.append(host.hostname or host.ip_address if host else f"host:{asset.asset_id}")
-                else:
-                    linked_assets.append(f"{asset.asset_type.value}:{asset.asset_id}")
-            attachment_names = [file_meta.original_name for file_meta in files_by_vuln_id.get(vuln.id, [])]
+            VulnerabilityService._hydrate_workflow_steps(vuln)
+            attachment_names = [file_meta.original_name for file_meta in indexes["files_by_vuln_id"].get(vuln.id, [])]
+            workflow_lines: list[str] = []
+            for index, step in enumerate(vuln.workflow_steps or [], start=1):
+                title = self._report_text(step.get("title"), f"Этап {index}")
+                description = self._report_text(step.get("description"), "")
+                workflow_lines.append(f"{index}. {title}")
+                if description:
+                    workflow_lines.append(f"   {description}")
+                image_names = [file_meta.original_name for file_meta in self._resolve_step_files(step, indexes["files_by_id"])]
+                if image_names:
+                    workflow_lines.append(f"   Скриншоты: {', '.join(image_names)}")
+            workflow_text = "\n".join(workflow_lines) if workflow_lines else (vuln.steps_to_reproduce or "-")
             lines += [
                 f"### {vuln.title}",
                 f"- Severity: {vuln.severity.value}",
@@ -1778,14 +2615,14 @@ class ReportService:
                 f"- CVSS: {vuln.cvss_version.value if vuln.cvss_version else '-'} {vuln.cvss_score if vuln.cvss_score else '-'}",
                 f"- CVSS Vector: {vuln.cvss_vector or '-'}",
                 f"- CWE: {vuln.cwe_id or '-'}",
-                f"- Активы: {', '.join(linked_assets) if linked_assets else '-'}",
+                f"- Активы: {', '.join(self._linked_assets_for_vuln(vuln, indexes)) or '-'}",
                 f"- Вложения: {', '.join(attachment_names) if attachment_names else '-'}",
                 "",
                 "**Описание**",
                 vuln.description or "-",
                 "",
                 "**Шаги воспроизведения**",
-                vuln.steps_to_reproduce or "-",
+                workflow_text,
                 "",
                 "**Влияние**",
                 vuln.impact or "-",
@@ -1797,38 +2634,207 @@ class ReportService:
         return "\n".join(lines).encode("utf-8")
 
     @staticmethod
-    def _build_pdf(markdown_text: str) -> bytes:
-        """Синхронная генерация PDF-версии отчёта."""
+    def _build_pdf(data: dict, indexes: dict, image_bytes_by_id: dict[UUID, bytes]) -> bytes:
         buffer = BytesIO()
-        pdf = canvas.Canvas(buffer, pagesize=A4)
-        width, height = A4
-        y = height - 40
-        for line in markdown_text.splitlines():
-            if y < 40:
-                pdf.showPage()
-                y = height - 40
-            pdf.drawString(40, y, line[:120])
-            y -= 14
-        pdf.save()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+        styles = getSampleStyleSheet()
+        story: list = []
+        project: Project = data["project"]
+        vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
+        hosts: list[Host] = data["hosts"]
+        project_dates = f"{project.start_date} - {project.end_date}"
+
+        story.append(Paragraph(ReportService._report_paragraph(f"Отчёт по проекту {project.name}"), styles["Title"]))
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("Общая информация", styles["Heading2"]))
+        story.append(Paragraph(f"<b>Статус:</b> {ReportService._report_paragraph(project.status.value)}", styles["BodyText"]))
+        story.append(Paragraph(f"<b>Даты:</b> {ReportService._report_paragraph(project_dates)}", styles["BodyText"]))
+        story.append(
+            Paragraph(
+                f"<b>Участники:</b> {ReportService._report_paragraph(', '.join(data['members']) if data['members'] else 'нет')}",
+                styles["BodyText"],
+            )
+        )
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("Статистика уязвимостей по критичности", styles["Heading2"]))
+        for key, value in indexes["severity_stats"].items():
+            story.append(Paragraph(f"• {escape(key)}: {value}", styles["BodyText"]))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph("Статистика уязвимостей по статусу", styles["Heading2"]))
+        for key, value in indexes["status_stats"].items():
+            story.append(Paragraph(f"• {escape(key)}: {value}", styles["BodyText"]))
+        story.append(Spacer(1, 12))
+        if hosts:
+            story.append(Paragraph("Сводка по хостам", styles["Heading2"]))
+            table_data = [["Хост", "IP/Hostname", "Порты"]]
+            for host in hosts:
+                table_data.append(
+                    [
+                        ReportService._host_label(host, host.id),
+                        host.ip_address or host.hostname or "-",
+                        ReportService._ports_summary(indexes["ports_by_host_id"].get(host.id, [])),
+                    ]
+                )
+            table = Table(table_data, colWidths=[150, 160, 170])
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ]
+                )
+            )
+            story.extend([table, Spacer(1, 12)])
+
+        story.append(Paragraph("Уязвимости", styles["Heading2"]))
+        for vuln in vulnerabilities:
+            VulnerabilityService._hydrate_workflow_steps(vuln)
+            cvss_text = f"{vuln.cvss_version.value if vuln.cvss_version else '-'} {vuln.cvss_score if vuln.cvss_score else '-'}"
+            story.append(Paragraph(ReportService._report_paragraph(vuln.title), styles["Heading3"]))
+            story.append(Paragraph(f"<b>Severity:</b> {escape(vuln.severity.value)}", styles["BodyText"]))
+            story.append(Paragraph(f"<b>Status:</b> {escape(vuln.status.value)}", styles["BodyText"]))
+            story.append(
+                Paragraph(
+                    f"<b>CVSS:</b> {ReportService._report_paragraph(cvss_text)}",
+                    styles["BodyText"],
+                )
+            )
+            story.append(Paragraph(f"<b>CWE:</b> {ReportService._report_paragraph(vuln.cwe_id)}", styles["BodyText"]))
+            story.append(
+                Paragraph(
+                    f"<b>Активы:</b> {ReportService._report_paragraph(', '.join(ReportService._linked_assets_for_vuln(vuln, indexes)) or '-')}",
+                    styles["BodyText"],
+                )
+            )
+            story.append(Paragraph(f"<b>Описание:</b> {ReportService._report_paragraph(vuln.description)}", styles["BodyText"]))
+            story.append(Paragraph(f"<b>Влияние:</b> {ReportService._report_paragraph(vuln.impact)}", styles["BodyText"]))
+            story.append(Paragraph(f"<b>Рекомендации:</b> {ReportService._report_paragraph(vuln.recommendations)}", styles["BodyText"]))
+            story.append(Paragraph("<b>Шаги воспроизведения:</b>", styles["BodyText"]))
+            rendered_image_ids: set[UUID] = set()
+            if vuln.workflow_steps:
+                for index, step in enumerate(vuln.workflow_steps, start=1):
+                    story.append(Paragraph(f"{index}. {ReportService._report_paragraph(step.get('title'), f'Этап {index}')}", styles["BodyText"]))
+                    if step.get("description"):
+                        story.append(Paragraph(ReportService._report_paragraph(step.get("description")), styles["BodyText"]))
+                    for file_meta in ReportService._resolve_step_files(step, indexes["files_by_id"]):
+                        story.append(Paragraph(f"Скриншот: {ReportService._report_paragraph(file_meta.original_name)}", styles["BodyText"]))
+                        image_bytes = image_bytes_by_id.get(file_meta.id)
+                        if image_bytes:
+                            pdf_image = PlatypusImage(BytesIO(image_bytes))
+                            pdf_image._restrictSize(5.5 * inch, 4.5 * inch)
+                            story.append(pdf_image)
+                            rendered_image_ids.add(file_meta.id)
+                        story.append(Spacer(1, 6))
+            else:
+                story.append(Paragraph(ReportService._report_paragraph(vuln.steps_to_reproduce), styles["BodyText"]))
+            additional_images = [
+                file_meta
+                for file_meta in indexes["files_by_vuln_id"].get(vuln.id, [])
+                if ReportService._is_image_file(file_meta) and file_meta.id not in rendered_image_ids
+            ]
+            if additional_images:
+                story.append(Paragraph("<b>Дополнительные скриншоты:</b>", styles["BodyText"]))
+                for file_meta in additional_images:
+                    story.append(Paragraph(ReportService._report_paragraph(file_meta.original_name), styles["BodyText"]))
+                    image_bytes = image_bytes_by_id.get(file_meta.id)
+                    if image_bytes:
+                        pdf_image = PlatypusImage(BytesIO(image_bytes))
+                        pdf_image._restrictSize(5.5 * inch, 4.5 * inch)
+                        story.append(pdf_image)
+                    story.append(Spacer(1, 6))
+            attachment_names = [file_meta.original_name for file_meta in indexes["files_by_vuln_id"].get(vuln.id, []) if not ReportService._is_image_file(file_meta)]
+            story.append(Paragraph(f"<b>Прочие вложения:</b> {ReportService._report_paragraph(', '.join(attachment_names) if attachment_names else '-')}", styles["BodyText"]))
+            story.append(Spacer(1, 12))
+        doc.build(story)
         return buffer.getvalue()
 
     @staticmethod
-    def _build_docx(markdown_text: str) -> bytes:
-        """Синхронная генерация DOCX-версии отчёта."""
+    def _build_docx(data: dict, indexes: dict, image_bytes_by_id: dict[UUID, bytes]) -> bytes:
         doc = Document()
-        for line in markdown_text.splitlines():
-            doc.add_paragraph(line)
+        project: Project = data["project"]
+        vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
+        hosts: list[Host] = data["hosts"]
+        doc.add_heading(f"Отчёт по проекту {project.name}", level=0)
+        doc.add_heading("Общая информация", level=1)
+        doc.add_paragraph(f"Статус: {project.status.value}")
+        doc.add_paragraph(f"Даты: {project.start_date} - {project.end_date}")
+        doc.add_paragraph(f"Участники: {', '.join(data['members']) if data['members'] else 'нет'}")
+        doc.add_heading("Статистика уязвимостей по критичности", level=1)
+        for key, value in indexes["severity_stats"].items():
+            doc.add_paragraph(f"{key}: {value}", style="List Bullet")
+        doc.add_heading("Статистика уязвимостей по статусу", level=1)
+        for key, value in indexes["status_stats"].items():
+            doc.add_paragraph(f"{key}: {value}", style="List Bullet")
+        if hosts:
+            doc.add_heading("Сводка по хостам", level=1)
+            table = doc.add_table(rows=1, cols=3)
+            table.rows[0].cells[0].text = "Хост"
+            table.rows[0].cells[1].text = "IP/Hostname"
+            table.rows[0].cells[2].text = "Порты"
+            for host in hosts:
+                row = table.add_row().cells
+                row[0].text = ReportService._host_label(host, host.id)
+                row[1].text = host.ip_address or host.hostname or "-"
+                row[2].text = ReportService._ports_summary(indexes["ports_by_host_id"].get(host.id, []))
+        doc.add_heading("Уязвимости", level=1)
+        for vuln in vulnerabilities:
+            VulnerabilityService._hydrate_workflow_steps(vuln)
+            doc.add_heading(vuln.title, level=2)
+            doc.add_paragraph(f"Severity: {vuln.severity.value}")
+            doc.add_paragraph(f"Status: {vuln.status.value}")
+            doc.add_paragraph(f"CVSS: {vuln.cvss_version.value if vuln.cvss_version else '-'} {vuln.cvss_score if vuln.cvss_score else '-'}")
+            doc.add_paragraph(f"CWE: {vuln.cwe_id or '-'}")
+            doc.add_paragraph(f"Активы: {', '.join(ReportService._linked_assets_for_vuln(vuln, indexes)) or '-'}")
+            doc.add_paragraph(f"Описание: {ReportService._report_text(vuln.description)}")
+            doc.add_paragraph(f"Влияние: {ReportService._report_text(vuln.impact)}")
+            doc.add_paragraph(f"Рекомендации: {ReportService._report_text(vuln.recommendations)}")
+            doc.add_paragraph("Шаги воспроизведения:")
+            rendered_image_ids: set[UUID] = set()
+            if vuln.workflow_steps:
+                for index, step in enumerate(vuln.workflow_steps, start=1):
+                    doc.add_paragraph(f"{index}. {ReportService._report_text(step.get('title'), f'Этап {index}')}", style="List Number")
+                    if step.get("description"):
+                        doc.add_paragraph(ReportService._report_text(step.get("description")))
+                    for file_meta in ReportService._resolve_step_files(step, indexes["files_by_id"]):
+                        doc.add_paragraph(f"Скриншот: {file_meta.original_name}")
+                        image_bytes = image_bytes_by_id.get(file_meta.id)
+                        if image_bytes:
+                            doc.add_picture(BytesIO(image_bytes), width=Inches(5.5))
+                            rendered_image_ids.add(file_meta.id)
+            else:
+                doc.add_paragraph(ReportService._report_text(vuln.steps_to_reproduce))
+            additional_images = [
+                file_meta
+                for file_meta in indexes["files_by_vuln_id"].get(vuln.id, [])
+                if ReportService._is_image_file(file_meta) and file_meta.id not in rendered_image_ids
+            ]
+            if additional_images:
+                doc.add_paragraph("Дополнительные скриншоты:")
+                for file_meta in additional_images:
+                    doc.add_paragraph(file_meta.original_name)
+                    image_bytes = image_bytes_by_id.get(file_meta.id)
+                    if image_bytes:
+                        doc.add_picture(BytesIO(image_bytes), width=Inches(5.5))
+            attachments = [file_meta.original_name for file_meta in indexes["files_by_vuln_id"].get(vuln.id, []) if not ReportService._is_image_file(file_meta)]
+            doc.add_paragraph(f"Прочие вложения: {', '.join(attachments) if attachments else '-'}")
         buffer = BytesIO()
         doc.save(buffer)
         return buffer.getvalue()
 
+    async def generate_markdown(self, project_id: UUID) -> bytes:
+        data = await self._collect_project_data(project_id)
+        return self._render_markdown_from_data(data)
+
     async def generate(self, project_id: UUID, output_format: str) -> bytes:
         """Генерирует отчёт в запрошенном формате."""
-        markdown_bytes = await self.generate_markdown(project_id)
+        data = await self._collect_project_data(project_id)
         if output_format == "md":
-            return markdown_bytes
+            return self._render_markdown_from_data(data)
+        indexes = self._build_report_indexes(data)
+        image_bytes_by_id = await self._download_report_images(data["files"])
         if output_format == "pdf":
-            return await asyncio.to_thread(self._build_pdf, markdown_bytes.decode("utf-8"))
+            return await asyncio.to_thread(self._build_pdf, data, indexes, image_bytes_by_id)
         if output_format == "docx":
-            return await asyncio.to_thread(self._build_docx, markdown_bytes.decode("utf-8"))
+            return await asyncio.to_thread(self._build_docx, data, indexes, image_bytes_by_id)
         raise ValidationError("Неподдерживаемый формат отчёта")

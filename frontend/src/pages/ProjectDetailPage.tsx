@@ -1,12 +1,10 @@
 import AddIcon from "@mui/icons-material/Add";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
-import AttachFileIcon from "@mui/icons-material/AttachFile";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
+import FlagIcon from "@mui/icons-material/Flag";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
-import OpenInNewIcon from "@mui/icons-material/OpenInNew";
-import PersonAddAlt1Icon from "@mui/icons-material/PersonAddAlt1";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import {
   Alert,
@@ -14,6 +12,7 @@ import {
   Button,
   Card,
   CardContent,
+  Checkbox,
   Chip,
   Dialog,
   DialogActions,
@@ -34,14 +33,14 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  addVulnerabilityAsset,
   createHost,
   createVulnerabilityComment,
-  deleteVulnerabilityAsset,
+  deleteHost,
   addProjectMember,
   deleteVulnerability,
   deleteVulnerabilityComment,
   deleteVulnerabilityFile,
+  getApiErrorMessage,
   generateProjectReport,
   getEndpoints,
   getHostVulnerabilities,
@@ -54,13 +53,14 @@ import {
   getVulnerability,
   importProjectData,
   listVulnerabilityComments,
-  listVulnerabilityFiles,
   removeProjectMember,
   updateProject,
   updateVulnerabilityComment,
   updateVulnerability,
   uploadVulnerabilityFile,
 } from "../api";
+import { calculateCvssScore } from "../cvss";
+import { PROJECT_STATUS_CHIP_SX, PROJECT_STATUS_LABELS, PROJECT_STATUS_ORDER } from "../projectStatus";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
 import { useAuthStore } from "../store";
@@ -71,15 +71,15 @@ import type {
   ImportResult,
   Port,
   ProjectMember,
-  Service,
+  ProjectStatus,
   User,
   Vulnerability,
   VulnerabilityComment,
   VulnerabilityDetails,
-  VulnerabilityFile,
 } from "../types";
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const CVSS_VERSION = "4.0" as const;
 
 const toDateInputValue = (date: Date) => {
   const year = date.getFullYear();
@@ -96,11 +96,17 @@ const parseIsoDateOnly = (value: string | null) => {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
-const projectStatusLabels = {
-  active: "Активен",
-  completed: "Завершён",
-  archived: "Архив",
-} as const;
+const parseIsoDateTimeToDateOnly = (value: string | null) => {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+};
 
 export function ProjectDetailPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -116,13 +122,16 @@ export function ProjectDetailPage() {
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [projectName, setProjectName] = useState<string>("");
   const [projectDescription, setProjectDescription] = useState<string>("");
-  const [projectStatus, setProjectStatus] = useState<"active" | "completed" | "archived">("active");
+  const [projectStatus, setProjectStatus] = useState<ProjectStatus>("active");
   const [projectStartDate, setProjectStartDate] = useState<string | null>(null);
   const [projectEndDate, setProjectEndDate] = useState<string | null>(null);
+  const [projectTimelineFrozenAt, setProjectTimelineFrozenAt] = useState<string | null>(null);
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   const [usersCatalog, setUsersCatalog] = useState<User[]>([]);
   const [membersDialogOpen, setMembersDialogOpen] = useState(false);
-  const [selectedMemberUserId, setSelectedMemberUserId] = useState("");
+  const [removeMembersDialogOpen, setRemoveMembersDialogOpen] = useState(false);
+  const [selectedAvailableMemberIds, setSelectedAvailableMemberIds] = useState<string[]>([]);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [membersBusy, setMembersBusy] = useState(false);
   const [hostStatsById, setHostStatsById] = useState<Record<string, HostTreeStats>>({});
   const [importOpen, setImportOpen] = useState(false);
@@ -131,28 +140,33 @@ export function ProjectDetailPage() {
   const [importSummary, setImportSummary] = useState<ImportResult | null>(null);
   const [reportLoadingFormat, setReportLoadingFormat] = useState<"md" | "pdf" | "docx" | null>(null);
   const [actionsAnchorEl, setActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [hostsMenuAnchorEl, setHostsMenuAnchorEl] = useState<HTMLElement | null>(null);
+  const [membersMenuAnchorEl, setMembersMenuAnchorEl] = useState<HTMLElement | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<"md" | "pdf" | "docx">("pdf");
   const [extendDialogOpen, setExtendDialogOpen] = useState(false);
+  const [statusDialogOpen, setStatusDialogOpen] = useState(false);
+  const [projectEditDialogOpen, setProjectEditDialogOpen] = useState(false);
+  const [projectDescriptionEditOpen, setProjectDescriptionEditOpen] = useState(false);
+  const [projectDraftName, setProjectDraftName] = useState("");
+  const [projectDraftStartDate, setProjectDraftStartDate] = useState("");
+  const [projectDraftEndDate, setProjectDraftEndDate] = useState("");
+  const [projectDraftDescription, setProjectDraftDescription] = useState("");
+  const [projectSaving, setProjectSaving] = useState(false);
+  const [pendingProjectStatus, setPendingProjectStatus] = useState<ProjectStatus>("active");
   const [extendEndDate, setExtendEndDate] = useState("");
   const [extendingProject, setExtendingProject] = useState(false);
   const storagePrefix = projectId ? `project-detail:${projectId}` : null;
 
   const [hostOpen, setHostOpen] = useState(false);
+  const [removeHostsDialogOpen, setRemoveHostsDialogOpen] = useState(false);
+  const [selectedHostIds, setSelectedHostIds] = useState<string[]>([]);
   const [hostIp, setHostIp] = useState("");
   const [hostName, setHostName] = useState("");
-  const [hostStatus, setHostStatus] = useState<Host["status"]>("unknown");
   const [hostNotes, setHostNotes] = useState("");
   const [vulnDetailOpen, setVulnDetailOpen] = useState(false);
   const [activeVuln, setActiveVuln] = useState<VulnerabilityDetails | null>(null);
-  const [vulnFiles, setVulnFiles] = useState<VulnerabilityFile[]>([]);
   const [vulnComments, setVulnComments] = useState<VulnerabilityComment[]>([]);
-  const [assetHosts, setAssetHosts] = useState<Host[]>([]);
-  const [assetPorts, setAssetPorts] = useState<Port[]>([]);
-  const [assetEndpoints, setAssetEndpoints] = useState<Endpoint[]>([]);
-  const [assetServices, setAssetServices] = useState<Service[]>([]);
-  const [linkAssetType, setLinkAssetType] = useState<"host" | "port" | "service" | "endpoint">("host");
-  const [linkAssetId, setLinkAssetId] = useState("");
   const [newComment, setNewComment] = useState("");
   const [vulnBusy, setVulnBusy] = useState(false);
   const [editCommentOpen, setEditCommentOpen] = useState(false);
@@ -181,6 +195,7 @@ export function ProjectDetailPage() {
       setProjectStatus(projectResp.status);
       setProjectStartDate(projectResp.start_date);
       setProjectEndDate(projectResp.end_date);
+      setProjectTimelineFrozenAt(projectResp.timeline_frozen_at);
       setSelectedHostId((previousHostId) => {
         const storedHostId = storagePrefix ? window.localStorage.getItem(`${storagePrefix}:selectedHostId`) : null;
         if (previousHostId && hostsResp.items.some((host) => host.id === previousHostId)) {
@@ -191,8 +206,8 @@ export function ProjectDetailPage() {
         }
         return hostsResp.items[0]?.id ?? null;
       });
-    } catch {
-      setError("Не удалось загрузить данные проекта");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось загрузить данные проекта"));
     }
   }, [projectId, storagePrefix]);
 
@@ -212,8 +227,8 @@ export function ProjectDetailPage() {
       setPorts(portsResp);
       setEndpoints(endpointsResp);
       setVulnerabilities(vulnsResp.items);
-    } catch {
-      setError("Не удалось загрузить структуру выбранного хоста");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось загрузить структуру выбранного хоста"));
     }
   }, [projectId, selectedHostId]);
 
@@ -360,7 +375,7 @@ export function ProjectDetailPage() {
         daysLeft: null as number | null,
         statusTone: "neutral" as "neutral" | "success" | "warning" | "error",
         statusLabel:
-          projectStatus === "active" ? "Стандартный срок: 14 дней" : `Статус: ${projectStatusLabels[projectStatus]}`,
+          projectStatus === "active" ? "Стандартный срок: 14 дней" : `Статус: ${PROJECT_STATUS_LABELS[projectStatus]}`,
       };
     }
 
@@ -370,7 +385,7 @@ export function ProjectDetailPage() {
         endLabel: end.toLocaleDateString("ru-RU"),
         daysLeft: null as number | null,
         statusTone: "neutral" as const,
-        statusLabel: `Статус: ${projectStatusLabels[projectStatus]}`,
+        statusLabel: `Статус: ${PROJECT_STATUS_LABELS[projectStatus]}`,
       };
     }
 
@@ -408,8 +423,10 @@ export function ProjectDetailPage() {
     const end = endRaw ?? (startRaw ? new Date(startRaw.getTime() + 14 * DAY_IN_MS) : null);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const frozenAtFallback = new Date(Math.min(today.getTime(), end?.getTime() ?? today.getTime()));
+    const frozenAt = parseIsoDateTimeToDateOnly(projectTimelineFrozenAt) ?? frozenAtFallback;
     const effectiveToday =
-      projectStatus === "active" ? today : new Date(Math.min(today.getTime(), end?.getTime() ?? today.getTime()));
+      projectStatus === "active" ? today : new Date(Math.min(frozenAt.getTime(), end?.getTime() ?? frozenAt.getTime()));
 
     if (!start || !end || end.getTime() <= start.getTime()) {
       return {
@@ -422,8 +439,10 @@ export function ProjectDetailPage() {
     const passedDays = Math.max(0, Math.min(totalDays, elapsedInclusive));
     const reportStartIndex = Math.max(0, totalDays - 2);
     const cells = Array.from({ length: totalDays }, (_, index) => {
+      const cellDate = new Date(start.getTime() + index * DAY_IN_MS);
       const isElapsed = index < passedDays;
       const isReportWindow = index >= reportStartIndex;
+      const isToday = cellDate.getTime() === today.getTime();
       let bgColor = "rgba(148,163,184,0.14)";
       if (isElapsed && isReportWindow) {
         bgColor = "rgba(255,152,0,0.5)";
@@ -432,7 +451,7 @@ export function ProjectDetailPage() {
       } else if (isReportWindow) {
         bgColor = "rgba(255,152,0,0.2)";
       }
-      return { bgColor };
+      return { bgColor, isToday };
     });
 
     return {
@@ -442,7 +461,7 @@ export function ProjectDetailPage() {
       startLabel: start.toLocaleDateString("ru-RU"),
       endLabel: end.toLocaleDateString("ru-RU"),
     };
-  }, [projectEndDate, projectStartDate, projectStatus]);
+  }, [projectEndDate, projectStartDate, projectStatus, projectTimelineFrozenAt]);
 
   const submitHost = async () => {
     if (!projectId) {
@@ -452,13 +471,11 @@ export function ProjectDetailPage() {
       ip_address: hostIp || undefined,
       hostname: hostName || undefined,
       notes: hostNotes || undefined,
-      status: hostStatus,
     });
     setHostOpen(false);
     setHostIp("");
     setHostName("");
     setHostNotes("");
-    setHostStatus("unknown");
     await loadProjectData();
   };
 
@@ -483,52 +500,6 @@ export function ProjectDetailPage() {
     // #endregion
   }, [vulnDetailOpen, activeVuln?.id, selectedHostId]);
 
-  const loadHostAssetsCatalog = async () => {
-    if (!projectId || !selectedHostId || !selectedHost) {
-      // #region agent log
-      fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-        body: JSON.stringify({
-          sessionId: "a74592",
-          runId: "vuln-card-pre",
-          hypothesisId: "H3",
-          location: "ProjectDetailPage.tsx:loadHostAssetsCatalog:empty",
-          message: "Project host assets catalog skipped due to missing host context",
-          data: { projectId: projectId ?? null, selectedHostId: selectedHostId ?? null, hasSelectedHost: Boolean(selectedHost) },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-      setAssetHosts([]);
-      setAssetPorts([]);
-      setAssetEndpoints([]);
-      setAssetServices([]);
-      return;
-    }
-    const [hostPorts, hostEndpoints] = await Promise.all([getPorts(projectId, selectedHostId), getEndpoints(projectId, selectedHostId)]);
-    const hostServices = (await Promise.all(hostPorts.map(async (port) => await getServices(projectId, selectedHostId, port.id)))).flat();
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-      body: JSON.stringify({
-        sessionId: "a74592",
-        runId: "vuln-card-pre",
-        hypothesisId: "H3",
-        location: "ProjectDetailPage.tsx:loadHostAssetsCatalog:success",
-        message: "Project host assets catalog loaded",
-        data: { selectedHostId, portsCount: hostPorts.length, endpointsCount: hostEndpoints.length, servicesCount: hostServices.length },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-    setAssetHosts([selectedHost]);
-    setAssetPorts(hostPorts);
-    setAssetEndpoints(hostEndpoints);
-    setAssetServices(hostServices);
-  };
-
   const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
     if (!projectId) {
       return;
@@ -551,15 +522,12 @@ export function ProjectDetailPage() {
         }),
       }).catch(() => {});
       // #endregion
-      const [vulnDetail, files, commentsPage] = await Promise.all([
+      const [vulnDetail, commentsPage] = await Promise.all([
         getVulnerability(projectId, vulnerabilityId),
-        listVulnerabilityFiles(projectId, vulnerabilityId),
         listVulnerabilityComments(projectId, vulnerabilityId),
       ]);
       setActiveVuln(vulnDetail);
-      setVulnFiles(files);
       setVulnComments(commentsPage.items);
-      await loadHostAssetsCatalog();
       // #region agent log
       fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
         method: "POST",
@@ -570,7 +538,7 @@ export function ProjectDetailPage() {
           hypothesisId: "H4",
           location: "ProjectDetailPage.tsx:loadVulnerabilityDetails:success",
           message: "Project vulnerability details loaded",
-          data: { vulnerabilityId, filesCount: files.length, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
+          data: { vulnerabilityId, commentsCount: commentsPage.items.length, assetsCount: vulnDetail.assets.length },
           timestamp: Date.now(),
         }),
       }).catch(() => {});
@@ -599,7 +567,7 @@ export function ProjectDetailPage() {
         }),
       }).catch(() => {});
       // #endregion
-      setError("Не удалось загрузить карточку уязвимости");
+      setError(getApiErrorMessage(error, "Не удалось загрузить карточку уязвимости"));
     } finally {
       setVulnBusy(false);
     }
@@ -614,22 +582,22 @@ export function ProjectDetailPage() {
     try {
       const updated = await updateVulnerability(projectId, activeVuln.id, {
         title: activeVuln.title,
-        description: activeVuln.description || undefined,
+        description: activeVuln.description || null,
         severity: activeVuln.severity,
         status: activeVuln.status,
-        cvss_version: activeVuln.cvss_version || undefined,
-        cvss_score: activeVuln.cvss_score ?? undefined,
-        cvss_vector: activeVuln.cvss_vector || undefined,
-        cwe_id: activeVuln.cwe_id || undefined,
+        cvss_version: activeVuln.cvss_vector?.trim() ? CVSS_VERSION : null,
+        cvss_score: activeVuln.cvss_score,
+        cvss_vector: activeVuln.cvss_vector,
+        cwe_id: activeVuln.cwe_id,
         workflow_steps: activeVuln.workflow_steps,
-        steps_to_reproduce: activeVuln.steps_to_reproduce || undefined,
-        impact: activeVuln.impact || undefined,
-        recommendations: activeVuln.recommendations || undefined,
+        steps_to_reproduce: activeVuln.steps_to_reproduce || null,
+        impact: activeVuln.impact || null,
+        recommendations: activeVuln.recommendations || null,
       });
       setActiveVuln((prev) => (prev ? { ...prev, ...updated } : prev));
       await loadHostAssets();
-    } catch {
-      setError("Не удалось сохранить уязвимость");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось сохранить уязвимость"));
     } finally {
       setVulnBusy(false);
     }
@@ -646,121 +614,21 @@ export function ProjectDetailPage() {
       setVulnDetailOpen(false);
       setActiveVuln(null);
       await loadHostAssets();
-    } catch {
-      setError("Не удалось удалить уязвимость");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить уязвимость"));
     } finally {
       setVulnBusy(false);
     }
   };
 
-  const uploadFileToActiveVuln = async (file: File | null) => {
-    if (!projectId || !activeVuln || !file) {
-      return;
-    }
-    setVulnBusy(true);
-    try {
-      await uploadVulnerabilityFile(projectId, activeVuln.id, file);
-      const files = await listVulnerabilityFiles(projectId, activeVuln.id);
-      setVulnFiles(files);
-    } catch {
-      setError("Не удалось загрузить файл");
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const removeVulnerabilityFile = async (fileId: string) => {
-    if (!projectId || !activeVuln) {
-      return;
-    }
-    setVulnBusy(true);
-    try {
-      await deleteVulnerabilityFile(projectId, activeVuln.id, fileId);
-      const files = await listVulnerabilityFiles(projectId, activeVuln.id);
-      setVulnFiles(files);
-    } catch {
-      setError("Не удалось удалить файл");
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const linkAssetOptions = useMemo(() => {
-    if (linkAssetType === "host") {
-      return assetHosts.map((host) => ({
-        id: host.id,
-        label: `Host: ${host.hostname || host.ip_address || host.id}`,
-      }));
-    }
-    if (linkAssetType === "port") {
-      return assetPorts.map((port) => ({
-        id: port.id,
-        label: `Port: ${port.port_number}/${port.protocol}`,
-      }));
-    }
-    if (linkAssetType === "service") {
-      return assetServices.map((service) => ({
-        id: service.id,
-        label: `Service: ${service.name}${service.version ? ` ${service.version}` : ""}`,
-      }));
-    }
-    return assetEndpoints.map((endpoint) => ({
-      id: endpoint.id,
-      label: `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}`,
-    }));
-  }, [assetEndpoints, assetHosts, assetPorts, assetServices, linkAssetType]);
-
-  const resolveAssetLabel = (assetType: string, assetId: string) => {
-    if (assetType === "host") {
-      const host = assetHosts.find((item) => item.id === assetId);
-      return host ? `Host: ${host.hostname || host.ip_address || host.id}` : `host:${assetId}`;
-    }
-    if (assetType === "port") {
-      const port = assetPorts.find((item) => item.id === assetId);
-      return port ? `Port: ${port.port_number}/${port.protocol}` : `port:${assetId}`;
-    }
-    if (assetType === "service") {
-      const service = assetServices.find((item) => item.id === assetId);
-      return service ? `Service: ${service.name}${service.version ? ` ${service.version}` : ""}` : `service:${assetId}`;
-    }
-    const endpoint = assetEndpoints.find((item) => item.id === assetId);
-    return endpoint ? `Endpoint: ${(endpoint.method || "ANY").toUpperCase()} ${endpoint.path}` : `endpoint:${assetId}`;
-  };
-
-  const addAssetLinkToActiveVuln = async () => {
-    if (!projectId || !activeVuln || !linkAssetId) {
-      return;
-    }
-    setVulnBusy(true);
-    setError(null);
-    try {
-      await addVulnerabilityAsset(projectId, activeVuln.id, {
-        asset_type: linkAssetType,
-        asset_id: linkAssetId,
-      });
-      await loadVulnerabilityDetails(activeVuln.id);
-      setLinkAssetId("");
-    } catch {
-      setError("Не удалось привязать актив к уязвимости");
-    } finally {
-      setVulnBusy(false);
-    }
-  };
-
-  const removeAssetLinkFromActiveVuln = async (assetLinkId: string) => {
-    if (!projectId || !activeVuln) {
-      return;
-    }
-    setVulnBusy(true);
-    setError(null);
-    try {
-      await deleteVulnerabilityAsset(projectId, activeVuln.id, assetLinkId);
-      await loadVulnerabilityDetails(activeVuln.id);
-    } catch {
-      setError("Не удалось удалить привязку актива");
-    } finally {
-      setVulnBusy(false);
-    }
+  const buildAutoCvssFields = (vector: string | null) => {
+    const normalizedVersion = vector?.trim() ? CVSS_VERSION : null;
+    const { score } = calculateCvssScore(normalizedVersion, vector);
+    return {
+      cvss_version: normalizedVersion,
+      cvss_vector: vector,
+      cvss_score: score,
+    };
   };
 
   const addCommentToActiveVuln = async () => {
@@ -769,12 +637,11 @@ export function ProjectDetailPage() {
     }
     setVulnBusy(true);
     try {
-      await createVulnerabilityComment(projectId, activeVuln.id, newComment.trim());
-      const commentsPage = await listVulnerabilityComments(projectId, activeVuln.id);
-      setVulnComments(commentsPage.items);
+      const created = await createVulnerabilityComment(projectId, activeVuln.id, newComment.trim());
+      setVulnComments((prev) => [...prev, created]);
       setNewComment("");
-    } catch {
-      setError("Не удалось добавить комментарий");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось добавить комментарий"));
     } finally {
       setVulnBusy(false);
     }
@@ -787,10 +654,9 @@ export function ProjectDetailPage() {
     setVulnBusy(true);
     try {
       await deleteVulnerabilityComment(projectId, activeVuln.id, commentId);
-      const commentsPage = await listVulnerabilityComments(projectId, activeVuln.id);
-      setVulnComments(commentsPage.items);
-    } catch {
-      setError("Не удалось удалить комментарий");
+      setVulnComments((prev) => prev.filter((comment) => comment.id !== commentId));
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить комментарий"));
     } finally {
       setVulnBusy(false);
     }
@@ -808,18 +674,64 @@ export function ProjectDetailPage() {
     }
     setVulnBusy(true);
     try {
-      await updateVulnerabilityComment(projectId, activeVuln.id, editingCommentId, editingCommentContent.trim());
-      const commentsPage = await listVulnerabilityComments(projectId, activeVuln.id);
-      setVulnComments(commentsPage.items);
+      const updated = await updateVulnerabilityComment(projectId, activeVuln.id, editingCommentId, editingCommentContent.trim());
+      setVulnComments((prev) => prev.map((comment) => (comment.id === updated.id ? updated : comment)));
       setEditCommentOpen(false);
       setEditingCommentId(null);
       setEditingCommentContent("");
-    } catch {
-      setError("Не удалось обновить комментарий");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить комментарий"));
     } finally {
       setVulnBusy(false);
     }
   };
+
+  const renderCommentsSection = () => (
+    <Stack spacing={1.25} sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+      <Typography variant="subtitle1" fontWeight={700}>
+        Комментарии ({vulnComments.length})
+      </Typography>
+      <TextField
+        label="Комментарий (@username только для участников проекта)"
+        multiline
+        minRows={3}
+        value={newComment}
+        onChange={(e) => setNewComment(e.target.value)}
+        helperText="Раздел вынесен выше, чтобы не теряться в длинной форме."
+      />
+      <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1}>
+        <Typography variant="caption" color="text.secondary">
+          Упоминания приходят только участникам текущего проекта.
+        </Typography>
+        <Button variant="contained" disabled={!newComment.trim()} onClick={() => void addCommentToActiveVuln()}>
+          Добавить комментарий
+        </Button>
+      </Stack>
+      <List dense disablePadding>
+        {vulnComments.map((comment) => (
+          <ListItem
+            key={comment.id}
+            alignItems="flex-start"
+            secondaryAction={
+              user?.role === "admin" || user?.id === comment.user_id ? (
+                <Stack direction="row" spacing={0.5}>
+                  <IconButton size="small" onClick={() => openCommentEdit(comment)}>
+                    <EditIcon fontSize="small" />
+                  </IconButton>
+                  <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
+                    <DeleteOutlineIcon fontSize="small" />
+                  </IconButton>
+                </Stack>
+              ) : null
+            }
+          >
+            <ListItemText primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`} secondary={comment.content} />
+          </ListItem>
+        ))}
+        {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
+      </List>
+    </Stack>
+  );
 
   const submitImport = async () => {
     if (!projectId || !importFile) {
@@ -832,8 +744,8 @@ export function ProjectDetailPage() {
       setImportSummary(result);
       await loadProjectData();
       await loadHostAssets();
-    } catch {
-      setError("Не удалось импортировать JSON-данные проекта");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось импортировать JSON-данные проекта"));
     } finally {
       setImporting(false);
     }
@@ -856,8 +768,8 @@ export function ProjectDetailPage() {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(objectUrl);
-    } catch {
-      setError("Не удалось сформировать отчёт");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось сформировать отчёт"));
     } finally {
       setReportLoadingFormat(null);
     }
@@ -872,10 +784,43 @@ export function ProjectDetailPage() {
     setActionsAnchorEl(null);
   };
 
+  const closeHostsMenu = () => {
+    setHostsMenuAnchorEl(null);
+  };
+
+  const closeMembersMenu = () => {
+    setMembersMenuAnchorEl(null);
+  };
+
   const openExtendDialog = () => {
     setError(null);
     setExtendEndDate(projectEndDate ?? "");
     setExtendDialogOpen(true);
+  };
+
+  const openStatusDialog = () => {
+    setError(null);
+    setPendingProjectStatus(projectStatus);
+    setStatusDialogOpen(true);
+  };
+
+  const openProjectEditDialog = () => {
+    setError(null);
+    setProjectDraftName(projectName);
+    setProjectDraftStartDate(projectStartDate ?? "");
+    setProjectDraftEndDate(projectEndDate ?? "");
+    setProjectEditDialogOpen(true);
+  };
+
+  const startProjectDescriptionEdit = () => {
+    setError(null);
+    setProjectDraftDescription(projectDescription);
+    setProjectDescriptionEditOpen(true);
+  };
+
+  const cancelProjectDescriptionEdit = () => {
+    setProjectDraftDescription(projectDescription);
+    setProjectDescriptionEditOpen(false);
   };
 
   const applyQuickExtension = (days: number) => {
@@ -902,14 +847,61 @@ export function ProjectDetailPage() {
       await updateProject(projectId, { end_date: extendEndDate });
       setExtendDialogOpen(false);
       await loadProjectData();
-    } catch {
-      setError("Не удалось продлить срок проекта");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось продлить срок проекта"));
     } finally {
       setExtendingProject(false);
     }
   };
 
-  const updateProjectStatus = async (nextStatus: "active" | "completed" | "archived") => {
+  const submitProjectEdit = async () => {
+    if (!projectId) {
+      return;
+    }
+    const normalizedName = projectDraftName.trim();
+    if (!normalizedName) {
+      setError("Название проекта не может быть пустым");
+      return;
+    }
+    if (projectDraftStartDate && projectDraftEndDate && projectDraftEndDate < projectDraftStartDate) {
+      setError("Дата окончания проекта не может быть раньше даты начала");
+      return;
+    }
+    setProjectSaving(true);
+    setError(null);
+    try {
+      await updateProject(projectId, {
+        name: normalizedName,
+        start_date: projectDraftStartDate || undefined,
+        end_date: projectDraftEndDate || undefined,
+      });
+      setProjectEditDialogOpen(false);
+      await loadProjectData();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить проект"));
+    } finally {
+      setProjectSaving(false);
+    }
+  };
+
+  const submitProjectDescription = async () => {
+    if (!projectId) {
+      return;
+    }
+    setProjectSaving(true);
+    setError(null);
+    try {
+      await updateProject(projectId, { description: projectDraftDescription.trim() });
+      setProjectDescriptionEditOpen(false);
+      await loadProjectData();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить описание проекта"));
+    } finally {
+      setProjectSaving(false);
+    }
+  };
+
+  const updateProjectStatus = async (nextStatus: ProjectStatus) => {
     if (!projectId || nextStatus === projectStatus) {
       return;
     }
@@ -918,9 +910,14 @@ export function ProjectDetailPage() {
       await updateProject(projectId, { status: nextStatus });
       setProjectStatus(nextStatus);
       await loadProjectData();
-    } catch {
-      setError("Не удалось обновить статус проекта");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить статус проекта"));
     }
+  };
+
+  const submitProjectStatus = async () => {
+    await updateProjectStatus(pendingProjectStatus);
+    setStatusDialogOpen(false);
   };
 
   const openMembersDialog = async () => {
@@ -928,6 +925,7 @@ export function ProjectDetailPage() {
       return;
     }
     setError(null);
+    setSelectedAvailableMemberIds([]);
     setMembersDialogOpen(true);
     if (user?.role !== "admin") {
       return;
@@ -935,41 +933,69 @@ export function ProjectDetailPage() {
     try {
       const usersResponse = await getUsers(1, 200);
       setUsersCatalog(usersResponse.items);
-    } catch {
-      setError("Не удалось загрузить список пользователей для управления участниками.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось загрузить список пользователей для управления участниками."));
     }
   };
 
-  const addMemberToProject = async () => {
-    if (!projectId || !selectedMemberUserId) {
+  const openRemoveMembersDialog = () => {
+    setSelectedMemberIds([]);
+    setRemoveMembersDialogOpen(true);
+  };
+
+  const openRemoveHostsDialog = () => {
+    setSelectedHostIds([]);
+    setRemoveHostsDialogOpen(true);
+  };
+
+  const addMembersToProject = async () => {
+    if (!projectId || selectedAvailableMemberIds.length === 0) {
       return;
     }
     setMembersBusy(true);
     setError(null);
     try {
-      await addProjectMember(projectId, selectedMemberUserId);
-      setSelectedMemberUserId("");
+      await Promise.all(selectedAvailableMemberIds.map((userId) => addProjectMember(projectId, userId)));
+      setSelectedAvailableMemberIds([]);
+      setMembersDialogOpen(false);
       await loadProjectData();
-    } catch {
-      setError("Не удалось добавить участника в проект.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось добавить пользователей в проект."));
     } finally {
       setMembersBusy(false);
     }
   };
 
-  const removeMemberFromProject = async (memberUserId: string) => {
-    if (!projectId) {
+  const removeSelectedMembersFromProject = async () => {
+    if (!projectId || selectedMemberIds.length === 0) {
       return;
     }
     setMembersBusy(true);
     setError(null);
     try {
-      await removeProjectMember(projectId, memberUserId);
+      await Promise.all(selectedMemberIds.map((memberUserId) => removeProjectMember(projectId, memberUserId)));
+      setSelectedMemberIds([]);
+      setRemoveMembersDialogOpen(false);
       await loadProjectData();
-    } catch {
-      setError("Не удалось удалить участника из проекта.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить выбранных участников из проекта."));
     } finally {
       setMembersBusy(false);
+    }
+  };
+
+  const removeSelectedHosts = async () => {
+    if (!projectId || selectedHostIds.length === 0) {
+      return;
+    }
+    setError(null);
+    try {
+      await Promise.all(selectedHostIds.map((selectedHostId) => deleteHost(projectId, selectedHostId)));
+      setSelectedHostIds([]);
+      setRemoveHostsDialogOpen(false);
+      await loadProjectData();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить выбранные хосты."));
     }
   };
 
@@ -981,8 +1007,28 @@ export function ProjectDetailPage() {
           <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.4, fontWeight: 700 }}>
             Project Workspace
           </Typography>
-          <Typography variant="h4" fontWeight={700}>
-            {projectName ? `Проект: ${projectName}` : "Проект"}
+          <Stack direction={{ xs: "column", md: "row" }} spacing={1} alignItems={{ md: "center" }}>
+            <Typography variant="h4" fontWeight={700}>
+              {projectName ? `Проект: ${projectName}` : "Проект"}
+            </Typography>
+            <Chip size="small" label={PROJECT_STATUS_LABELS[projectStatus]} sx={PROJECT_STATUS_CHIP_SX[projectStatus]} />
+            {user?.role === "admin" && (
+              <IconButton
+                size="small"
+                onClick={openProjectEditDialog}
+                sx={{
+                  border: "1px solid rgba(126,224,255,0.18)",
+                  width: 32,
+                  height: 32,
+                  backgroundColor: "rgba(15,27,45,0.46)",
+                }}
+              >
+                <EditIcon fontSize="small" />
+              </IconButton>
+            )}
+          </Stack>
+          <Typography variant="body2" color="text.secondary" mt={0.5}>
+            Даты: {projectTimeMetrics.startLabel} - {projectTimeMetrics.endLabel}
           </Typography>
         </Box>
         <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", width: 42, height: 42, backgroundColor: "rgba(15,27,45,0.72)" }}>
@@ -997,6 +1043,17 @@ export function ProjectDetailPage() {
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
       >
+        {user?.role === "admin" && (
+          <MenuItem
+            onClick={() => {
+              closeActionsMenu();
+              openProjectEditDialog();
+            }}
+          >
+            <EditIcon fontSize="small" sx={{ mr: 1 }} />
+            Редактировать проект
+          </MenuItem>
+        )}
         <MenuItem
           onClick={() => {
             closeActionsMenu();
@@ -1015,6 +1072,17 @@ export function ProjectDetailPage() {
           <DownloadIcon fontSize="small" sx={{ mr: 1 }} />
           Экспорт
         </MenuItem>
+        {user?.role === "admin" && (
+          <MenuItem
+            onClick={() => {
+              closeActionsMenu();
+              openStatusDialog();
+            }}
+          >
+            <FlagIcon fontSize="small" sx={{ mr: 1 }} />
+            Статус проекта
+          </MenuItem>
+        )}
         {user?.role === "admin" && (
           <MenuItem
             onClick={() => {
@@ -1043,7 +1111,7 @@ export function ProjectDetailPage() {
           onSelectSection={setSelectedSection}
           onSelectProjectOverview={() => setSelectedSection("overview")}
           onSelectHost={setSelectedHostId}
-          onOpenHost={(hostId) => navigate(`/projects/${projectId}/hosts/${hostId}`)}
+          onOpenHost={(hostId, section) => navigate(`/projects/${projectId}/hosts/${hostId}`, { state: { section } })}
         />
 
         <Stack flex={1} spacing={2}>
@@ -1086,25 +1154,6 @@ export function ProjectDetailPage() {
                         />
                       )}
                     </Stack>
-                    {user?.role === "admin" && (
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-                        <TextField
-                          select
-                          size="small"
-                          label="Статус проекта"
-                          value={projectStatus}
-                          onChange={(event) => void updateProjectStatus(event.target.value as "active" | "completed" | "archived")}
-                          sx={{ minWidth: 180 }}
-                        >
-                          <MenuItem value="active">Активен</MenuItem>
-                          <MenuItem value="completed">Завершён</MenuItem>
-                          <MenuItem value="archived">Архив</MenuItem>
-                        </TextField>
-                        <Button size="small" variant="outlined" startIcon={<AccessTimeIcon />} onClick={openExtendDialog}>
-                          Продлить
-                        </Button>
-                      </Stack>
-                    )}
         </Stack>
                   <Box sx={{ mt: 1.5 }}>
                     {timelineBar.ready ? (
@@ -1125,8 +1174,9 @@ export function ProjectDetailPage() {
                               key={`timeline-day-${index}`}
                               sx={{
                                 height: 16,
-                                border: "1px solid rgba(126,224,255,0.16)",
+                                border: cell.isToday ? "1px solid rgba(76,175,80,0.95)" : "1px solid rgba(126,224,255,0.16)",
                                 backgroundColor: cell.bgColor,
+                                boxShadow: cell.isToday ? "0 0 0 1px rgba(76,175,80,0.35)" : "none",
                               }}
                             />
                           ))}
@@ -1169,16 +1219,20 @@ export function ProjectDetailPage() {
                     <IconButton
                       size="small"
                       className="overview-card-action"
-                      onClick={() => setHostOpen(true)}
+                      onClick={(event) => setHostsMenuAnchorEl(event.currentTarget)}
                       sx={{
                         position: "absolute",
                         top: 10,
                         right: 10,
-                        border: "1px solid rgba(126,224,255,0.18)",
-                        backgroundColor: "rgba(15,27,45,0.88)",
+                        color: "text.secondary",
+                        backgroundColor: "transparent",
+                        "&:hover": {
+                          backgroundColor: "rgba(126,224,255,0.08)",
+                          color: "text.primary",
+                        },
                       }}
                     >
-                      <AddIcon fontSize="small" />
+                      <MoreVertIcon fontSize="small" />
                     </IconButton>
             <CardContent>
                       <Typography color="text.secondary" mb={1}>
@@ -1187,7 +1241,7 @@ export function ProjectDetailPage() {
                       <Typography variant="h4" fontWeight={700}>
                         {hosts.length}
                       </Typography>
-                      <Stack spacing={0.8} mt={1} sx={{ maxHeight: 160, overflowY: "auto", pr: 0.5 }}>
+                      <Stack spacing={0.8} mt={1} sx={{ maxHeight: 160, overflowY: "auto" }}>
                         {hosts.length > 0 ? (
                           hosts.map((host) => (
                             <Box key={host.id} sx={{ px: 1.2, py: 0.9, border: "1px solid rgba(126,224,255,0.10)", borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
@@ -1224,16 +1278,20 @@ export function ProjectDetailPage() {
                       <IconButton
                         size="small"
                         className="overview-card-action"
-                        onClick={() => void openMembersDialog()}
+                        onClick={(event) => setMembersMenuAnchorEl(event.currentTarget)}
                         sx={{
                           position: "absolute",
                           top: 10,
                           right: 10,
-                          border: "1px solid rgba(126,224,255,0.18)",
-                          backgroundColor: "rgba(15,27,45,0.88)",
+                          color: "text.secondary",
+                          backgroundColor: "transparent",
+                          "&:hover": {
+                            backgroundColor: "rgba(126,224,255,0.08)",
+                            color: "text.primary",
+                          },
                         }}
                       >
-                        <AddIcon fontSize="small" />
+                        <MoreVertIcon fontSize="small" />
                       </IconButton>
                     )}
                     <CardContent sx={{ height: "100%" }}>
@@ -1243,7 +1301,7 @@ export function ProjectDetailPage() {
                       <Typography variant="h4" fontWeight={700} mb={1}>
                         {projectMembers.length}
                       </Typography>
-                      <Stack spacing={0.8} sx={{ maxHeight: 160, overflowY: "auto", pr: 0.5 }}>
+                      <Stack spacing={0.8} sx={{ maxHeight: 160, overflowY: "auto" }}>
                         {projectMembers.length > 0 ? (
                           projectMembers.map((member) => (
                             <Box key={member.user_id} sx={{ px: 1.2, py: 0.9, border: "1px solid rgba(126,224,255,0.10)", borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
@@ -1260,14 +1318,106 @@ export function ProjectDetailPage() {
                   </Card>
                 </Grid>
               </Grid>
-              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
+              <Menu
+                anchorEl={hostsMenuAnchorEl}
+                open={Boolean(hostsMenuAnchorEl)}
+                onClose={closeHostsMenu}
+                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                transformOrigin={{ vertical: "top", horizontal: "right" }}
+              >
+                <MenuItem
+                  onClick={() => {
+                    closeHostsMenu();
+                    setHostOpen(true);
+                  }}
+                >
+                  Добавить хост
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    closeHostsMenu();
+                    openRemoveHostsDialog();
+                  }}
+                  disabled={hosts.length === 0}
+                >
+                  Удалить хосты
+                </MenuItem>
+              </Menu>
+              <Menu
+                anchorEl={membersMenuAnchorEl}
+                open={Boolean(membersMenuAnchorEl)}
+                onClose={closeMembersMenu}
+                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                transformOrigin={{ vertical: "top", horizontal: "right" }}
+              >
+                <MenuItem
+                  onClick={() => {
+                    closeMembersMenu();
+                    void openMembersDialog();
+                  }}
+                >
+                  Добавить пользователей
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    closeMembersMenu();
+                    openRemoveMembersDialog();
+                  }}
+                  disabled={projectMembers.length === 0}
+                >
+                  Удалить пользователей
+                </MenuItem>
+              </Menu>
+              <Card
+                sx={{
+                  position: "relative",
+                  border: "1px solid rgba(126,224,255,0.14)",
+                  "& .project-description-edit-action": {
+                    opacity: 0,
+                    pointerEvents: "none",
+                    transition: "opacity 0.18s ease",
+                  },
+                  "&:hover .project-description-edit-action": {
+                    opacity: 1,
+                    pointerEvents: "auto",
+                  },
+                }}
+              >
                 <CardContent>
-                  <Typography variant="h6" fontWeight={700} mb={1}>
-                    Описание проекта
-                  </Typography>
-                  <Typography color="text.secondary" whiteSpace="pre-wrap">
-                    {projectDescription || "Описание проекта не заполнено"}
-                  </Typography>
+                  <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} mb={1}>
+                    <Typography variant="h6" fontWeight={700}>
+                      Описание проекта
+                    </Typography>
+                    {user?.role === "admin" && !projectDescriptionEditOpen && (
+                      <IconButton size="small" className="project-description-edit-action" onClick={startProjectDescriptionEdit}>
+                        <EditIcon fontSize="small" />
+                      </IconButton>
+                    )}
+                  </Stack>
+                  {projectDescriptionEditOpen ? (
+                    <Stack spacing={1.5}>
+                      <TextField
+                        fullWidth
+                        multiline
+                        minRows={4}
+                        value={projectDraftDescription}
+                        onChange={(event) => setProjectDraftDescription(event.target.value)}
+                        placeholder="Введите описание проекта"
+                      />
+                      <Stack direction="row" spacing={1} justifyContent="flex-end">
+                        <Button onClick={cancelProjectDescriptionEdit} disabled={projectSaving}>
+                          Отмена
+                        </Button>
+                        <Button variant="contained" onClick={() => void submitProjectDescription()} disabled={projectSaving}>
+                          Сохранить
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  ) : (
+                    <Typography color="text.secondary" whiteSpace="pre-wrap">
+                      {projectDescription || "Описание проекта не заполнено"}
+                    </Typography>
+                  )}
                 </CardContent>
               </Card>
             </Stack>
@@ -1284,9 +1434,6 @@ export function ProjectDetailPage() {
                       onClick={() => navigate(`/projects/${projectId}/hosts/${host.id}`)}
                     >
                       <Typography>{host.hostname || host.ip_address || "unknown-host"}</Typography>
-                    <Typography variant="body2" color="text.secondary">
-                        Статус: {host.status}
-                    </Typography>
                   </Box>
                 ))}
               </Stack>
@@ -1358,7 +1505,18 @@ export function ProjectDetailPage() {
                     <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.5, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.24)" }}>
                       <Stack direction="row" justifyContent="space-between" alignItems="center">
                     <Typography>{item.title}</Typography>
-                        <Button size="small" variant="outlined" onClick={() => void loadVulnerabilityDetails(item.id)} disabled={vulnBusy}>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => {
+                            if (projectId && selectedHostId) {
+                              navigate(`/projects/${projectId}/hosts/${selectedHostId}/vulnerabilities/${item.id}`, {
+                                state: { section: "vulns" },
+                              });
+                            }
+                          }}
+                          disabled={vulnBusy || !projectId || !selectedHostId}
+                        >
                           Открыть
                         </Button>
                       </Stack>
@@ -1382,11 +1540,6 @@ export function ProjectDetailPage() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="IP-адрес" value={hostIp} onChange={(e) => setHostIp(e.target.value)} />
             <TextField label="Hostname" value={hostName} onChange={(e) => setHostName(e.target.value)} />
-            <TextField select label="Статус" value={hostStatus} onChange={(e) => setHostStatus(e.target.value as Host["status"])}>
-              <MenuItem value="up">up</MenuItem>
-              <MenuItem value="down">down</MenuItem>
-              <MenuItem value="unknown">unknown</MenuItem>
-            </TextField>
             <TextField label="Описание" multiline minRows={3} value={hostNotes} onChange={(e) => setHostNotes(e.target.value)} />
           </Stack>
         </DialogContent>
@@ -1394,6 +1547,44 @@ export function ProjectDetailPage() {
           <Button onClick={() => setHostOpen(false)}>Отмена</Button>
           <Button variant="contained" disabled={!hostIp && !hostName} onClick={() => void submitHost()}>
             Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={removeHostsDialogOpen} onClose={() => setRemoveHostsDialogOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Удалить хосты</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1} sx={{ mt: 1 }}>
+            <List dense disablePadding>
+              {hosts.map((host) => {
+                const checked = selectedHostIds.includes(host.id);
+                return (
+                  <ListItem
+                    key={host.id}
+                    secondaryAction={
+                      <Checkbox
+                        edge="end"
+                        checked={checked}
+                        onChange={(event) =>
+                          setSelectedHostIds((prev) =>
+                            event.target.checked ? [...prev, host.id] : prev.filter((item) => item !== host.id)
+                          )
+                        }
+                      />
+                    }
+                  >
+                    <ListItemText primary={host.hostname || host.ip_address || "unknown-host"} secondary={host.ip_address || host.hostname || ""} />
+                  </ListItem>
+                );
+              })}
+              {hosts.length === 0 && <Typography color="text.secondary">Хосты пока не добавлены.</Typography>}
+            </List>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRemoveHostsDialogOpen(false)}>Закрыть</Button>
+          <Button color="error" variant="contained" startIcon={<DeleteOutlineIcon />} disabled={selectedHostIds.length === 0} onClick={() => void removeSelectedHosts()}>
+            Удалить
           </Button>
         </DialogActions>
       </Dialog>
@@ -1429,6 +1620,62 @@ export function ProjectDetailPage() {
           <Button onClick={() => setExtendDialogOpen(false)}>Отмена</Button>
           <Button variant="contained" disabled={!extendEndDate || extendingProject} onClick={() => void submitProjectExtension()}>
             Продлить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={projectEditDialogOpen} onClose={() => setProjectEditDialogOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Редактировать проект</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Название" value={projectDraftName} onChange={(event) => setProjectDraftName(event.target.value)} />
+            <TextField
+              label="Дата начала"
+              type="date"
+              value={projectDraftStartDate}
+              onChange={(event) => setProjectDraftStartDate(event.target.value)}
+              InputLabelProps={{ shrink: true }}
+            />
+            <TextField
+              label="Дата окончания"
+              type="date"
+              value={projectDraftEndDate}
+              onChange={(event) => setProjectDraftEndDate(event.target.value)}
+              InputLabelProps={{ shrink: true }}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProjectEditDialogOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void submitProjectEdit()} disabled={projectSaving || !projectDraftName.trim()}>
+            Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={statusDialogOpen} onClose={() => setStatusDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Статус проекта</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              select
+              label="Статус проекта"
+              value={pendingProjectStatus}
+              onChange={(event) => setPendingProjectStatus(event.target.value as ProjectStatus)}
+              fullWidth
+            >
+              {PROJECT_STATUS_ORDER.map((status) => (
+                <MenuItem key={status} value={status}>
+                  {PROJECT_STATUS_LABELS[status]}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setStatusDialogOpen(false)}>Отмена</Button>
+          <Button variant="contained" onClick={() => void submitProjectStatus()} disabled={pendingProjectStatus === projectStatus}>
+            Сохранить
           </Button>
         </DialogActions>
       </Dialog>
@@ -1489,18 +1736,17 @@ export function ProjectDetailPage() {
                     onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, description: e.target.value || null } : prev))}
                   />
                 </Grid>
+                <Grid size={{ xs: 12 }}>
+                  {renderCommentsSection()}
+                </Grid>
                 <Grid size={{ xs: 12, md: 3 }}>
                   <TextField
-                    select
                     label="CVSS версия"
                     fullWidth
-                    value={activeVuln.cvss_version || ""}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_version: (e.target.value as "3.1" | "4.0" | "") || null } : prev))}
-                  >
-                    <MenuItem value="">-</MenuItem>
-                    <MenuItem value="3.1">3.1</MenuItem>
-                    <MenuItem value="4.0">4.0</MenuItem>
-                  </TextField>
+                    value={CVSS_VERSION}
+                    slotProps={{ input: { readOnly: true } }}
+                    helperText="Поддерживается только CVSS 4.0"
+                  />
                 </Grid>
                 <Grid size={{ xs: 12, md: 3 }}>
                   <TextField
@@ -1508,10 +1754,8 @@ export function ProjectDetailPage() {
                     type="number"
                     fullWidth
                     value={activeVuln.cvss_score ?? ""}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      setActiveVuln((prev) => (prev ? { ...prev, cvss_score: value === "" ? null : Number(value) } : prev));
-                    }}
+                    slotProps={{ input: { readOnly: true } }}
+                    helperText="Рассчитывается автоматически по версии и вектору"
                   />
                 </Grid>
                 <Grid size={{ xs: 12, md: 6 }}>
@@ -1519,7 +1763,7 @@ export function ProjectDetailPage() {
                     label="CVSS vector"
                     fullWidth
                     value={activeVuln.cvss_vector || ""}
-                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, cvss_vector: e.target.value || null } : prev))}
+                    onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, ...buildAutoCvssFields(e.target.value || null) } : prev))}
                   />
                 </Grid>
                 <Grid size={{ xs: 12 }}>
@@ -1533,6 +1777,8 @@ export function ProjectDetailPage() {
                 <Grid size={{ xs: 12 }}>
                   <VulnerabilityStagesEditor
                     stages={activeVuln.workflow_steps || []}
+                    endpoints={endpoints}
+                    hostLabel={selectedHost?.hostname || selectedHost?.ip_address || undefined}
                     busy={vulnBusy}
                     onChange={(nextStages) =>
                       setActiveVuln((prev) =>
@@ -1550,21 +1796,29 @@ export function ProjectDetailPage() {
                       }
                       try {
                         const uploadedFile = await uploadVulnerabilityFile(projectId, activeVuln.id, file);
-                        setVulnFiles((prev) => [uploadedFile, ...prev]);
-                        setActiveVuln((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                workflow_steps: (prev.workflow_steps || []).map((stage) =>
-                                  stage.id === stageId
-                                    ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] }
-                                    : stage
-                                ),
-                              }
-                            : prev
+                        const nextWorkflowSteps = (activeVuln.workflow_steps || []).map((stage) =>
+                          stage.id === stageId ? { ...stage, image_file_ids: [...stage.image_file_ids, uploadedFile.id] } : stage
                         );
+                        const updated = await updateVulnerability(projectId, activeVuln.id, { workflow_steps: nextWorkflowSteps });
+                        setActiveVuln((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
                       } catch {
                         setError("Не удалось загрузить картинку этапа");
+                      }
+                    }}
+                    onRemoveImage={async (_stageId, fileId) => {
+                      if (!projectId || !activeVuln) {
+                        return;
+                      }
+                      try {
+                        await deleteVulnerabilityFile(projectId, activeVuln.id, fileId);
+                        const nextWorkflowSteps = (activeVuln.workflow_steps || []).map((stage) => ({
+                          ...stage,
+                          image_file_ids: stage.image_file_ids.filter((imageFileId) => imageFileId !== fileId),
+                        }));
+                        const updated = await updateVulnerability(projectId, activeVuln.id, { workflow_steps: nextWorkflowSteps });
+                        setActiveVuln((prev) => (prev ? { ...prev, ...updated, workflow_steps: updated.workflow_steps } : prev));
+                      } catch {
+                        setError("Не удалось удалить картинку этапа");
                       }
                     }}
                   />
@@ -1591,139 +1845,15 @@ export function ProjectDetailPage() {
                 </Grid>
               </Grid>
 
-              <Divider />
-              <Stack spacing={1}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  Привязанные активы ({activeVuln.assets.length})
-                </Typography>
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
-                  <TextField
-                    select
-                    label="Тип актива"
-                    value={linkAssetType}
-                    onChange={(event) => {
-                      setLinkAssetType(event.target.value as "host" | "port" | "service" | "endpoint");
-                      setLinkAssetId("");
-                    }}
-                    sx={{ minWidth: 180 }}
-                  >
-                    <MenuItem value="host">host</MenuItem>
-                    <MenuItem value="port">port</MenuItem>
-                    <MenuItem value="service">service</MenuItem>
-                    <MenuItem value="endpoint">endpoint</MenuItem>
-                  </TextField>
-                  <TextField
-                    select
-                    label="Актив"
-                    value={linkAssetId}
-                    onChange={(event) => setLinkAssetId(event.target.value)}
-                    fullWidth
-                    disabled={linkAssetOptions.length === 0}
-                  >
-                    {linkAssetOptions.map((option) => (
-                      <MenuItem key={option.id} value={option.id}>
-                        {option.label}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-                  <Button variant="outlined" disabled={!linkAssetId || vulnBusy} onClick={() => void addAssetLinkToActiveVuln()}>
-                    Привязать
-                  </Button>
-                </Stack>
-                <Stack direction="row" spacing={1} flexWrap="wrap">
-                  {activeVuln.assets.map((assetLink) => (
-                    <Chip
-                      key={assetLink.id}
-                      label={resolveAssetLabel(assetLink.asset_type, assetLink.asset_id)}
-                      onDelete={() => void removeAssetLinkFromActiveVuln(assetLink.id)}
-                    />
-                  ))}
-                  {activeVuln.assets.length === 0 && <Typography color="text.secondary">Связанные активы пока не добавлены.</Typography>}
-                </Stack>
-              </Stack>
-
-              <Divider />
-              <Stack spacing={1}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  Файлы ({vulnFiles.length})
-                </Typography>
-                <Button component="label" variant="outlined" startIcon={<AttachFileIcon />}>
-                  Загрузить файл
-                  <input hidden type="file" onChange={(e) => void uploadFileToActiveVuln(e.target.files?.[0] ?? null)} />
-                </Button>
-                <List dense disablePadding>
-                  {vulnFiles.map((file) => (
-                    <ListItem
-                      key={file.id}
-                      secondaryAction={
-                        <Stack direction="row" spacing={0.5}>
-                          <IconButton size="small" component="a" href={`/api/v1/files/${file.id}/download`} target="_blank" rel="noreferrer">
-                            <OpenInNewIcon fontSize="small" />
-                          </IconButton>
-                          <IconButton size="small" onClick={() => void removeVulnerabilityFile(file.id)}>
-                            <DeleteOutlineIcon fontSize="small" />
-                          </IconButton>
-                        </Stack>
-                      }
-                    >
-                      <ListItemText primary={file.original_name} secondary={`${file.content_type} • ${Math.round(file.size_bytes / 1024)} KB`} />
-                    </ListItem>
-                  ))}
-                  {vulnFiles.length === 0 && <Typography color="text.secondary">Файлы не загружены.</Typography>}
-                </List>
-              </Stack>
-
-              <Divider />
-              <Stack spacing={1}>
-                <Typography variant="subtitle1" fontWeight={700}>
-                  Комментарии ({vulnComments.length})
-                </Typography>
-                <TextField
-                  label="Новый комментарий (поддержка @username)"
-                  multiline
-                  minRows={2}
-                  value={newComment}
-                  onChange={(e) => setNewComment(e.target.value)}
-                />
-                <Button variant="contained" disabled={!newComment.trim()} onClick={() => void addCommentToActiveVuln()}>
-                  Добавить комментарий
-                </Button>
-                <List dense disablePadding>
-                  {vulnComments.map((comment) => (
-                    <ListItem
-                      key={comment.id}
-                      alignItems="flex-start"
-                      secondaryAction={
-                        (user?.role === "admin" || user?.id === comment.user_id) ? (
-                          <Stack direction="row" spacing={0.5}>
-                            <IconButton size="small" onClick={() => openCommentEdit(comment)}>
-                              <EditIcon fontSize="small" />
-                            </IconButton>
-                            <IconButton size="small" onClick={() => void removeCommentFromActiveVuln(comment.id)}>
-                              <DeleteOutlineIcon fontSize="small" />
-                            </IconButton>
-                          </Stack>
-                        ) : null
-                      }
-                    >
-                      <ListItemText
-                        primary={`${comment.username} • ${new Date(comment.created_at).toLocaleString()}`}
-                        secondary={comment.content}
-                      />
-                    </ListItem>
-                  ))}
-                  {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
-                </List>
-              </Stack>
             </Stack>
           )}
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ px: 3, pb: 3, pt: 1.5 }}>
           <Button onClick={() => setVulnDetailOpen(false)}>Закрыть</Button>
           <Button color="error" variant="outlined" onClick={() => void removeActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
             Удалить
           </Button>
-          <Button variant="contained" onClick={() => void saveActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
+          <Button variant="contained" size="large" sx={{ minWidth: 180 }} onClick={() => void saveActiveVulnerability()} disabled={!activeVuln || vulnBusy}>
             Сохранить
           </Button>
         </DialogActions>
@@ -1822,47 +1952,52 @@ export function ProjectDetailPage() {
       </Dialog>
 
       <Dialog open={membersDialogOpen} onClose={() => setMembersDialogOpen(false)} fullWidth maxWidth="md">
-        <DialogTitle>Участники проекта</DialogTitle>
+        <DialogTitle>Добавить пользователей в проект</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             {user?.role === "admin" && (
-              <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
-                <TextField
-                  select
-                  fullWidth
-                  label="Добавить пользователя"
-                  value={selectedMemberUserId}
-                  onChange={(event) => setSelectedMemberUserId(event.target.value)}
-                >
-                  {availableUsers.map((candidate) => (
-                    <MenuItem key={candidate.id} value={candidate.id}>
-                      {candidate.username} ({candidate.role})
-                    </MenuItem>
-                  ))}
-                </TextField>
-                <Button
-                  variant="contained"
-                  startIcon={<PersonAddAlt1Icon />}
-                  disabled={!selectedMemberUserId || membersBusy}
-                  onClick={() => void addMemberToProject()}
-                >
-                  Добавить
-                </Button>
-              </Stack>
+              <>
+                <Typography variant="subtitle2" color="text.secondary">
+                  Выберите пользователей для добавления
+                </Typography>
+                <List dense disablePadding>
+                  {availableUsers.map((candidate) => {
+                    const checked = selectedAvailableMemberIds.includes(candidate.id);
+                    return (
+                      <ListItem
+                        key={candidate.id}
+                        secondaryAction={
+                          <Checkbox
+                            edge="end"
+                            checked={checked}
+                            onChange={(event) =>
+                              setSelectedAvailableMemberIds((prev) =>
+                                event.target.checked ? [...prev, candidate.id] : prev.filter((item) => item !== candidate.id)
+                              )
+                            }
+                          />
+                        }
+                      >
+                        <ListItemText primary={`${candidate.username} (${candidate.role})`} secondary={candidate.email} />
+                      </ListItem>
+                    );
+                  })}
+                  {availableUsers.length === 0 && <Typography color="text.secondary">Свободных пользователей для добавления нет.</Typography>}
+                </List>
+                <Stack direction="row" justifyContent="flex-end">
+                  <Button variant="contained" disabled={selectedAvailableMemberIds.length === 0 || membersBusy} onClick={() => void addMembersToProject()}>
+                    Добавить выбранных
+                  </Button>
+                </Stack>
+              </>
             )}
 
+            <Typography variant="subtitle2" color="text.secondary">
+              Уже в проекте
+            </Typography>
             <List dense disablePadding>
               {projectMembers.map((member) => (
-                <ListItem
-                  key={member.user_id}
-                  secondaryAction={
-                    user?.role === "admin" ? (
-                      <IconButton size="small" onClick={() => void removeMemberFromProject(member.user_id)} disabled={membersBusy}>
-                        <DeleteOutlineIcon fontSize="small" />
-                      </IconButton>
-                    ) : null
-                  }
-                >
+                <ListItem key={member.user_id}>
                   <ListItemText primary={`${member.username} (${member.role})`} secondary={member.email} />
                 </ListItem>
               ))}
@@ -1872,6 +2007,50 @@ export function ProjectDetailPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setMembersDialogOpen(false)}>Закрыть</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={removeMembersDialogOpen} onClose={() => setRemoveMembersDialogOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>Удалить пользователей из проекта</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} sx={{ mt: 1 }}>
+            <List dense disablePadding>
+              {projectMembers.map((member) => {
+                const checked = selectedMemberIds.includes(member.user_id);
+                return (
+                  <ListItem
+                    key={member.user_id}
+                    secondaryAction={
+                      <Checkbox
+                        edge="end"
+                        checked={checked}
+                        onChange={(event) =>
+                          setSelectedMemberIds((prev) =>
+                            event.target.checked ? [...prev, member.user_id] : prev.filter((item) => item !== member.user_id)
+                          )
+                        }
+                      />
+                    }
+                  >
+                    <ListItemText primary={`${member.username} (${member.role})`} secondary={member.email} />
+                  </ListItem>
+                );
+              })}
+              {projectMembers.length === 0 && <Typography color="text.secondary">Участники пока не добавлены.</Typography>}
+            </List>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRemoveMembersDialogOpen(false)}>Закрыть</Button>
+          <Button
+            color="error"
+            variant="contained"
+            startIcon={<DeleteOutlineIcon />}
+            disabled={selectedMemberIds.length === 0 || membersBusy}
+            onClick={() => void removeSelectedMembersFromProject()}
+          >
+            Удалить
+          </Button>
         </DialogActions>
       </Dialog>
     </Stack>

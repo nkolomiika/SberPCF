@@ -140,7 +140,7 @@ export function ProjectTreeNav({
             <Box key={host.id}>
               <ListItemButton selected={isActiveHost && (selectedSection === "hosts" || selectedSection === "overview")} onClick={() => selectHostAndSection(host.id, "overview")}>
                 <DnsIcon fontSize="small" />
-                {!isCollapsed && <ListItemText sx={{ ml: 1 }} primary={label} secondary={`Статус: ${host.status}`} />}
+                {!isCollapsed && <ListItemText sx={{ ml: 1 }} primary={label} />}
                 {!isCollapsed && (
                   <IconButton
                     size="small"

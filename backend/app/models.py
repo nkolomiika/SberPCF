@@ -121,6 +121,7 @@ class Project(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    timeline_frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[ProjectStatus] = mapped_column(
         Enum(ProjectStatus, name="project_status"), nullable=False, default=ProjectStatus.ACTIVE
     )
@@ -213,6 +214,10 @@ class Endpoint(Base, TimestampMixin):
     path: Mapped[str] = mapped_column(Text, nullable=False)
     method: Mapped[HttpMethod | None] = mapped_column(Enum(HttpMethod, name="http_method"), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    query_params: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    request_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_content_type: Mapped[str | None] = mapped_column(String(127), nullable=True)
+    request_headers: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
 
 
 class Vulnerability(Base, TimestampMixin):

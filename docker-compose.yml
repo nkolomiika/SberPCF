@@ -2,17 +2,21 @@ services:
   backend:
     build:
       context: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - .env
+    environment:
+      COOKIE_SECURE: "true"
+      BACKEND_CORS_ORIGINS: "https://localhost:3000,https://127.0.0.1:3000"
+      CSRF_ALLOWED_ORIGINS: "https://localhost:3000,https://127.0.0.1:3000"
     depends_on:
       - db
       - minio
       - clickhouse
       - rabbitmq
-    ports:
-      - "8000:8000"
     volumes:
       - ./backend:/app
+      - ./:/workspace
 
   mail-worker:
     build:
@@ -32,6 +36,8 @@ services:
       context: ./frontend
     depends_on:
       - backend
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
     command: sh -c "npm install && npm run dev"
     ports:
       - "3000:3000"

@@ -17,6 +17,7 @@ import {
   Divider,
   FormControlLabel,
   IconButton,
+  MenuItem,
   Stack,
   Switch,
   TextField,
@@ -25,7 +26,7 @@ import {
 } from "@mui/material";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { getAuditLogs } from "../api";
+import { getApiErrorMessage, getAuditLogs } from "../api";
 import type { AuditLog } from "../types";
 
 const formatDateTime = (value: string) =>
@@ -37,6 +38,25 @@ const formatDateTime = (value: string) =>
     minute: "2-digit",
     second: "2-digit",
   });
+
+const auditActionOptions = ["LOGIN", "LOGOUT", "CREATE", "UPDATE", "DELETE", "FILE_UPLOAD", "FILE_DELETE"] as const;
+const auditEntityTypeOptions = [
+  "project",
+  "project_member",
+  "project_folder",
+  "host",
+  "port",
+  "service",
+  "endpoint",
+  "vulnerability",
+  "vulnerability_asset",
+  "file",
+  "comment",
+  "user",
+  "user_profile",
+  "user_password",
+  "user_password_reset",
+] as const;
 
 export function AuditLogsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -73,8 +93,8 @@ export function AuditLogsPage() {
       });
       setItems(response.items);
       setPages(response.pages);
-    } catch {
-      setError("Не удалось загрузить журнал действий.");
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось загрузить журнал действий."));
     } finally {
       setLoading(false);
     }
@@ -135,11 +155,11 @@ export function AuditLogsPage() {
   }, [items]);
 
   const quickActionOptions = useMemo(() => {
-    return Array.from(new Set(items.map((item) => item.action))).slice(0, 12);
+    return Array.from(new Set([...auditActionOptions, ...items.map((item) => item.action)])).slice(0, 20);
   }, [items]);
 
   const quickEntityTypeOptions = useMemo(() => {
-    return Array.from(new Set(items.map((item) => item.entity_type).filter(Boolean) as string[])).slice(0, 12);
+    return Array.from(new Set([...auditEntityTypeOptions, ...(items.map((item) => item.entity_type).filter(Boolean) as string[])])).slice(0, 20);
   }, [items]);
 
   const applyFilters = () => {
@@ -265,20 +285,24 @@ export function AuditLogsPage() {
                     onChange={(event) => setDraftField("username", event.target.value)}
                     fullWidth
                   />
-                  <TextField
-                    label="Action"
-                    value={draftFilters.action}
-                    onChange={(event) => setDraftField("action", event.target.value)}
-                    fullWidth
-                  />
+                  <TextField select label="Action" value={draftFilters.action} onChange={(event) => setDraftField("action", event.target.value)} fullWidth>
+                    <MenuItem value="">Все действия</MenuItem>
+                    {quickActionOptions.map((action) => (
+                      <MenuItem key={action} value={action}>
+                        {action}
+                      </MenuItem>
+                    ))}
+                  </TextField>
                 </Stack>
                 <Stack direction={{ xs: "column", md: "row" }} spacing={1.2}>
-                  <TextField
-                    label="Сущность"
-                    value={draftFilters.entity_type}
-                    onChange={(event) => setDraftField("entity_type", event.target.value)}
-                    fullWidth
-                  />
+                  <TextField select label="Сущность" value={draftFilters.entity_type} onChange={(event) => setDraftField("entity_type", event.target.value)} fullWidth>
+                    <MenuItem value="">Все сущности</MenuItem>
+                    {quickEntityTypeOptions.map((entityType) => (
+                      <MenuItem key={entityType} value={entityType}>
+                        {entityType}
+                      </MenuItem>
+                    ))}
+                  </TextField>
                   <TextField
                     label="IP"
                     value={draftFilters.ip_address}

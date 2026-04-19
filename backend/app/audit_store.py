@@ -116,7 +116,9 @@ class ClickHouseAuditStore:
         return log_id
 
     def _build_where_clause(self, filters: dict) -> tuple[str, dict]:
-        conditions: list[str] = []
+        conditions: list[str] = [
+            "NOT (action = 'LOGIN' AND JSONExtractString(ifNull(details_json, '{}'), 'source') = 'refresh')"
+        ]
         params: dict = {}
         if filters.get("user_id"):
             conditions.append("user_id = {user_id:UUID}")

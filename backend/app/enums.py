@@ -9,6 +9,8 @@ class UserRole(str, enum.Enum):
 
 class ProjectStatus(str, enum.Enum):
     ACTIVE = "active"
+    HANDOVER_TO_DEVELOPMENT = "handover_to_development"
+    VULNERABILITY_RECHECK = "vulnerability_recheck"
     COMPLETED = "completed"
     ARCHIVED = "archived"
 

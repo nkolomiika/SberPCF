@@ -2,7 +2,7 @@ import PhotoCameraIcon from "@mui/icons-material/PhotoCamera";
 import { Alert, Avatar, Box, Button, Card, CardContent, Chip, Stack, TextField, Typography } from "@mui/material";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { changeMyPassword, updateMyProfile, uploadMyAvatar } from "../api";
+import { changeMyPassword, getApiErrorMessage, updateMyProfile, uploadMyAvatar } from "../api";
 import { useAuthStore } from "../store";
 
 export function ProfilePage() {
@@ -81,7 +81,7 @@ export function ProfilePage() {
                         setInfoMessage("Аватар обновлён.");
                       })
                       .catch((uploadError) => {
-                        setError(uploadError instanceof Error ? uploadError.message : "Не удалось обновить аватар.");
+                        setError(getApiErrorMessage(uploadError, "Не удалось обновить аватар."));
                       })
                       .finally(() => {
                         setUploadingAvatar(false);
@@ -132,7 +132,7 @@ export function ProfilePage() {
                     setInfoMessage("Профиль обновлён.");
                   })
                   .catch((updateError) => {
-                    setError(updateError instanceof Error ? updateError.message : "Не удалось обновить профиль.");
+                    setError(getApiErrorMessage(updateError, "Не удалось обновить профиль."));
                   })
                   .finally(() => setSavingProfile(false));
               }}
@@ -186,7 +186,7 @@ export function ProfilePage() {
                     setInfoMessage("Пароль изменён.");
                   })
                   .catch((changeError) => {
-                    setError(changeError instanceof Error ? changeError.message : "Не удалось сменить пароль.");
+                    setError(getApiErrorMessage(changeError, "Не удалось сменить пароль."));
                   })
                   .finally(() => setSavingPassword(false));
               }}

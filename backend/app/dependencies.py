@@ -14,6 +14,12 @@ from app.security import decode_token
 
 settings = get_settings()
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+PASSWORD_CHANGE_ALLOWED_ROUTES = {
+    ("POST", "/api/v1/auth/force-change-password"),
+    ("POST", "/api/v1/auth/logout"),
+    ("GET", "/api/v1/users/me"),
+    ("GET", "/api/v1/users/me/profile"),
+}
 
 
 def get_client_ip(request: Request) -> str | None:
@@ -33,7 +39,12 @@ async def enforce_csrf(request: Request, origin: str | None = Header(default=Non
         raise ForbiddenError("Недопустимый Origin")
 
 
+def is_password_change_allowed_path(path: str, method: str = "GET") -> bool:
+    return (method.upper(), path) in PASSWORD_CHANGE_ALLOWED_ROUTES
+
+
 async def get_current_user(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     access_token: str | None = Cookie(default=None),
 ) -> User:
@@ -44,6 +55,8 @@ async def get_current_user(
     user = await db.scalar(select(User).where(User.id == user_id))
     if not user or not user.is_active:
         raise UnauthorizedError("Пользователь не найден или деактивирован")
+    if user.must_change_password and not is_password_change_allowed_path(request.url.path, request.method):
+        raise ForbiddenError("Требуется сначала сменить временный пароль")
     return user
 
 

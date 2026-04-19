@@ -30,7 +30,7 @@ import HistoryIcon from "@mui/icons-material/History";
 import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
 import type { PaletteMode } from "@mui/material";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { listNotifications, unreadCount } from "./api";
+import { listNotifications, markNotificationRead, unreadCount } from "./api";
 import type { Notification } from "./types";
 import { useAuthStore } from "./store";
 import { ForceChangePasswordPage } from "./pages/ForceChangePasswordPage";
@@ -56,20 +56,34 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [notificationsAnchorEl, setNotificationsAnchorEl] = useState<HTMLElement | null>(null);
   const [profileAnchorEl, setProfileAnchorEl] = useState<HTMLElement | null>(null);
+  const [profileMenuWidth, setProfileMenuWidth] = useState(220);
+  const isPasswordChangeLocked = Boolean(user?.must_change_password);
 
   const loadUnreadNotifications = useCallback(async () => {
-    const unread = await unreadCount();
-    setCount(unread);
+    try {
+      const unread = await unreadCount();
+      setCount(unread);
+    } catch {
+      setCount(0);
+    }
   }, []);
 
   const loadNotificationsList = useCallback(async () => {
-    const response = await listNotifications();
-    setNotifications(response.items);
+    try {
+      const response = await listNotifications();
+      setNotifications(response.items);
+    } catch {
+      setNotifications([]);
+    }
   }, []);
   const notificationsOpen = Boolean(notificationsAnchorEl);
   const profileMenuOpen = Boolean(profileAnchorEl);
 
   useEffect(() => {
+    if (!user || isPasswordChangeLocked) {
+      setCount(0);
+      return;
+    }
     void loadUnreadNotifications();
     const intervalId = window.setInterval(() => {
       void loadUnreadNotifications();
@@ -77,10 +91,10 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [loadUnreadNotifications]);
+  }, [isPasswordChangeLocked, loadUnreadNotifications, user]);
 
   useEffect(() => {
-    if (!user) {
+    if (!user || isPasswordChangeLocked) {
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -94,9 +108,12 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     return () => {
       socket.close();
     };
-  }, [loadNotificationsList, loadUnreadNotifications, notificationsOpen, user]);
+  }, [isPasswordChangeLocked, loadNotificationsList, loadUnreadNotifications, notificationsOpen, user]);
 
   const openNotifications = async (event: React.MouseEvent<HTMLElement>) => {
+    if (isPasswordChangeLocked) {
+      return;
+    }
     setNotificationsAnchorEl(event.currentTarget);
     setNotificationsLoading(true);
     try {
@@ -111,8 +128,40 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     setNotificationsAnchorEl(null);
   };
 
+  const openNotificationTarget = useCallback(
+    async (notification: Notification) => {
+      const projectId = notification.context?.project_id;
+      const hostId = notification.context?.host_id;
+      const vulnerabilityId = notification.context?.vulnerability_id;
+      if (!projectId) {
+        closeNotifications();
+        return;
+      }
+      if (!notification.is_read) {
+        try {
+          await markNotificationRead(notification.id);
+        } catch {
+          // Keep navigation working even if the read flag update fails.
+        }
+      }
+      setNotifications((prev) => prev.map((item) => (item.id === notification.id ? { ...item, is_read: true } : item)));
+      setCount((prev) => Math.max(0, prev - (notification.is_read ? 0 : 1)));
+      closeNotifications();
+      if (hostId && vulnerabilityId) {
+        const query = notification.comment_id ? `?comment=${notification.comment_id}` : "";
+        navigate(`/projects/${projectId}/hosts/${hostId}/vulnerabilities/${vulnerabilityId}${query}`, {
+          state: { section: "vulns" },
+        });
+        return;
+      }
+      navigate(`/projects/${projectId}`);
+    },
+    [navigate]
+  );
+
   const openProfileMenu = (event: React.MouseEvent<HTMLElement>) => {
     setProfileAnchorEl(event.currentTarget);
+    setProfileMenuWidth(Math.round(event.currentTarget.getBoundingClientRect().width));
   };
 
   const closeProfileMenu = () => {
@@ -233,7 +282,10 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
         slotProps={{
           paper: {
             sx: {
-              width: profileAnchorEl?.clientWidth ?? 220,
+              width: profileMenuWidth,
+              minWidth: profileMenuWidth,
+              maxWidth: profileMenuWidth,
+              boxSizing: "border-box",
             },
           },
         }}
@@ -333,7 +385,14 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
           ) : (
             <List dense disablePadding>
               {notifications.map((notification) => (
-                <ListItemButton key={notification.id} onClick={closeNotifications}>
+                <ListItemButton
+                  key={notification.id}
+                  onClick={() => void openNotificationTarget(notification)}
+                  sx={{
+                    alignItems: "flex-start",
+                    backgroundColor: notification.is_read ? "transparent" : "rgba(126,224,255,0.08)",
+                  }}
+                >
                   <ListItemText
                     primary={notification.context?.vulnerability_title ?? "Уведомление"}
                     secondary={
@@ -375,6 +434,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId" element={<HostDetailPage />} />
+          <Route path="/projects/:projectId/hosts/:hostId/vulnerabilities/:vulnerabilityId" element={<HostDetailPage />} />
           <Route path="/users" element={user.role === "admin" ? <UsersAdminPage /> : <Navigate to="/" replace />} />
           <Route path="/audit-logs" element={user.role === "admin" ? <AuditLogsPage /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />

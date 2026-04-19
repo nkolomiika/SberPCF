@@ -4,6 +4,7 @@ from pydantic import ValidationError as PydanticValidationError
 from app.schemas import (
     EndpointCreate,
     HostCreate,
+    PcfImportPayload,
     PortCreate,
     UserCreate,
     VulnerabilityCreate,
@@ -49,6 +50,30 @@ def test_port_create_rejects_out_of_range_values_tc_port_005_006(port: int) -> N
 def test_endpoint_requires_path_tc_ep_003() -> None:
     with pytest.raises(PydanticValidationError):
         EndpointCreate(method="GET")
+
+
+def test_pcf_import_host_requires_ip_or_hostname() -> None:
+    with pytest.raises(PydanticValidationError):
+        PcfImportPayload.model_validate({"hosts": [{"status": "unknown"}]})
+
+
+def test_pcf_import_rejects_invalid_port_protocol() -> None:
+    with pytest.raises(PydanticValidationError):
+        PcfImportPayload.model_validate(
+            {
+                "hosts": [
+                    {
+                        "hostname": "target.local",
+                        "ports": [{"port_number": 443, "protocol": "icmp"}],
+                    }
+                ]
+            }
+        )
+
+
+def test_pcf_import_endpoint_requires_path_or_request_raw() -> None:
+    with pytest.raises(PydanticValidationError):
+        PcfImportPayload.model_validate({"hosts": [{"hostname": "target.local", "endpoints": [{"method": "GET"}]}]})
 
 
 def test_vulnerability_rejects_invalid_cvss_score_tc_vuln_005() -> None:

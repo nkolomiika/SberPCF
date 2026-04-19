@@ -1,7 +1,7 @@
 import { Alert, Box, Button, Paper, Stack, TextField, Typography } from "@mui/material";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { forceChangePassword } from "../api";
+import { forceChangePassword, getApiErrorMessage } from "../api";
 import { useAuthStore } from "../store";
 
 export function ForceChangePasswordPage() {
@@ -54,7 +54,7 @@ export function ForceChangePasswordPage() {
                     navigate("/", { replace: true });
                   })
                   .catch((submitError) => {
-                    setError(submitError instanceof Error ? submitError.message : "Не удалось сменить пароль.");
+                    setError(getApiErrorMessage(submitError, "Не удалось сменить пароль."));
                   })
                   .finally(() => setSaving(false));
               }}

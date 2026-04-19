@@ -8,13 +8,17 @@ export function LoginPage() {
   const signIn = useAuthStore((s) => s.signIn);
   const isLoading = useAuthStore((s) => s.isLoading);
   const error = useAuthStore((s) => s.error);
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    const currentUser = await signIn(username, password);
-    navigate(currentUser.must_change_password ? "/force-change-password" : "/");
+    try {
+      const currentUser = await signIn(username, password);
+      navigate(currentUser.must_change_password ? "/force-change-password" : "/");
+    } catch {
+      // Ошибка уже положена в store и показана на форме.
+    }
   };
 
   return (

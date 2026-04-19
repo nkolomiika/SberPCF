@@ -1,5 +1,6 @@
 import pytest
 from pydantic import ValidationError as PydanticValidationError
+from app.enums import ProjectStatus
 
 from app.config import Settings
 from app.pagination import PageParams
@@ -35,6 +36,22 @@ def test_vulnerability_rejects_invalid_severity_tc_vuln_004() -> None:
 def test_project_update_rejects_unknown_status_tc_prj_009() -> None:
     with pytest.raises(PydanticValidationError):
         ProjectUpdate(status="invalid_status")
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ProjectStatus.ACTIVE,
+        ProjectStatus.HANDOVER_TO_DEVELOPMENT,
+        ProjectStatus.VULNERABILITY_RECHECK,
+        ProjectStatus.COMPLETED,
+        ProjectStatus.ARCHIVED,
+    ],
+)
+def test_project_update_accepts_supported_statuses(status: ProjectStatus) -> None:
+    payload = ProjectUpdate(status=status)
+
+    assert payload.status == status
 
 
 @pytest.mark.parametrize(("page", "size"), [(-1, 20), (1, 0)])

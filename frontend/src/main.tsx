@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo } from "react";
 import ReactDOM from "react-dom/client";
 import { CssBaseline, ThemeProvider, createTheme, type PaletteMode } from "@mui/material";
 import { BrowserRouter } from "react-router-dom";
@@ -35,8 +35,37 @@ function createAppTheme(mode: PaletteMode) {
     components: {
       MuiCssBaseline: {
         styleOverrides: {
+          html: {
+            colorScheme: "dark",
+            scrollbarWidth: "thin",
+            scrollbarColor: "#7EE0FF transparent",
+          },
           body: {
             backgroundImage: "linear-gradient(180deg, #08111F 0%, #0B1220 100%)",
+          },
+          "*": {
+            scrollbarWidth: "thin",
+            scrollbarColor: "#7EE0FF transparent",
+          },
+          "*::-webkit-scrollbar": {
+            width: 10,
+            height: 10,
+            backgroundColor: "transparent",
+          },
+          "*::-webkit-scrollbar-track": {
+            backgroundColor: "transparent",
+          },
+          "*::-webkit-scrollbar-thumb": {
+            backgroundColor: "rgba(126,224,255,0.82)",
+            borderRadius: 999,
+            border: "2px solid transparent",
+            backgroundClip: "padding-box",
+          },
+          "*::-webkit-scrollbar-thumb:hover": {
+            backgroundColor: "rgba(126,224,255,0.96)",
+          },
+          "*::-webkit-scrollbar-corner": {
+            backgroundColor: "transparent",
           },
           "::selection": {
             backgroundColor: "rgba(120,169,255,0.35)",
@@ -161,6 +190,28 @@ function createAppTheme(mode: PaletteMode) {
 function Root() {
   const themeMode: PaletteMode = "dark";
   const theme = useMemo(() => createAppTheme(themeMode), [themeMode]);
+
+  useEffect(() => {
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
+      body: JSON.stringify({
+        sessionId: "a74592",
+        runId: "scrollbar-design-debug",
+        hypothesisId: "H1",
+        location: "frontend/src/main.tsx:Root",
+        message: "Scrollbar theme bootstrap",
+        data: {
+          userAgent: navigator.userAgent,
+          scrollbarColor: getComputedStyle(document.documentElement).scrollbarColor,
+          themeMode,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [themeMode]);
 
   return (
     <ThemeProvider theme={theme}>

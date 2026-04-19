@@ -68,6 +68,7 @@ async def login(
 async def refresh(
     response: Response,
     request: Request,
+    _: None = Depends(enforce_csrf),
     refresh_token: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> RefreshResponse:

@@ -5,11 +5,13 @@ import type {
   VulnerabilityDetails,
   VulnerabilityFile,
   Endpoint,
+  EndpointRequestHeader,
   Service,
   AuditLog,
   Host,
   HostDetails,
   ImportResult,
+  OpenApiImportResult,
   Notification,
   PaginatedResponse,
   Port,
@@ -26,6 +28,47 @@ const api = axios.create({
   baseURL: "/api/v1",
   withCredentials: true,
 });
+
+const isBlank = (value: string | null | undefined): boolean => !value || value.trim().length === 0;
+
+const assertRequired = (value: string | null | undefined, label: string): void => {
+  if (isBlank(value)) {
+    throw new Error(`Поле "${label}" обязательно`);
+  }
+};
+
+const normalizeDetailMessage = (detail: unknown): string | null => {
+  if (typeof detail === "string" && detail.trim()) {
+    return detail.trim();
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => normalizeDetailMessage(item)).filter((item): item is string => Boolean(item));
+    return messages.length ? messages.join("; ") : null;
+  }
+  if (detail && typeof detail === "object") {
+    if ("detail" in detail) {
+      return normalizeDetailMessage((detail as { detail?: unknown }).detail);
+    }
+    if ("message" in detail) {
+      return normalizeDetailMessage((detail as { message?: unknown }).message);
+    }
+  }
+  return null;
+};
+
+export const getApiErrorMessage = (error: unknown, fallback: string): string => {
+  if (axios.isAxiosError(error)) {
+    return (
+      normalizeDetailMessage(error.response?.data) ||
+      normalizeDetailMessage(error.message) ||
+      fallback
+    );
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return fallback;
+};
 
 let isRefreshing = false;
 let waitingQueue: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
@@ -60,6 +103,8 @@ api.interceptors.response.use(
 );
 
 export async function login(username: string, password: string): Promise<AuthLoginResponse> {
+  assertRequired(username, "Имя пользователя");
+  assertRequired(password, "Пароль");
   const { data } = await api.post<AuthLoginResponse>("/auth/login", { username, password });
   return data;
 }
@@ -87,6 +132,8 @@ export async function createUser(payload: {
   role: User["role"];
   send_invite_email?: boolean;
 }): Promise<User> {
+  assertRequired(payload.username, "Имя пользователя");
+  assertRequired(payload.email, "Email");
   const { data } = await api.post<User>("/users", payload);
   return data;
 }
@@ -95,7 +142,6 @@ export async function updateUser(
   userId: string,
   payload: {
     username?: string;
-    email?: string;
     full_name?: string;
     tags?: string[];
     role?: User["role"];
@@ -126,16 +172,22 @@ export async function updateMyProfile(payload: {
 }
 
 export async function changeMyPassword(payload: { current_password: string; new_password: string }): Promise<User> {
+  assertRequired(payload.current_password, "Текущий пароль");
+  assertRequired(payload.new_password, "Новый пароль");
   const { data } = await api.patch<User>("/users/me/password", payload);
   return data;
 }
 
 export async function forceChangePassword(newPassword: string): Promise<User> {
+  assertRequired(newPassword, "Новый пароль");
   const { data } = await api.post<User>("/auth/force-change-password", { new_password: newPassword });
   return data;
 }
 
 export async function uploadMyAvatar(file: File): Promise<User> {
+  if (!file) {
+    throw new Error("Файл аватара обязателен");
+  }
   const formData = new FormData();
   formData.append("avatar", file);
   const { data } = await api.post<User>("/users/me/avatar", formData, {
@@ -155,6 +207,7 @@ export async function getProjectFolders(): Promise<ProjectFolder[]> {
 }
 
 export async function createProjectFolder(payload: { name: string; parent_id?: string | null }): Promise<ProjectFolder> {
+  assertRequired(payload.name, "Название папки");
   const { data } = await api.post<ProjectFolder>("/projects/folders", payload);
   return data;
 }
@@ -171,6 +224,7 @@ export async function createProject(payload: {
   start_date?: string;
   end_date?: string;
 }): Promise<Project> {
+  assertRequired(payload.name, "Название проекта");
   const { data } = await api.post<Project>("/projects", payload);
   return data;
 }
@@ -201,6 +255,9 @@ export async function getProjectMembers(projectId: string): Promise<ProjectMembe
 }
 
 export async function addProjectMember(projectId: string, userId: string): Promise<void> {
+  if (!userId) {
+    throw new Error("Нужно выбрать пользователя");
+  }
   await api.post(`/projects/${projectId}/members`, { user_id: userId });
 }
 
@@ -228,6 +285,9 @@ export async function createHost(
     status?: "up" | "down" | "unknown";
   }
 ): Promise<Host> {
+  if (isBlank(payload.ip_address) && isBlank(payload.hostname)) {
+    throw new Error('Нужно указать хотя бы "IP-адрес" или "Hostname"');
+  }
   const { data } = await api.post<Host>(`/projects/${projectId}/hosts`, payload);
   return data;
 }
@@ -269,6 +329,9 @@ export async function createPort(
     state?: "open" | "closed" | "filtered";
   }
 ): Promise<Port> {
+  if (!Number.isFinite(payload.port_number)) {
+    throw new Error("Порт должен быть числом");
+  }
   const { data } = await api.post<Port>(`/projects/${projectId}/hosts/${hostId}/ports`, payload);
   return data;
 }
@@ -302,6 +365,7 @@ export async function createService(
   portId: string,
   payload: { name: string; version?: string; banner?: string }
 ): Promise<Service> {
+  assertRequired(payload.name, "Название сервиса");
   const { data } = await api.post<Service>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`, payload);
   return data;
 }
@@ -313,6 +377,9 @@ export async function updateService(
   serviceId: string,
   payload: { name?: string; version?: string; banner?: string }
 ): Promise<Service> {
+  if (payload.name !== undefined) {
+    assertRequired(payload.name, "Название сервиса");
+  }
   const { data } = await api.put<Service>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`, payload);
   return data;
 }
@@ -332,10 +399,17 @@ export async function createEndpoint(
   payload: {
     path?: string;
     method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
-    description?: string;
+    description?: string | null;
     request_raw?: string;
+    query_params?: { name: string; value?: string | null; required?: boolean; description?: string | null }[];
+    request_body?: string | null;
+    request_content_type?: string | null;
+    request_headers?: EndpointRequestHeader[];
   }
 ): Promise<Endpoint> {
+  if (isBlank(payload.path) && isBlank(payload.request_raw)) {
+    throw new Error('Нужно указать хотя бы "Путь" или "Raw request"');
+  }
   const { data } = await api.post<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
   return data;
 }
@@ -347,10 +421,17 @@ export async function updateEndpoint(
   payload: {
     path?: string;
     method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
-    description?: string;
+    description?: string | null;
     request_raw?: string;
+    query_params?: { name: string; value?: string | null; required?: boolean; description?: string | null }[];
+    request_body?: string | null;
+    request_content_type?: string | null;
+    request_headers?: EndpointRequestHeader[];
   }
 ): Promise<Endpoint> {
+  if (payload.path !== undefined && isBlank(payload.path) && isBlank(payload.request_raw)) {
+    throw new Error('Нужно указать хотя бы "Путь" или "Raw request"');
+  }
   const { data } = await api.put<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`, payload);
   return data;
 }
@@ -371,19 +452,30 @@ export async function createVulnerability(
   payload: {
     host_id: string;
     title: string;
-    description?: string;
+    description?: string | null;
     severity: "critical" | "high" | "medium" | "low" | "info";
-    cvss_version?: "3.1" | "4.0";
-    cvss_score?: number;
-    cvss_vector?: string;
-    cwe_id?: string;
+    cvss_version?: "4.0" | null;
+    cvss_score?: number | null;
+    cvss_vector?: string | null;
+    cwe_id?: string | null;
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
-    workflow_steps?: Array<{ id: string; title: string; description?: string; image_file_ids?: string[] }>;
-    steps_to_reproduce?: string;
-    impact?: string;
-    recommendations?: string;
+    workflow_steps?: Array<{
+      id: string;
+      title: string;
+      description?: string | null;
+      image_file_ids?: string[];
+      endpoint_id?: string | null;
+      endpoint_request_raw?: string | null;
+    }>;
+    steps_to_reproduce?: string | null;
+    impact?: string | null;
+    recommendations?: string | null;
   }
 ): Promise<Vulnerability> {
+  if (!payload.host_id) {
+    throw new Error("Нужно выбрать хост");
+  }
+  assertRequired(payload.title, "Название уязвимости");
   const { data } = await api.post<Vulnerability>(`/projects/${projectId}/vulnerabilities`, payload);
   return data;
 }
@@ -393,19 +485,29 @@ export async function updateVulnerability(
   vulnerabilityId: string,
   payload: {
     title?: string;
-    description?: string;
+    description?: string | null;
     severity?: "critical" | "high" | "medium" | "low" | "info";
-    cvss_version?: "3.1" | "4.0";
-    cvss_score?: number;
-    cvss_vector?: string;
-    cwe_id?: string;
+    cvss_version?: "4.0" | null;
+    cvss_score?: number | null;
+    cvss_vector?: string | null;
+    cwe_id?: string | null;
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
-    workflow_steps?: Array<{ id: string; title: string; description?: string; image_file_ids?: string[] }>;
-    steps_to_reproduce?: string;
-    impact?: string;
-    recommendations?: string;
+    workflow_steps?: Array<{
+      id: string;
+      title: string;
+      description?: string | null;
+      image_file_ids?: string[];
+      endpoint_id?: string | null;
+      endpoint_request_raw?: string | null;
+    }>;
+    steps_to_reproduce?: string | null;
+    impact?: string | null;
+    recommendations?: string | null;
   }
 ): Promise<Vulnerability> {
+  if (payload.title !== undefined) {
+    assertRequired(payload.title, "Название уязвимости");
+  }
   const { data } = await api.put<Vulnerability>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`, payload);
   return data;
 }
@@ -448,6 +550,9 @@ export async function listVulnerabilityFiles(projectId: string, vulnerabilityId:
 }
 
 export async function uploadVulnerabilityFile(projectId: string, vulnerabilityId: string, file: File): Promise<VulnerabilityFile> {
+  if (!file) {
+    throw new Error("Нужно выбрать файл");
+  }
   const formData = new FormData();
   formData.append("file", file);
   const { data } = await api.post<VulnerabilityFile>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`, formData, {
@@ -468,6 +573,7 @@ export async function listVulnerabilityComments(projectId: string, vulnerability
 }
 
 export async function createVulnerabilityComment(projectId: string, vulnerabilityId: string, content: string): Promise<VulnerabilityComment> {
+  assertRequired(content, "Комментарий");
   const { data } = await api.post<VulnerabilityComment>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, { content });
   return data;
 }
@@ -478,6 +584,7 @@ export async function updateVulnerabilityComment(
   commentId: string,
   content: string
 ): Promise<VulnerabilityComment> {
+  assertRequired(content, "Комментарий");
   const { data } = await api.put<VulnerabilityComment>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`, { content });
   return data;
 }
@@ -490,6 +597,18 @@ export async function importProjectData(projectId: string, file: File): Promise<
   const formData = new FormData();
   formData.append("file", file);
   const { data } = await api.post<ImportResult>(`/projects/${projectId}/import`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
+}
+
+export async function importOpenApiFile(projectId: string, hostId: string, file: File): Promise<OpenApiImportResult> {
+  if (!file) {
+    throw new Error("Нужно выбрать Swagger/OpenAPI файл");
+  }
+  const formData = new FormData();
+  formData.append("file", file);
+  const { data } = await api.post<OpenApiImportResult>(`/projects/${projectId}/hosts/${hostId}/import-openapi`, formData, {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return data;
@@ -511,6 +630,10 @@ export async function listNotifications(): Promise<PaginatedResponse<Notificatio
 export async function unreadCount(): Promise<number> {
   const { data } = await api.get<{ count: number }>("/notifications/unread-count");
   return data.count;
+}
+
+export async function markNotificationRead(notificationId: string): Promise<void> {
+  await api.patch(`/notifications/${notificationId}/read`);
 }
 
 export async function getAuditLogs(

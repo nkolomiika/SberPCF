@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from app.enums import ProjectStatus
 from app.models import UserRole
 from app.services import ProjectService
 from unittest.mock import AsyncMock, MagicMock
@@ -72,3 +73,89 @@ async def test_delete_project_removes_entity_and_writes_audit() -> None:
         entity_id=project_id,
         ip_address="127.0.0.1",
     )
+
+
+@pytest.mark.asyncio
+async def test_update_project_freezes_timeline_on_first_non_active_status() -> None:
+    db = AsyncMock()
+    service = ProjectService(db)
+    project_id = uuid4()
+    actor_id = uuid4()
+    project = SimpleNamespace(
+        id=project_id,
+        start_date=None,
+        end_date=None,
+        folder="",
+        status=ProjectStatus.ACTIVE,
+        timeline_frozen_at=None,
+    )
+    service.get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
+    service.audit.log = AsyncMock()  # type: ignore[method-assign]
+
+    updated = await service.update_project(
+        project_id=project_id,
+        payload={"status": ProjectStatus.HANDOVER_TO_DEVELOPMENT},
+        actor_id=actor_id,
+        ip_address="127.0.0.1",
+    )
+
+    assert updated.status == ProjectStatus.HANDOVER_TO_DEVELOPMENT
+    assert updated.timeline_frozen_at is not None
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_project_keeps_existing_frozen_timestamp_for_non_active_transitions() -> None:
+    db = AsyncMock()
+    service = ProjectService(db)
+    project_id = uuid4()
+    actor_id = uuid4()
+    frozen_at = object()
+    project = SimpleNamespace(
+        id=project_id,
+        start_date=None,
+        end_date=None,
+        folder="",
+        status=ProjectStatus.HANDOVER_TO_DEVELOPMENT,
+        timeline_frozen_at=frozen_at,
+    )
+    service.get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
+    service.audit.log = AsyncMock()  # type: ignore[method-assign]
+
+    updated = await service.update_project(
+        project_id=project_id,
+        payload={"status": ProjectStatus.VULNERABILITY_RECHECK},
+        actor_id=actor_id,
+        ip_address="127.0.0.1",
+    )
+
+    assert updated.status == ProjectStatus.VULNERABILITY_RECHECK
+    assert updated.timeline_frozen_at is frozen_at
+
+
+@pytest.mark.asyncio
+async def test_update_project_unfreezes_timeline_when_reactivated() -> None:
+    db = AsyncMock()
+    service = ProjectService(db)
+    project_id = uuid4()
+    actor_id = uuid4()
+    project = SimpleNamespace(
+        id=project_id,
+        start_date=None,
+        end_date=None,
+        folder="",
+        status=ProjectStatus.VULNERABILITY_RECHECK,
+        timeline_frozen_at=object(),
+    )
+    service.get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
+    service.audit.log = AsyncMock()  # type: ignore[method-assign]
+
+    updated = await service.update_project(
+        project_id=project_id,
+        payload={"status": ProjectStatus.ACTIVE},
+        actor_id=actor_id,
+        ip_address="127.0.0.1",
+    )
+
+    assert updated.status == ProjectStatus.ACTIVE
+    assert updated.timeline_frozen_at is None

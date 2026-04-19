@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File as FastAPIFile, Query, Request, Upl
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import get_db
 from app.dependencies import enforce_csrf, get_client_ip, get_current_user, require_admin
 from app.models import User
@@ -12,6 +13,7 @@ from app.schemas import OwnPasswordChangeRequest, PasswordResetOut, UserCreate, 
 from app.services import UserService
 
 router = APIRouter(prefix="/users", tags=["users"])
+settings = get_settings()
 
 
 @router.get("/me", response_model=UserOut)
@@ -109,11 +111,13 @@ async def get_user(
 @router.get("/{user_id}/avatar")
 async def get_user_avatar(
     user_id: UUID,
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Возвращает аватар пользователя."""
-    user, content = await UserService(db).download_avatar(user_id)
+    service = UserService(db)
+    service.ensure_can_view_avatar(current_user, user_id)
+    user, content = await service.download_avatar(user_id)
     return Response(content=content, media_type=user.avatar_content_type or "application/octet-stream")
 
 
@@ -153,4 +157,5 @@ async def reset_password(
 ) -> PasswordResetOut:
     """Сбрасывает пароль пользователя."""
     user = await UserService(db).reset_password(user_id, admin.id, get_client_ip(request))
-    return PasswordResetOut(email_sent_to=user.email, must_change_password=True)
+    preview_url = settings.mail_preview_url if settings.smtp_host == "mailpit" else None
+    return PasswordResetOut(email_sent_to=user.email, must_change_password=True, mail_preview_url=preview_url)

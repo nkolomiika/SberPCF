@@ -8,6 +8,7 @@ from app.dependencies import enforce_csrf, get_current_user, require_project_acc
 from app.models import User
 from app.pagination import PageParams, to_paginated_response
 from app.schemas import (
+    FileOut,
     VulnerabilityAssetCreate,
     VulnerabilityAssetOut,
     VulnerabilityCreate,
@@ -76,7 +77,7 @@ async def get_vulnerability(
     data = await VulnerabilityService(db).get(project_id, vuln_id)
     vuln = VulnerabilityOut.model_validate(data["vulnerability"]).model_dump()
     vuln["assets"] = [VulnerabilityAssetOut.model_validate(item).model_dump() for item in data["assets"]]
-    vuln["files"] = data["files"]
+    vuln["files"] = [FileOut.model_validate(item).model_dump() for item in data["files"]]
     vuln["comments_count"] = data["comments_count"]
     return vuln
 

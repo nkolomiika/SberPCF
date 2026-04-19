@@ -21,14 +21,14 @@ class Settings(BaseSettings):
     minio_bucket_name: str
     minio_use_ssl: bool = False
 
-    backend_cors_origins: str = "http://localhost:3000"
+    backend_cors_origins: str = "https://localhost:3000,https://127.0.0.1:3000"
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     debug: bool = False
 
-    cookie_secure: bool = False
+    cookie_secure: bool = True
     cookie_samesite: str = "strict"
-    csrf_allowed_origins: str = "http://localhost:3000"
+    csrf_allowed_origins: str = "https://localhost:3000,https://127.0.0.1:3000"
 
     initial_admin_username: str = "admin"
     initial_admin_email: str = "admin@example.com"
@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = False
     smtp_from_email: str = "noreply@example.com"
     smtp_from_name: str = "PCF"
+    mail_preview_url: str | None = "http://localhost:8025"
 
     @field_validator("jwt_secret_key")
     @classmethod
