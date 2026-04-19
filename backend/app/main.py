@@ -115,6 +115,7 @@ def _register_error_handlers() -> None:
 async def startup() -> None:
     """Инициализирует БД, MinIO и стартового администратора."""
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
         if conn.dialect.name == "postgresql":
             await conn.execute(text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'developer'"))
             await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'handover_to_development'"))
@@ -147,7 +148,6 @@ async def startup() -> None:
                 await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT ''"))
             if not has_timeline_frozen_at:
                 await conn.execute(text("ALTER TABLE projects ADD COLUMN timeline_frozen_at TIMESTAMP"))
-        await conn.run_sync(Base.metadata.create_all)
     await audit_store.ensure_table()
     MinioStorage().ensure_bucket()
     async with SessionLocal() as db:

@@ -34,3 +34,25 @@ export function calculateCvssScore(
     };
   }
 }
+
+export function severityFromCvssScore(
+  score: number | null | undefined,
+  fallback: Vulnerability["severity"] = "info"
+): Vulnerability["severity"] {
+  if (score === null || score === undefined || Number.isNaN(score)) {
+    return fallback;
+  }
+  if (score >= 9.0) {
+    return "critical";
+  }
+  if (score >= 7.0) {
+    return "high";
+  }
+  if (score >= 4.0) {
+    return "medium";
+  }
+  if (score > 0) {
+    return "low";
+  }
+  return "info";
+}

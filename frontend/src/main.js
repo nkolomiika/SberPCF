@@ -35,8 +35,46 @@ function createAppTheme(mode) {
         components: {
             MuiCssBaseline: {
                 styleOverrides: {
+                    html: {
+                        colorScheme: "dark",
+                        scrollbarWidth: "thin",
+                        scrollbarColor: "rgba(126,224,255,0.32) rgba(255,255,255,0.02)",
+                    },
                     body: {
                         backgroundImage: "linear-gradient(180deg, #08111F 0%, #0B1220 100%)",
+                    },
+                    "*": {
+                        scrollbarWidth: "thin",
+                        scrollbarColor: "rgba(126,224,255,0.32) rgba(255,255,255,0.02)",
+                    },
+                    "*::-webkit-scrollbar": {
+                        width: 8,
+                        height: 8,
+                        backgroundColor: "transparent",
+                    },
+                    "*::-webkit-scrollbar-button": {
+                        display: "none",
+                        width: 0,
+                        height: 0,
+                    },
+                    "*::-webkit-scrollbar-track": {
+                        backgroundColor: "rgba(255,255,255,0.03)",
+                        borderRadius: 999,
+                    },
+                    "*::-webkit-scrollbar-thumb": {
+                        backgroundColor: "rgba(126,224,255,0.28)",
+                        borderRadius: 999,
+                        border: "2px solid transparent",
+                        backgroundClip: "padding-box",
+                    },
+                    "*::-webkit-scrollbar-thumb:hover": {
+                        backgroundColor: "rgba(126,224,255,0.42)",
+                    },
+                    "*::-webkit-scrollbar-thumb:active": {
+                        backgroundColor: "rgba(126,224,255,0.5)",
+                    },
+                    "*::-webkit-scrollbar-corner": {
+                        backgroundColor: "transparent",
                     },
                     "::selection": {
                         backgroundColor: "rgba(120,169,255,0.35)",

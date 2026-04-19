@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import text, select
@@ -39,6 +40,10 @@ from app.models import (
 from app.security import hash_password
 from app.services import UserService
 from app.storage.minio_client import MinioStorage
+
+DEMO_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn0K6sAAAAASUVORK5CYII="
+)
 
 
 async def reset_schema() -> None:
@@ -240,9 +245,13 @@ async def seed_demo_data() -> None:
                         title=f"{project_name} / Host {host_index} / Finding {vuln_index}",
                         description="Тестовая уязвимость для проверки host-centric сценариев.",
                         severity=severity_cycle[(project_index + host_index + vuln_index) % len(severity_cycle)],
-                        cvss_version=CvssVersion.V31 if vuln_index % 2 else CvssVersion.V40,
-                        cvss_score=9.1 - vuln_index,
-                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                        cvss_version=CvssVersion.V40,
+                        cvss_score=8.7 if vuln_index % 2 else 9.3,
+                        cvss_vector=(
+                            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+                            if vuln_index % 2
+                            else "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:L/SI:L/SA:L"
+                        ),
                         cwe_id="CWE-79" if vuln_index % 2 else "CWE-89",
                         status=status_cycle[(project_index + vuln_index) % len(status_cycle)],
                         steps_to_reproduce="1. Выполнить запрос\n2. Получить некорректный ответ\n3. Зафиксировать результат",
@@ -260,7 +269,7 @@ async def seed_demo_data() -> None:
                         db.add(VulnerabilityAsset(vulnerability_id=vuln.id, asset_type=AssetType.ENDPOINT, asset_id=endpoints[0].id))
 
                     file_counter += 1
-                    png_bytes = b"\x89PNG\r\n\x1a\n" + f"demo-image-{file_counter}".encode("utf-8")
+                    png_bytes = DEMO_PNG_BYTES
                     png_key = storage.upload_bytes(png_bytes, "image/png", f"evidence-{project_index}-{host_index}-{vuln_index}.png")
                     db.add(
                         File(

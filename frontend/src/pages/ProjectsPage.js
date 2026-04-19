@@ -8,11 +8,13 @@ import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
-import { Checkbox, Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Typography, IconButton, Tooltip, } from "@mui/material";
+import { Checkbox, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Typography, IconButton, Tooltip, } from "@mui/material";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { addProjectMember, createProject, createProjectFolder, deleteProject, getProjectFolders, getProjects, getUsers, moveProjectFolder, updateProject, } from "../api";
+import { addProjectMember, createProject, createProjectFolder, deleteProject, getApiErrorMessage, getProjectFolders, getProjects, getUsers, moveProjectFolder, updateProject, } from "../api";
+import { PROJECT_STATUS_CHIP_SX, PROJECT_STATUS_LABELS, PROJECT_STATUS_ORDER } from "../projectStatus";
 import { useAuthStore } from "../store";
+import { useErrorToast } from "../useErrorToast";
 const DEFAULT_PROJECT_DURATION_DAYS = 14;
 const ROOT_FOLDER_LABEL = "Корень";
 const ROOT_FOLDER_NODE = { id: null, name: "", path: "", children: [], projects: [] };
@@ -75,6 +77,7 @@ export function ProjectsPage() {
     const autoScrollVelocityRef = useRef(0);
     const autoExpandTimerRef = useRef(null);
     const autoExpandTargetRef = useRef(null);
+    useErrorToast(error);
     const loadProjects = useCallback(async () => {
         try {
             const [projectsResponse, foldersResponse] = await Promise.all([
@@ -87,8 +90,8 @@ export function ProjectsPage() {
             setProjects(projectsResponse.items);
             setFolders(Array.isArray(foldersResponse) ? foldersResponse : []);
         }
-        catch {
-            setError("Не удалось загрузить проекты");
+        catch (error) {
+            setError(getApiErrorMessage(error, "Не удалось загрузить проекты"));
         }
     }, [statusFilter]);
     useEffect(() => {
@@ -180,8 +183,8 @@ export function ProjectsPage() {
                 const response = await getUsers(1, 200);
                 setUsersCatalog(response.items);
             }
-            catch {
-                setError("Не удалось загрузить список пользователей");
+            catch (error) {
+                setError(getApiErrorMessage(error, "Не удалось загрузить список пользователей"));
             }
         };
         void loadUsers();
@@ -216,8 +219,8 @@ export function ProjectsPage() {
             setSelectedFolder("");
             await loadProjects();
         }
-        catch {
-            setError("Не удалось создать проект");
+        catch (error) {
+            setError(getApiErrorMessage(error, "Не удалось создать проект"));
         }
         finally {
             setCreatingProject(false);
@@ -232,8 +235,8 @@ export function ProjectsPage() {
             await deleteProject(projectId);
             await loadProjects();
         }
-        catch {
-            setError("Не удалось удалить проект");
+        catch (error) {
+            setError(getApiErrorMessage(error, "Не удалось удалить проект"));
         }
     };
     const openActionsMenu = (event) => {
@@ -270,8 +273,8 @@ export function ProjectsPage() {
             setCreateFolderOpen(false);
             await loadProjects();
         }
-        catch {
-            setError("Не удалось создать папку проекта");
+        catch (error) {
+            setError(getApiErrorMessage(error, "Не удалось создать папку проекта"));
         }
         finally {
             setCreatingFolder(false);
@@ -330,8 +333,8 @@ export function ProjectsPage() {
             setEditingProjectId(null);
             await loadProjects();
         }
-        catch {
-            setError("Не удалось обновить проект");
+        catch (error) {
+            setError(getApiErrorMessage(error, "Не удалось обновить проект"));
         }
         finally {
             setUpdatingProject(false);
@@ -344,8 +347,8 @@ export function ProjectsPage() {
             await updateProject(projectId, { folder: normalizedFolder });
             await loadProjects();
         }
-        catch {
-            setError("Не удалось перенести проект в папку");
+        catch (error) {
+            setError(getApiErrorMessage(error, "Не удалось перенести проект в папку"));
         }
         finally {
             setDraggingProjectId(null);
@@ -365,8 +368,8 @@ export function ProjectsPage() {
             await moveProjectFolder(folderId, { parent_id: targetParentId });
             await loadProjects();
         }
-        catch {
-            setError("Не удалось переместить папку");
+        catch (error) {
+            setError(getApiErrorMessage(error, "Не удалось переместить папку"));
         }
         finally {
             setDraggingFolderId(null);
@@ -664,7 +667,7 @@ export function ProjectsPage() {
                                     "&:hover": {
                                         backgroundColor: "rgba(126,224,255,0.06)",
                                     },
-                                }, children: [_jsxs(ListItemButton, { sx: { py: 1, pl: 4 + depth * 2, borderRadius: 0 }, onClick: () => navigate(`/projects/${project.id}`), children: [_jsx(ListItemIcon, { sx: { minWidth: 32 }, children: _jsx(DescriptionOutlinedIcon, { fontSize: "small", color: "action" }) }), _jsx(ListItemText, { primary: project.name, secondaryTypographyProps: { component: "div" }, secondary: _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: { xs: 0.5, md: 1.5 }, alignItems: { md: "center" }, children: [_jsx(Typography, { variant: "caption", color: "text.secondary", children: project.status }), _jsx(Typography, { variant: "caption", color: "text.secondary", children: project.start_date || "дата не задана" })] }) })] }), user?.role === "admin" && (_jsx(Stack, { direction: "row", alignItems: "center", className: "project-actions", sx: { pr: 0.5 }, children: _jsx(Tooltip, { title: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F", children: _jsx(IconButton, { size: "small", onClick: (event) => openProjectActions(event, project), sx: { width: 28, height: 28 }, children: _jsx(MoreVertIcon, { fontSize: "small" }) }) }) }))] })] }, project.id))), node.children.map((child) => (_jsx(Box, { sx: { pl: 0.8 }, children: renderFolderNode(child, depth + 1, node) }, child.path))), renderDropLine(node, `after-folder-content:${node.path}`, depth + 1)] })), depth === 0 && _jsx(Divider, {})] }, node.path));
+                                }, children: [_jsxs(ListItemButton, { sx: { py: 1, pl: 4 + depth * 2, borderRadius: 0 }, onClick: () => navigate(`/projects/${project.id}`), children: [_jsx(ListItemIcon, { sx: { minWidth: 32 }, children: _jsx(DescriptionOutlinedIcon, { fontSize: "small", color: "action" }) }), _jsx(ListItemText, { primary: project.name, secondaryTypographyProps: { component: "div" }, secondary: _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: { xs: 0.5, md: 1.5 }, alignItems: { md: "center" }, children: [_jsx(Chip, { size: "small", label: PROJECT_STATUS_LABELS[project.status], sx: PROJECT_STATUS_CHIP_SX[project.status] }), _jsx(Typography, { variant: "caption", color: "text.secondary", children: project.start_date || "дата не задана" })] }) })] }), user?.role === "admin" && (_jsx(Stack, { direction: "row", alignItems: "center", className: "project-actions", sx: { pr: 0.5 }, children: _jsx(Tooltip, { title: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044F", children: _jsx(IconButton, { size: "small", onClick: (event) => openProjectActions(event, project), sx: { width: 28, height: 28 }, children: _jsx(MoreVertIcon, { fontSize: "small" }) }) }) }))] })] }, project.id))), node.children.map((child) => (_jsx(Box, { sx: { pl: 0.8 }, children: renderFolderNode(child, depth + 1, node) }, child.path))), renderDropLine(node, `after-folder-content:${node.path}`, depth + 1)] })), depth === 0 && _jsx(Divider, {})] }, node.path));
     return (_jsxs(Stack, { spacing: 3, children: [_jsxs(Stack, { direction: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 2, children: [_jsx(Box, { children: _jsx(Typography, { variant: "h4", fontWeight: 700, children: "\u041F\u0440\u043E\u0435\u043A\u0442\u044B" }) }), user?.role === "admin" && (_jsx(IconButton, { onClick: openActionsMenu, sx: {
                             border: "1px solid rgba(126,224,255,0.24)",
                             width: 40,
@@ -690,12 +693,12 @@ export function ProjectsPage() {
                                 openCreateFolderDialog(activeFolderNode.id);
                             }
                             closeFolderActions();
-                        }, children: [_jsx(ListItemIcon, { children: _jsx(CreateNewFolderIcon, { fontSize: "small" }) }), "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u043F\u0430\u043F\u043A\u0443 \u0432\u043D\u0443\u0442\u0440\u0438"] })] }), error && _jsx(Alert, { severity: "error", children: error }), _jsx(Box, { sx: {
+                        }, children: [_jsx(ListItemIcon, { children: _jsx(CreateNewFolderIcon, { fontSize: "small" }) }), "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u043F\u0430\u043F\u043A\u0443 \u0432\u043D\u0443\u0442\u0440\u0438"] })] }), _jsx(Box, { sx: {
                     border: "1px solid rgba(126,224,255,0.12)",
                     borderRadius: 0,
                     p: 2,
                     backgroundColor: "rgba(15,27,45,0.56)",
-                }, children: _jsxs(Stack, { spacing: 2, children: [_jsx(Stack, { direction: { xs: "column", lg: "row" }, spacing: 1.5, alignItems: { lg: "center" }, justifyContent: "space-between", children: _jsxs(Stack, { direction: "row", spacing: 1, flexWrap: "wrap", children: [_jsx(Chip, { label: `Проектов: ${treeStats.totalProjects}`, variant: "outlined" }), _jsx(Chip, { label: `Папок: ${treeStats.totalFolders}`, variant: "outlined" }), _jsx(Chip, { label: `Вложенных папок: ${treeStats.nestedFolders}`, variant: "outlined" })] }) }), _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 1.5, children: [_jsx(TextField, { label: "\u041F\u043E\u0438\u0441\u043A \u043F\u0440\u043E\u0435\u043A\u0442\u0430", placeholder: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0438\u043B\u0438 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: searchQuery, onChange: (event) => setSearchQuery(event.target.value), fullWidth: true }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: statusFilter, onChange: (event) => setStatusFilter(event.target.value), sx: { minWidth: 220 }, children: [_jsx(MenuItem, { value: "all", children: "\u0412\u0441\u0435 \u0441\u0442\u0430\u0442\u0443\u0441\u044B" }), _jsx(MenuItem, { value: "active", children: "active" }), _jsx(MenuItem, { value: "completed", children: "completed" }), _jsx(MenuItem, { value: "archived", children: "archived" })] })] })] }) }), _jsxs(List, { ref: projectListRef, disablePadding: true, onDragOver: (event) => {
+                }, children: _jsxs(Stack, { spacing: 2, children: [_jsx(Stack, { direction: { xs: "column", lg: "row" }, spacing: 1.5, alignItems: { lg: "center" }, justifyContent: "space-between", children: _jsxs(Stack, { direction: "row", spacing: 1, flexWrap: "wrap", children: [_jsx(Chip, { label: `Проектов: ${treeStats.totalProjects}`, variant: "outlined" }), _jsx(Chip, { label: `Папок: ${treeStats.totalFolders}`, variant: "outlined" }), _jsx(Chip, { label: `Вложенных папок: ${treeStats.nestedFolders}`, variant: "outlined" })] }) }), _jsxs(Stack, { direction: { xs: "column", md: "row" }, spacing: 1.5, children: [_jsx(TextField, { label: "\u041F\u043E\u0438\u0441\u043A \u043F\u0440\u043E\u0435\u043A\u0442\u0430", placeholder: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0438\u043B\u0438 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", value: searchQuery, onChange: (event) => setSearchQuery(event.target.value), fullWidth: true }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: statusFilter, onChange: (event) => setStatusFilter(event.target.value), sx: { minWidth: 220 }, children: [_jsx(MenuItem, { value: "all", children: "\u0412\u0441\u0435 \u0441\u0442\u0430\u0442\u0443\u0441\u044B" }), PROJECT_STATUS_ORDER.map((status) => (_jsx(MenuItem, { value: status, children: PROJECT_STATUS_LABELS[status] }, status)))] })] })] }) }), _jsxs(List, { ref: projectListRef, disablePadding: true, onDragOver: (event) => {
                     const dragging = parseDragPayload(event);
                     if (!dragging) {
                         stopAutoScroll();
@@ -748,7 +751,7 @@ export function ProjectsPage() {
                                     setEndDate("");
                                     setSelectedMemberIds([]);
                                     setSelectedFolder("");
-                                }, children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void handleCreate(), disabled: !name.trim() || creatingProject, children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: createFolderOpen, onClose: () => setCreateFolderOpen(false), fullWidth: true, maxWidth: "sm", children: [_jsx(DialogTitle, { children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u043F\u0430\u043F\u043A\u0443 \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u043F\u0430\u043F\u043A\u0438", placeholder: "\u041D\u0430\u043F\u0440\u0438\u043C\u0435\u0440: \u041A\u043B\u0438\u0435\u043D\u0442\u044B", value: folderName, onChange: (event) => setFolderName(event.target.value) }), _jsxs(TextField, { select: true, label: "\u0420\u043E\u0434\u0438\u0442\u0435\u043B\u044C\u0441\u043A\u0430\u044F \u043F\u0430\u043F\u043A\u0430", value: folderParentId, onChange: (event) => setFolderParentId(event.target.value), children: [_jsx(MenuItem, { value: "", children: "\u041A\u043E\u0440\u0435\u043D\u044C" }), folders.map((folder) => (_jsx(MenuItem, { value: folder.id, children: folder.path }, folder.id)))] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateFolderOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void submitCreateFolder(), disabled: !folderName.trim() || creatingFolder, children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: editOpen, onClose: () => setEditOpen(false), fullWidth: true, maxWidth: "sm", children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u0440\u043E\u0435\u043A\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: editingProjectName, onChange: (event) => setEditingProjectName(event.target.value) }), _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", multiline: true, minRows: 3, value: editingProjectDescription, onChange: (event) => setEditingProjectDescription(event.target.value) }), _jsx(TextField, { label: "\u0414\u0430\u0442\u0430 \u043D\u0430\u0447\u0430\u043B\u0430", type: "date", value: editingProjectStartDate, onChange: (event) => setEditingProjectStartDate(event.target.value), InputLabelProps: { shrink: true } }), _jsx(TextField, { label: "\u0414\u0430\u0442\u0430 \u043E\u043A\u043E\u043D\u0447\u0430\u043D\u0438\u044F", type: "date", value: editingProjectEndDate, onChange: (event) => setEditingProjectEndDate(event.target.value), InputLabelProps: { shrink: true } }), _jsxs(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: editingProjectStatus, onChange: (event) => setEditingProjectStatus(event.target.value), children: [_jsx(MenuItem, { value: "active", children: "active" }), _jsx(MenuItem, { value: "completed", children: "completed" }), _jsx(MenuItem, { value: "archived", children: "archived" })] }), _jsxs(TextField, { select: true, label: "\u041F\u0430\u043F\u043A\u0430 \u043F\u0440\u043E\u0435\u043A\u0442\u0430", value: editingProjectFolder, onChange: (event) => setEditingProjectFolder(event.target.value), children: [_jsx(MenuItem, { value: "", children: ROOT_FOLDER_LABEL }), folderPaths.map((folder) => (_jsx(MenuItem, { value: folder, children: folder }, folder)))] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => {
+                                }, children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void handleCreate(), disabled: !name.trim() || creatingProject, children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: createFolderOpen, onClose: () => setCreateFolderOpen(false), fullWidth: true, maxWidth: "sm", children: [_jsx(DialogTitle, { children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C \u043F\u0430\u043F\u043A\u0443 \u043F\u0440\u043E\u0435\u043A\u0442\u0430" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u043F\u0430\u043F\u043A\u0438", placeholder: "\u041D\u0430\u043F\u0440\u0438\u043C\u0435\u0440: \u041A\u043B\u0438\u0435\u043D\u0442\u044B", value: folderName, onChange: (event) => setFolderName(event.target.value) }), _jsxs(TextField, { select: true, label: "\u0420\u043E\u0434\u0438\u0442\u0435\u043B\u044C\u0441\u043A\u0430\u044F \u043F\u0430\u043F\u043A\u0430", value: folderParentId, onChange: (event) => setFolderParentId(event.target.value), children: [_jsx(MenuItem, { value: "", children: "\u041A\u043E\u0440\u0435\u043D\u044C" }), folders.map((folder) => (_jsx(MenuItem, { value: folder.id, children: folder.path }, folder.id)))] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => setCreateFolderOpen(false), children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void submitCreateFolder(), disabled: !folderName.trim() || creatingFolder, children: "\u0421\u043E\u0437\u0434\u0430\u0442\u044C" })] })] }), _jsxs(Dialog, { open: editOpen, onClose: () => setEditOpen(false), fullWidth: true, maxWidth: "sm", children: [_jsx(DialogTitle, { children: "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u0440\u043E\u0435\u043A\u0442" }), _jsx(DialogContent, { children: _jsxs(Stack, { spacing: 2, sx: { mt: 1 }, children: [_jsx(TextField, { label: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", value: editingProjectName, onChange: (event) => setEditingProjectName(event.target.value) }), _jsx(TextField, { label: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", multiline: true, minRows: 3, value: editingProjectDescription, onChange: (event) => setEditingProjectDescription(event.target.value) }), _jsx(TextField, { label: "\u0414\u0430\u0442\u0430 \u043D\u0430\u0447\u0430\u043B\u0430", type: "date", value: editingProjectStartDate, onChange: (event) => setEditingProjectStartDate(event.target.value), InputLabelProps: { shrink: true } }), _jsx(TextField, { label: "\u0414\u0430\u0442\u0430 \u043E\u043A\u043E\u043D\u0447\u0430\u043D\u0438\u044F", type: "date", value: editingProjectEndDate, onChange: (event) => setEditingProjectEndDate(event.target.value), InputLabelProps: { shrink: true } }), _jsx(TextField, { select: true, label: "\u0421\u0442\u0430\u0442\u0443\u0441", value: editingProjectStatus, onChange: (event) => setEditingProjectStatus(event.target.value), children: PROJECT_STATUS_ORDER.map((status) => (_jsx(MenuItem, { value: status, children: PROJECT_STATUS_LABELS[status] }, status))) }), _jsxs(TextField, { select: true, label: "\u041F\u0430\u043F\u043A\u0430 \u043F\u0440\u043E\u0435\u043A\u0442\u0430", value: editingProjectFolder, onChange: (event) => setEditingProjectFolder(event.target.value), children: [_jsx(MenuItem, { value: "", children: ROOT_FOLDER_LABEL }), folderPaths.map((folder) => (_jsx(MenuItem, { value: folder, children: folder }, folder)))] })] }) }), _jsxs(DialogActions, { children: [_jsx(Button, { onClick: () => {
                                     setEditOpen(false);
                                     setEditingProjectId(null);
                                 }, children: "\u041E\u0442\u043C\u0435\u043D\u0430" }), _jsx(Button, { variant: "contained", onClick: () => void submitProjectEdit(), disabled: !editingProjectName.trim() || updatingProject, children: "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C" })] })] })] }));

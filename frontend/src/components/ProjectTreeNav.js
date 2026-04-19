@@ -44,7 +44,7 @@ export function ProjectTreeNav({ hosts, selectedHostId, selectedSection, isColla
         onSelectHost(hostId);
         onSelectSection(section);
         if (onOpenHost) {
-            onOpenHost(hostId);
+            onOpenHost(hostId, section);
         }
     };
     return (_jsxs(Box, { sx: {
@@ -62,7 +62,7 @@ export function ProjectTreeNav({ hosts, selectedHostId, selectedSection, isColla
                         const hostPortsCount = hostStats?.portsCount ?? (isActiveHost ? portsCount : 0);
                         const hostEndpointsCount = hostStats?.endpointsCount ?? (isActiveHost ? endpointsCount : 0);
                         const hostVulnerabilitiesCount = hostStats?.vulnerabilitiesCount ?? (isActiveHost ? vulnerabilitiesCount : 0);
-                        return (_jsxs(Box, { children: [_jsxs(ListItemButton, { selected: isActiveHost && (selectedSection === "hosts" || selectedSection === "overview"), onClick: () => selectHostAndSection(host.id, "overview"), children: [_jsx(DnsIcon, { fontSize: "small" }), !isCollapsed && _jsx(ListItemText, { sx: { ml: 1 }, primary: label, secondary: `Статус: ${host.status}` }), !isCollapsed && (_jsx(IconButton, { size: "small", edge: "end", onClick: (event) => {
+                        return (_jsxs(Box, { children: [_jsxs(ListItemButton, { selected: isActiveHost && (selectedSection === "hosts" || selectedSection === "overview"), onClick: () => selectHostAndSection(host.id, "overview"), children: [_jsx(DnsIcon, { fontSize: "small" }), !isCollapsed && _jsx(ListItemText, { sx: { ml: 1 }, primary: label }), !isCollapsed && (_jsx(IconButton, { size: "small", edge: "end", onClick: (event) => {
                                                 event.stopPropagation();
                                                 toggleHostExpanded(host.id);
                                             }, children: isExpanded ? _jsx(KeyboardArrowDownIcon, { fontSize: "small" }) : _jsx(KeyboardArrowRightIcon, { fontSize: "small" }) }))] }), isExpanded && !isCollapsed && (_jsxs(Stack, { sx: { pl: 5, pr: 1, pb: 1 }, spacing: 0.5, children: [_jsxs(ListItemButton, { sx: { borderRadius: 0 }, selected: isActiveHost && selectedSection === "ports", onClick: () => selectHostAndSection(host.id, "ports"), children: [_jsx(CableIcon, { fontSize: "small" }), _jsx(ListItemText, { sx: { ml: 1 }, primary: `Порты (${hostPortsCount})` })] }), _jsxs(ListItemButton, { sx: { borderRadius: 0 }, selected: isActiveHost && selectedSection === "endpoints", onClick: () => selectHostAndSection(host.id, "endpoints"), children: [_jsx(AltRouteIcon, { fontSize: "small" }), _jsx(ListItemText, { sx: { ml: 1 }, primary: `Эндпоинты (${hostEndpointsCount})` })] }), _jsxs(ListItemButton, { sx: { borderRadius: 0 }, selected: isActiveHost && selectedSection === "vulns", onClick: () => selectHostAndSection(host.id, "vulns"), children: [_jsx(ReportProblemIcon, { fontSize: "small" }), _jsx(ListItemText, { sx: { ml: 1 }, primary: `Уязвимости (${hostVulnerabilitiesCount})` })] })] }))] }, host.id));

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { getMe, login, logout } from "./api";
+import { getApiErrorMessage, getMe, login, logout } from "./api";
 export const useAuthStore = create((set) => ({
     user: null,
     isLoading: false,
@@ -23,9 +23,10 @@ export const useAuthStore = create((set) => ({
             set({ user: me, isLoading: false });
             return me;
         }
-        catch {
-            set({ error: "Не удалось выполнить вход", isLoading: false });
-            throw new Error("login failed");
+        catch (error) {
+            const message = getApiErrorMessage(error, "Не удалось выполнить вход");
+            set({ error: message, isLoading: false });
+            throw new Error(message);
         }
     },
     signOut: async () => {
@@ -44,4 +45,15 @@ export const useAuthStore = create((set) => ({
             return null;
         }
     },
+}));
+export const useToastStore = create((set) => ({
+    nextId: 1,
+    toasts: [],
+    pushToast: (message, severity = "error") => set((state) => ({
+        nextId: state.nextId + 1,
+        toasts: [...state.toasts, { id: state.nextId, message, severity }],
+    })),
+    dismissToast: (id) => set((state) => ({
+        toasts: state.toasts.filter((toast) => toast.id !== id),
+    })),
 }));

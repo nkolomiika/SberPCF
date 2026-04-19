@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from "react";
+import React, { useMemo } from "react";
 import ReactDOM from "react-dom/client";
 import { CssBaseline, ThemeProvider, createTheme, type PaletteMode } from "@mui/material";
 import { BrowserRouter } from "react-router-dom";
@@ -38,31 +38,40 @@ function createAppTheme(mode: PaletteMode) {
           html: {
             colorScheme: "dark",
             scrollbarWidth: "thin",
-            scrollbarColor: "#7EE0FF transparent",
+            scrollbarColor: "rgba(126,224,255,0.32) rgba(255,255,255,0.02)",
           },
           body: {
             backgroundImage: "linear-gradient(180deg, #08111F 0%, #0B1220 100%)",
           },
           "*": {
             scrollbarWidth: "thin",
-            scrollbarColor: "#7EE0FF transparent",
+            scrollbarColor: "rgba(126,224,255,0.32) rgba(255,255,255,0.02)",
           },
           "*::-webkit-scrollbar": {
-            width: 10,
-            height: 10,
+            width: 8,
+            height: 8,
             backgroundColor: "transparent",
+          },
+          "*::-webkit-scrollbar-button": {
+            display: "none",
+            width: 0,
+            height: 0,
           },
           "*::-webkit-scrollbar-track": {
-            backgroundColor: "transparent",
+            backgroundColor: "rgba(255,255,255,0.03)",
+            borderRadius: 999,
           },
           "*::-webkit-scrollbar-thumb": {
-            backgroundColor: "rgba(126,224,255,0.82)",
+            backgroundColor: "rgba(126,224,255,0.28)",
             borderRadius: 999,
             border: "2px solid transparent",
             backgroundClip: "padding-box",
           },
           "*::-webkit-scrollbar-thumb:hover": {
-            backgroundColor: "rgba(126,224,255,0.96)",
+            backgroundColor: "rgba(126,224,255,0.42)",
+          },
+          "*::-webkit-scrollbar-thumb:active": {
+            backgroundColor: "rgba(126,224,255,0.5)",
           },
           "*::-webkit-scrollbar-corner": {
             backgroundColor: "transparent",
@@ -190,28 +199,6 @@ function createAppTheme(mode: PaletteMode) {
 function Root() {
   const themeMode: PaletteMode = "dark";
   const theme = useMemo(() => createAppTheme(themeMode), [themeMode]);
-
-  useEffect(() => {
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "a74592" },
-      body: JSON.stringify({
-        sessionId: "a74592",
-        runId: "scrollbar-design-debug",
-        hypothesisId: "H1",
-        location: "frontend/src/main.tsx:Root",
-        message: "Scrollbar theme bootstrap",
-        data: {
-          userAgent: navigator.userAgent,
-          scrollbarColor: getComputedStyle(document.documentElement).scrollbarColor,
-          themeMode,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-  }, [themeMode]);
 
   return (
     <ThemeProvider theme={theme}>

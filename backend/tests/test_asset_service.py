@@ -1,3 +1,66 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
+import pytest
+
+from app.services import AssetService
+
+
+def test_normalize_endpoint_path_replaces_uuid_segments() -> None:
+    normalized = AssetService._normalize_endpoint_path("/api/v1/users/550e8400-e29b-41d4-a716-446655440000/orders")
+
+    assert normalized == "/api/v1/users/{UUID}/orders"
+
+
+def test_apply_raw_request_payload_normalizes_uuid_path() -> None:
+    payload = {"request_raw": "GET /api/v1/users/550e8400-e29b-41d4-a716-446655440000?page=1 HTTP/1.1\nHost: demo.local"}
+
+    normalized = AssetService._apply_raw_request_payload(payload)
+
+    assert normalized["path"] == "/api/v1/users/{UUID}"
+    assert normalized["query_params"] == [{"name": "page", "value": "1", "required": False, "description": None}]
+
+
+@pytest.mark.asyncio
+async def test_create_endpoint_checks_duplicate_by_normalized_uuid_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    project_id = uuid4()
+    host_id = uuid4()
+    actor_id = uuid4()
+    existing_endpoint = SimpleNamespace(
+        id=uuid4(),
+        description=None,
+        query_params=[],
+        request_body=None,
+        request_content_type=None,
+        request_headers=[],
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=existing_endpoint)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    db.add = MagicMock()
+    service = AssetService(db)
+    service._get_host = AsyncMock(return_value=SimpleNamespace(id=host_id))
+    service.audit.log = AsyncMock()
+    broadcast_mock = AsyncMock()
+    monkeypatch.setattr("app.services.ws_manager.broadcast", broadcast_mock)
+
+    result = await service.create_endpoint(
+        project_id,
+        host_id,
+        {
+            "path": "/api/v1/users/550e8400-e29b-41d4-a716-446655440000",
+            "method": "GET",
+            "query_params": [{"name": "page", "value": "1", "required": False, "description": None}],
+            "request_headers": [],
+        },
+        actor_id,
+    )
+
+    assert result is existing_endpoint
+    assert existing_endpoint.query_params == [{"name": "page", "value": "1", "required": False, "description": None}]
+    db.add.assert_not_called()
 from app.services import AssetService
 
 

@@ -1,8 +1,9 @@
-import { Alert, Box, Button, Paper, Stack, TextField, Typography } from "@mui/material";
+import { Box, Button, Paper, Stack, TextField, Typography } from "@mui/material";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { forceChangePassword, getApiErrorMessage } from "../api";
 import { useAuthStore } from "../store";
+import { useErrorToast } from "../useErrorToast";
 
 export function ForceChangePasswordPage() {
   const navigate = useNavigate();
@@ -13,6 +14,8 @@ export function ForceChangePasswordPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  useErrorToast(error);
 
   if (!user) {
     return null;
@@ -30,7 +33,6 @@ export function ForceChangePasswordPage() {
               Для пользователя {user.username} выдан временный пароль. Перед началом работы нужно задать новый.
             </Typography>
           </Stack>
-          {error && <Alert severity="error">{error}</Alert>}
           <TextField label="Новый пароль" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} fullWidth />
           <TextField
             label="Подтвердите пароль"

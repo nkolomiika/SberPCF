@@ -1,6 +1,6 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useCallback, useEffect, useState } from "react";
-import { AppBar, Avatar, Badge, Button, Box, CircularProgress, Container, Divider, ListItemIcon, List, ListItemButton, ListItemText, IconButton, Menu, MenuItem, Popover, Paper, Stack, Toolbar, Typography, } from "@mui/material";
+import { Alert, AppBar, Avatar, Badge, Button, Box, CircularProgress, Container, Divider, ListItemIcon, List, ListItemButton, ListItemText, IconButton, Menu, MenuItem, Popover, Paper, Snackbar, Stack, Toolbar, Typography, } from "@mui/material";
 import HomeIcon from "@mui/icons-material/Home";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
@@ -9,8 +9,8 @@ import NotificationsIcon from "@mui/icons-material/Notifications";
 import HistoryIcon from "@mui/icons-material/History";
 import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { listNotifications, unreadCount } from "./api";
-import { useAuthStore } from "./store";
+import { listNotifications, markNotificationRead, unreadCount } from "./api";
+import { useAuthStore, useToastStore } from "./store";
 import { ForceChangePasswordPage } from "./pages/ForceChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { HostDetailPage } from "./pages/HostDetailPage";
@@ -19,27 +19,55 @@ import { ProfilePage } from "./pages/ProfilePage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { UsersAdminPage } from "./pages/UsersAdminPage";
+function GlobalToastHost() {
+    const toasts = useToastStore((state) => state.toasts);
+    const dismissToast = useToastStore((state) => state.dismissToast);
+    const currentToast = toasts[0] ?? null;
+    return (_jsx(Snackbar, { open: Boolean(currentToast), autoHideDuration: 5000, anchorOrigin: { vertical: "bottom", horizontal: "left" }, onClose: (_, reason) => {
+            if (reason === "clickaway" || !currentToast) {
+                return;
+            }
+            dismissToast(currentToast.id);
+        }, children: currentToast ? (_jsx(Alert, { severity: currentToast.severity, variant: "filled", onClose: () => dismissToast(currentToast.id), sx: { minWidth: 320, maxWidth: 520, alignItems: "center" }, children: currentToast.message })) : undefined }));
+}
 function PrivateLayout({ themeMode }) {
     const navigate = useNavigate();
     const location = useLocation();
     const user = useAuthStore((s) => s.user);
     const signOut = useAuthStore((s) => s.signOut);
+    const pushToast = useToastStore((s) => s.pushToast);
     const [count, setCount] = useState(0);
     const [notifications, setNotifications] = useState([]);
     const [notificationsLoading, setNotificationsLoading] = useState(false);
     const [notificationsAnchorEl, setNotificationsAnchorEl] = useState(null);
     const [profileAnchorEl, setProfileAnchorEl] = useState(null);
+    const [profileMenuWidth, setProfileMenuWidth] = useState(220);
+    const isPasswordChangeLocked = Boolean(user?.must_change_password);
     const loadUnreadNotifications = useCallback(async () => {
-        const unread = await unreadCount();
-        setCount(unread);
+        try {
+            const unread = await unreadCount();
+            setCount(unread);
+        }
+        catch {
+            setCount(0);
+        }
     }, []);
     const loadNotificationsList = useCallback(async () => {
-        const response = await listNotifications();
-        setNotifications(response.items);
+        try {
+            const response = await listNotifications();
+            setNotifications(response.items);
+        }
+        catch {
+            setNotifications([]);
+        }
     }, []);
     const notificationsOpen = Boolean(notificationsAnchorEl);
     const profileMenuOpen = Boolean(profileAnchorEl);
     useEffect(() => {
+        if (!user || isPasswordChangeLocked) {
+            setCount(0);
+            return;
+        }
         void loadUnreadNotifications();
         const intervalId = window.setInterval(() => {
             void loadUnreadNotifications();
@@ -47,14 +75,15 @@ function PrivateLayout({ themeMode }) {
         return () => {
             window.clearInterval(intervalId);
         };
-    }, [loadUnreadNotifications]);
+    }, [isPasswordChangeLocked, loadUnreadNotifications, user]);
     useEffect(() => {
-        if (!user) {
+        if (!user || isPasswordChangeLocked) {
             return;
         }
         const protocol = window.location.protocol === "https:" ? "wss" : "ws";
         const socket = new WebSocket(`${protocol}://${window.location.host}/ws/notifications`);
         socket.onmessage = () => {
+            pushToast("Новое уведомление", "info");
             void loadUnreadNotifications();
             if (notificationsOpen) {
                 void loadNotificationsList();
@@ -63,8 +92,11 @@ function PrivateLayout({ themeMode }) {
         return () => {
             socket.close();
         };
-    }, [loadNotificationsList, loadUnreadNotifications, notificationsOpen, user]);
+    }, [isPasswordChangeLocked, loadNotificationsList, loadUnreadNotifications, notificationsOpen, pushToast, user]);
     const openNotifications = async (event) => {
+        if (isPasswordChangeLocked) {
+            return;
+        }
         setNotificationsAnchorEl(event.currentTarget);
         setNotificationsLoading(true);
         try {
@@ -78,8 +110,37 @@ function PrivateLayout({ themeMode }) {
     const closeNotifications = () => {
         setNotificationsAnchorEl(null);
     };
+    const openNotificationTarget = useCallback(async (notification) => {
+        const projectId = notification.context?.project_id;
+        const hostId = notification.context?.host_id;
+        const vulnerabilityId = notification.context?.vulnerability_id;
+        if (!projectId) {
+            closeNotifications();
+            return;
+        }
+        if (!notification.is_read) {
+            try {
+                await markNotificationRead(notification.id);
+            }
+            catch {
+                // Keep navigation working even if the read flag update fails.
+            }
+        }
+        setNotifications((prev) => prev.map((item) => (item.id === notification.id ? { ...item, is_read: true } : item)));
+        setCount((prev) => Math.max(0, prev - (notification.is_read ? 0 : 1)));
+        closeNotifications();
+        if (hostId && vulnerabilityId) {
+            const query = notification.comment_id ? `?comment=${notification.comment_id}` : "";
+            navigate(`/projects/${projectId}/hosts/${hostId}/vulnerabilities/${vulnerabilityId}${query}`, {
+                state: { section: "vulns" },
+            });
+            return;
+        }
+        navigate(`/projects/${projectId}`);
+    }, [navigate]);
     const openProfileMenu = (event) => {
         setProfileAnchorEl(event.currentTarget);
+        setProfileMenuWidth(Math.round(event.currentTarget.getBoundingClientRect().width));
     };
     const closeProfileMenu = () => {
         setProfileAnchorEl(null);
@@ -135,7 +196,10 @@ function PrivateLayout({ themeMode }) {
                                         }, children: _jsxs(Stack, { direction: "row", spacing: 1.2, alignItems: "center", justifyContent: "flex-end", sx: { width: "100%" }, children: [_jsx(Avatar, { src: user.avatar_url ?? undefined, sx: { width: 30, height: 30, bgcolor: "primary.main" }, children: (user.full_name || user.username)[0]?.toUpperCase() }), _jsxs(Stack, { spacing: 0, sx: { flex: 1, minWidth: 0 }, children: [_jsx(Typography, { color: "text.primary", textAlign: "right", noWrap: true, children: user.full_name || user.username }), _jsx(Typography, { variant: "caption", color: "text.secondary", textAlign: "right", noWrap: true, children: roleLabel })] }), _jsx(KeyboardArrowDownIcon, { fontSize: "small", sx: { color: "text.secondary" } })] }) })] })] }) }) }), _jsxs(Menu, { anchorEl: profileAnchorEl, open: profileMenuOpen, onClose: closeProfileMenu, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, slotProps: {
                     paper: {
                         sx: {
-                            width: profileAnchorEl?.clientWidth ?? 220,
+                            width: profileMenuWidth,
+                            minWidth: profileMenuWidth,
+                            maxWidth: profileMenuWidth,
+                            boxSizing: "border-box",
                         },
                     },
                 }, children: [_jsxs(MenuItem, { onClick: () => {
@@ -153,7 +217,10 @@ function PrivateLayout({ themeMode }) {
                         }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(HistoryIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0416\u0443\u0440\u043D\u0430\u043B \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439" })] })), _jsxs(MenuItem, { onClick: () => {
                             closeProfileMenu();
                             void signOut();
-                        }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(LogoutIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0412\u044B\u0439\u0442\u0438" })] })] }), _jsx(Popover, { open: notificationsOpen, anchorEl: notificationsAnchorEl, onClose: closeNotifications, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: _jsxs(Box, { sx: { width: 360, maxWidth: "90vw" }, children: [_jsxs(Box, { sx: { px: 2, py: 1.5 }, children: [_jsx(Typography, { variant: "subtitle1", fontWeight: 700, children: "\u0423\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u044F" }), _jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["\u041D\u0435\u043F\u0440\u043E\u0447\u0438\u0442\u0430\u043D\u043D\u044B\u0445: ", count] })] }), _jsx(Divider, {}), notificationsLoading ? (_jsx(Box, { sx: { p: 2, display: "flex", justifyContent: "center" }, children: _jsx(CircularProgress, { size: 20 }) })) : notifications.length === 0 ? (_jsx(Box, { sx: { p: 2 }, children: _jsx(Typography, { variant: "body2", color: "text.secondary", children: "\u041D\u043E\u0432\u044B\u0445 \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u0439 \u043D\u0435\u0442." }) })) : (_jsx(List, { dense: true, disablePadding: true, children: notifications.map((notification) => (_jsx(ListItemButton, { onClick: closeNotifications, children: _jsx(ListItemText, { primary: notification.context?.vulnerability_title ?? "Уведомление", secondary: notification.context?.commenter_username
+                        }, sx: { minWidth: 220 }, children: [_jsx(ListItemIcon, { sx: { minWidth: 30 }, children: _jsx(LogoutIcon, { fontSize: "small" }) }), _jsx(ListItemText, { children: "\u0412\u044B\u0439\u0442\u0438" })] })] }), _jsx(Popover, { open: notificationsOpen, anchorEl: notificationsAnchorEl, onClose: closeNotifications, anchorOrigin: { vertical: "bottom", horizontal: "right" }, transformOrigin: { vertical: "top", horizontal: "right" }, children: _jsxs(Box, { sx: { width: 360, maxWidth: "90vw" }, children: [_jsxs(Box, { sx: { px: 2, py: 1.5 }, children: [_jsx(Typography, { variant: "subtitle1", fontWeight: 700, children: "\u0423\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u044F" }), _jsxs(Typography, { variant: "body2", color: "text.secondary", children: ["\u041D\u0435\u043F\u0440\u043E\u0447\u0438\u0442\u0430\u043D\u043D\u044B\u0445: ", count] })] }), _jsx(Divider, {}), notificationsLoading ? (_jsx(Box, { sx: { p: 2, display: "flex", justifyContent: "center" }, children: _jsx(CircularProgress, { size: 20 }) })) : notifications.length === 0 ? (_jsx(Box, { sx: { p: 2 }, children: _jsx(Typography, { variant: "body2", color: "text.secondary", children: "\u041D\u043E\u0432\u044B\u0445 \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u0439 \u043D\u0435\u0442." }) })) : (_jsx(List, { dense: true, disablePadding: true, children: notifications.map((notification) => (_jsx(ListItemButton, { onClick: () => void openNotificationTarget(notification), sx: {
+                                    alignItems: "flex-start",
+                                    backgroundColor: notification.is_read ? "transparent" : "rgba(126,224,255,0.08)",
+                                }, children: _jsx(ListItemText, { primary: notification.context?.vulnerability_title ?? "Уведомление", secondary: notification.context?.commenter_username
                                         ? `Упоминание от ${notification.context.commenter_username}`
                                         : "Обновление в проекте" }) }, notification.id))) }))] }) }), _jsx(Container, { maxWidth: false, sx: {
                     py: { xs: 2.5, md: 3.5 },
@@ -163,7 +230,7 @@ function PrivateLayout({ themeMode }) {
                                     p: { xs: 2, md: 3 },
                                     borderRadius: 0,
                                     backgroundColor: themeMode === "dark" ? "rgba(15,27,45,0.78)" : "rgba(255,255,255,0.8)",
-                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/profile", element: _jsx(ProfilePage, {}) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/users", element: user.role === "admin" ? _jsx(UsersAdminPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "/audit-logs", element: user.role === "admin" ? _jsx(AuditLogsPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
+                                }, children: _jsx(ProjectsPage, {}) }) }), _jsx(Route, { path: "/profile", element: _jsx(ProfilePage, {}) }), _jsx(Route, { path: "/projects/:projectId", element: _jsx(ProjectDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/projects/:projectId/hosts/:hostId/vulnerabilities/:vulnerabilityId", element: _jsx(HostDetailPage, {}) }), _jsx(Route, { path: "/users", element: user.role === "admin" ? _jsx(UsersAdminPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "/audit-logs", element: user.role === "admin" ? _jsx(AuditLogsPage, {}) : _jsx(Navigate, { to: "/", replace: true }) }), _jsx(Route, { path: "*", element: _jsx(Navigate, { to: "/", replace: true }) })] }) })] }));
 }
 export default function App({ themeMode }) {
     const initialize = useAuthStore((s) => s.initialize);
@@ -175,5 +242,5 @@ export default function App({ themeMode }) {
     if (!isInitialized) {
         return (_jsx(Box, { display: "flex", minHeight: "100vh", alignItems: "center", justifyContent: "center", children: _jsx(CircularProgress, {}) }));
     }
-    return (_jsxs(Routes, { children: [_jsx(Route, { path: "/login", element: user ? _jsx(Navigate, { to: user.must_change_password ? "/force-change-password" : "/", replace: true }) : _jsx(LoginPage, {}) }), _jsx(Route, { path: "/*", element: _jsx(PrivateLayout, { themeMode: themeMode }) })] }));
+    return (_jsxs(_Fragment, { children: [_jsxs(Routes, { children: [_jsx(Route, { path: "/login", element: user ? _jsx(Navigate, { to: user.must_change_password ? "/force-change-password" : "/", replace: true }) : _jsx(LoginPage, {}) }), _jsx(Route, { path: "/*", element: _jsx(PrivateLayout, { themeMode: themeMode }) })] }), _jsx(GlobalToastHost, {})] }));
 }

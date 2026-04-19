@@ -85,6 +85,16 @@ def test_vulnerability_rejects_invalid_cvss_score_tc_vuln_005() -> None:
         )
 
 
+def test_vulnerability_rejects_cvss_31_version() -> None:
+    with pytest.raises(PydanticValidationError):
+        VulnerabilityCreate(
+            host_id="f4d84c05-c8a5-4e5d-9811-43d0883d773c",
+            title="Legacy CVSS",
+            severity="high",
+            cvss_version="3.1",
+        )
+
+
 def test_vulnerability_rejects_invalid_status_patch_tc_vuln_010() -> None:
     with pytest.raises(PydanticValidationError):
         VulnerabilityStatusPatch(status="closed")

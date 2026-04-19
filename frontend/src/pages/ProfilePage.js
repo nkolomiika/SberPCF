@@ -1,10 +1,11 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import PhotoCameraIcon from "@mui/icons-material/PhotoCamera";
-import { Alert, Avatar, Box, Button, Card, CardContent, Chip, Stack, TextField, Typography } from "@mui/material";
+import { Avatar, Box, Button, Card, CardContent, Chip, Stack, TextField, Typography } from "@mui/material";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { changeMyPassword, updateMyProfile, uploadMyAvatar } from "../api";
+import { changeMyPassword, getApiErrorMessage, updateMyProfile, uploadMyAvatar } from "../api";
 import { useAuthStore } from "../store";
+import { useErrorToast, useToastMessage } from "../useErrorToast";
 export function ProfilePage() {
     const user = useAuthStore((s) => s.user);
     const setUser = useAuthStore((s) => s.setUser);
@@ -23,6 +24,8 @@ export function ProfilePage() {
     const [savingProfile, setSavingProfile] = useState(false);
     const [savingPassword, setSavingPassword] = useState(false);
     const [uploadingAvatar, setUploadingAvatar] = useState(false);
+    useErrorToast(error);
+    useToastMessage(infoMessage, "success");
     useEffect(() => {
         if (!user) {
             return;
@@ -53,7 +56,7 @@ export function ProfilePage() {
                                                         setInfoMessage("Аватар обновлён.");
                                                     })
                                                         .catch((uploadError) => {
-                                                        setError(uploadError instanceof Error ? uploadError.message : "Не удалось обновить аватар.");
+                                                        setError(getApiErrorMessage(uploadError, "Не удалось обновить аватар."));
                                                     })
                                                         .finally(() => {
                                                         setUploadingAvatar(false);
@@ -76,7 +79,7 @@ export function ProfilePage() {
                                     setInfoMessage("Профиль обновлён.");
                                 })
                                     .catch((updateError) => {
-                                    setError(updateError instanceof Error ? updateError.message : "Не удалось обновить профиль.");
+                                    setError(getApiErrorMessage(updateError, "Не удалось обновить профиль."));
                                 })
                                     .finally(() => setSavingProfile(false));
                             }, children: savingProfile ? "Сохранение..." : "Сохранить профиль" }) })] }) }) }));
@@ -93,9 +96,9 @@ export function ProfilePage() {
                                     setInfoMessage("Пароль изменён.");
                                 })
                                     .catch((changeError) => {
-                                    setError(changeError instanceof Error ? changeError.message : "Не удалось сменить пароль.");
+                                    setError(getApiErrorMessage(changeError, "Не удалось сменить пароль."));
                                 })
                                     .finally(() => setSavingPassword(false));
                             }, children: savingPassword ? "Смена..." : "Сменить пароль" }) })] }) }) }));
-    return (_jsxs(Stack, { spacing: 2.5, children: [error && _jsx(Alert, { severity: "error", children: error }), infoMessage && _jsx(Alert, { severity: "success", children: infoMessage }), _jsxs(Stack, { spacing: 0.5, children: [_jsx(Typography, { variant: "h4", fontWeight: 700, children: "\u041F\u0440\u043E\u0444\u0438\u043B\u044C" }), _jsx(Typography, { color: "text.secondary", children: "\u041B\u0438\u0447\u043D\u044B\u0435 \u0434\u0430\u043D\u043D\u044B\u0435, \u0444\u043E\u0442\u043E, \u0442\u0435\u0433\u0438 \u0438 \u043F\u0430\u0440\u043E\u043B\u044C." })] }), passwordFirst ? (_jsxs(_Fragment, { children: [passwordSection, profileSection] })) : (_jsxs(_Fragment, { children: [profileSection, passwordSection] }))] }));
+    return (_jsxs(Stack, { spacing: 2.5, children: [_jsxs(Stack, { spacing: 0.5, children: [_jsx(Typography, { variant: "h4", fontWeight: 700, children: "\u041F\u0440\u043E\u0444\u0438\u043B\u044C" }), _jsx(Typography, { color: "text.secondary", children: "\u041B\u0438\u0447\u043D\u044B\u0435 \u0434\u0430\u043D\u043D\u044B\u0435, \u0444\u043E\u0442\u043E, \u0442\u0435\u0433\u0438 \u0438 \u043F\u0430\u0440\u043E\u043B\u044C." })] }), passwordFirst ? (_jsxs(_Fragment, { children: [passwordSection, profileSection] })) : (_jsxs(_Fragment, { children: [profileSection, passwordSection] }))] }));
 }

@@ -14,6 +14,21 @@ interface AuthState {
   refreshUser: () => Promise<User | null>;
 }
 
+type ToastSeverity = "error" | "warning" | "info" | "success";
+
+interface ToastItem {
+  id: number;
+  message: string;
+  severity: ToastSeverity;
+}
+
+interface ToastState {
+  nextId: number;
+  toasts: ToastItem[];
+  pushToast: (message: string, severity?: ToastSeverity) => void;
+  dismissToast: (id: number) => void;
+}
+
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
   isLoading: false,
@@ -56,4 +71,18 @@ export const useAuthStore = create<AuthState>((set) => ({
       return null;
     }
   },
+}));
+
+export const useToastStore = create<ToastState>((set) => ({
+  nextId: 1,
+  toasts: [],
+  pushToast: (message, severity = "error") =>
+    set((state) => ({
+      nextId: state.nextId + 1,
+      toasts: [...state.toasts, { id: state.nextId, message, severity }],
+    })),
+  dismissToast: (id) =>
+    set((state) => ({
+      toasts: state.toasts.filter((toast) => toast.id !== id),
+    })),
 }));

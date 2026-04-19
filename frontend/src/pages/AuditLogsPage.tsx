@@ -7,7 +7,6 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import SearchIcon from "@mui/icons-material/Search";
 import TuneIcon from "@mui/icons-material/Tune";
 import {
-  Alert,
   Box,
   Button,
   Card,
@@ -28,6 +27,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { getApiErrorMessage, getAuditLogs } from "../api";
 import type { AuditLog } from "../types";
+import { useErrorToast } from "../useErrorToast";
 
 const formatDateTime = (value: string) =>
   new Date(value).toLocaleString("ru-RU", {
@@ -77,6 +77,8 @@ export function AuditLogsPage() {
     created_to: searchParams.get("created_to") || "",
   });
   const [draftFilters, setDraftFilters] = useState(filters);
+
+  useErrorToast(error);
 
   const loadLogs = useCallback(async () => {
     setLoading(true);
@@ -234,7 +236,6 @@ export function AuditLogsPage() {
 
   return (
     <Stack spacing={2.5}>
-      {error && <Alert severity="error">{error}</Alert>}
       <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
         <CardContent sx={{ pb: "16px !important" }}>
           <Stack spacing={2}>

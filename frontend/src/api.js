@@ -3,6 +3,41 @@ const api = axios.create({
     baseURL: "/api/v1",
     withCredentials: true,
 });
+const isBlank = (value) => !value || value.trim().length === 0;
+const assertRequired = (value, label) => {
+    if (isBlank(value)) {
+        throw new Error(`Поле "${label}" обязательно`);
+    }
+};
+const normalizeDetailMessage = (detail) => {
+    if (typeof detail === "string" && detail.trim()) {
+        return detail.trim();
+    }
+    if (Array.isArray(detail)) {
+        const messages = detail.map((item) => normalizeDetailMessage(item)).filter((item) => Boolean(item));
+        return messages.length ? messages.join("; ") : null;
+    }
+    if (detail && typeof detail === "object") {
+        if ("detail" in detail) {
+            return normalizeDetailMessage(detail.detail);
+        }
+        if ("message" in detail) {
+            return normalizeDetailMessage(detail.message);
+        }
+    }
+    return null;
+};
+export const getApiErrorMessage = (error, fallback) => {
+    if (axios.isAxiosError(error)) {
+        return (normalizeDetailMessage(error.response?.data) ||
+            normalizeDetailMessage(error.message) ||
+            fallback);
+    }
+    if (error instanceof Error && error.message.trim()) {
+        return error.message;
+    }
+    return fallback;
+};
 let isRefreshing = false;
 let waitingQueue = [];
 api.interceptors.response.use((response) => response, async (error) => {
@@ -33,6 +68,8 @@ api.interceptors.response.use((response) => response, async (error) => {
     return Promise.reject(error);
 });
 export async function login(username, password) {
+    assertRequired(username, "Имя пользователя");
+    assertRequired(password, "Пароль");
     const { data } = await api.post("/auth/login", { username, password });
     return data;
 }
@@ -48,6 +85,8 @@ export async function getUsers(page = 1, size = 200) {
     return data;
 }
 export async function createUser(payload) {
+    assertRequired(payload.username, "Имя пользователя");
+    assertRequired(payload.email, "Email");
     const { data } = await api.post("/users", payload);
     return data;
 }
@@ -67,14 +106,20 @@ export async function updateMyProfile(payload) {
     return data;
 }
 export async function changeMyPassword(payload) {
+    assertRequired(payload.current_password, "Текущий пароль");
+    assertRequired(payload.new_password, "Новый пароль");
     const { data } = await api.patch("/users/me/password", payload);
     return data;
 }
 export async function forceChangePassword(newPassword) {
+    assertRequired(newPassword, "Новый пароль");
     const { data } = await api.post("/auth/force-change-password", { new_password: newPassword });
     return data;
 }
 export async function uploadMyAvatar(file) {
+    if (!file) {
+        throw new Error("Файл аватара обязателен");
+    }
     const formData = new FormData();
     formData.append("avatar", file);
     const { data } = await api.post("/users/me/avatar", formData, {
@@ -91,6 +136,7 @@ export async function getProjectFolders() {
     return data;
 }
 export async function createProjectFolder(payload) {
+    assertRequired(payload.name, "Название папки");
     const { data } = await api.post("/projects/folders", payload);
     return data;
 }
@@ -99,6 +145,7 @@ export async function moveProjectFolder(folderId, payload) {
     return data;
 }
 export async function createProject(payload) {
+    assertRequired(payload.name, "Название проекта");
     const { data } = await api.post("/projects", payload);
     return data;
 }
@@ -115,6 +162,9 @@ export async function getProjectMembers(projectId) {
     return data;
 }
 export async function addProjectMember(projectId, userId) {
+    if (!userId) {
+        throw new Error("Нужно выбрать пользователя");
+    }
     await api.post(`/projects/${projectId}/members`, { user_id: userId });
 }
 export async function removeProjectMember(projectId, userId) {
@@ -130,6 +180,9 @@ export async function getHosts(projectId) {
     return data;
 }
 export async function createHost(projectId, payload) {
+    if (isBlank(payload.ip_address) && isBlank(payload.hostname)) {
+        throw new Error('Нужно указать хотя бы "IP-адрес" или "Hostname"');
+    }
     const { data } = await api.post(`/projects/${projectId}/hosts`, payload);
     return data;
 }
@@ -149,6 +202,9 @@ export async function getPorts(projectId, hostId) {
     return data;
 }
 export async function createPort(projectId, hostId, payload) {
+    if (!Number.isFinite(payload.port_number)) {
+        throw new Error("Порт должен быть числом");
+    }
     const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/ports`, payload);
     return data;
 }
@@ -164,10 +220,14 @@ export async function getServices(projectId, hostId, portId) {
     return data;
 }
 export async function createService(projectId, hostId, portId, payload) {
+    assertRequired(payload.name, "Название сервиса");
     const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`, payload);
     return data;
 }
 export async function updateService(projectId, hostId, portId, serviceId, payload) {
+    if (payload.name !== undefined) {
+        assertRequired(payload.name, "Название сервиса");
+    }
     const { data } = await api.put(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`, payload);
     return data;
 }
@@ -179,10 +239,16 @@ export async function getEndpoints(projectId, hostId) {
     return data;
 }
 export async function createEndpoint(projectId, hostId, payload) {
+    if (isBlank(payload.path) && isBlank(payload.request_raw)) {
+        throw new Error('Нужно указать хотя бы "Путь" или "Raw request"');
+    }
     const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
     return data;
 }
 export async function updateEndpoint(projectId, hostId, endpointId, payload) {
+    if (payload.path !== undefined && isBlank(payload.path) && isBlank(payload.request_raw)) {
+        throw new Error('Нужно указать хотя бы "Путь" или "Raw request"');
+    }
     const { data } = await api.put(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`, payload);
     return data;
 }
@@ -196,10 +262,17 @@ export async function getVulnerabilities(projectId) {
     return data;
 }
 export async function createVulnerability(projectId, payload) {
+    if (!payload.host_id) {
+        throw new Error("Нужно выбрать хост");
+    }
+    assertRequired(payload.title, "Название уязвимости");
     const { data } = await api.post(`/projects/${projectId}/vulnerabilities`, payload);
     return data;
 }
 export async function updateVulnerability(projectId, vulnerabilityId, payload) {
+    if (payload.title !== undefined) {
+        assertRequired(payload.title, "Название уязвимости");
+    }
     const { data } = await api.put(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`, payload);
     return data;
 }
@@ -228,6 +301,9 @@ export async function listVulnerabilityFiles(projectId, vulnerabilityId) {
     return data;
 }
 export async function uploadVulnerabilityFile(projectId, vulnerabilityId, file) {
+    if (!file) {
+        throw new Error("Нужно выбрать файл");
+    }
     const formData = new FormData();
     formData.append("file", file);
     const { data } = await api.post(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`, formData, {
@@ -245,10 +321,12 @@ export async function listVulnerabilityComments(projectId, vulnerabilityId) {
     return data;
 }
 export async function createVulnerabilityComment(projectId, vulnerabilityId, content) {
+    assertRequired(content, "Комментарий");
     const { data } = await api.post(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, { content });
     return data;
 }
 export async function updateVulnerabilityComment(projectId, vulnerabilityId, commentId, content) {
+    assertRequired(content, "Комментарий");
     const { data } = await api.put(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`, { content });
     return data;
 }
@@ -259,6 +337,17 @@ export async function importProjectData(projectId, file) {
     const formData = new FormData();
     formData.append("file", file);
     const { data } = await api.post(`/projects/${projectId}/import`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+    });
+    return data;
+}
+export async function importOpenApiFile(projectId, hostId, file) {
+    if (!file) {
+        throw new Error("Нужно выбрать Swagger/OpenAPI файл");
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    const { data } = await api.post(`/projects/${projectId}/hosts/${hostId}/import-openapi`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
     });
     return data;
@@ -277,6 +366,9 @@ export async function listNotifications() {
 export async function unreadCount() {
     const { data } = await api.get("/notifications/unread-count");
     return data.count;
+}
+export async function markNotificationRead(notificationId) {
+    await api.patch(`/notifications/${notificationId}/read`);
 }
 export async function getAuditLogs(page = 1, size = 50, filters) {
     const { data } = await api.get("/audit-logs", {

@@ -1,7 +1,8 @@
-import { Alert, Box, Button, Paper, Stack, TextField, Typography } from "@mui/material";
+import { Box, Button, Paper, Stack, TextField, Typography } from "@mui/material";
 import { type FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuthStore } from "../store";
+import { useErrorToast } from "../useErrorToast";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -10,6 +11,8 @@ export function LoginPage() {
   const error = useAuthStore((s) => s.error);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+
+  useErrorToast(error);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -37,7 +40,6 @@ export function LoginPage() {
           Вход в PCF
         </Typography>
         <Stack component="form" spacing={2} onSubmit={handleSubmit}>
-          {error && <Alert severity="error">{error}</Alert>}
           <TextField label="Логин" value={username} onChange={(e) => setUsername(e.target.value)} required />
           <TextField
             label="Пароль"

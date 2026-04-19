@@ -9,7 +9,6 @@ import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import {
   Checkbox,
-  Alert,
   Box,
   Button,
   Chip,
@@ -47,6 +46,7 @@ import {
 import { PROJECT_STATUS_CHIP_SX, PROJECT_STATUS_LABELS, PROJECT_STATUS_ORDER } from "../projectStatus";
 import { useAuthStore } from "../store";
 import type { Project, ProjectFolder, ProjectStatus, User } from "../types";
+import { useErrorToast } from "../useErrorToast";
 
 const DEFAULT_PROJECT_DURATION_DAYS = 14;
 const ROOT_FOLDER_LABEL = "Корень";
@@ -126,6 +126,8 @@ export function ProjectsPage() {
   const autoScrollVelocityRef = useRef(0);
   const autoExpandTimerRef = useRef<number | null>(null);
   const autoExpandTargetRef = useRef<string | null>(null);
+
+  useErrorToast(error);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -994,8 +996,6 @@ export function ProjectsPage() {
           Создать папку внутри
         </MenuItem>
       </Menu>
-
-      {error && <Alert severity="error">{error}</Alert>}
 
       <Box
         sx={{
