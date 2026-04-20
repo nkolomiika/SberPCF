@@ -6,6 +6,7 @@ import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 from urllib.parse import parse_qsl, urlparse, urlsplit
 from uuid import UUID, uuid4
 from xml.sax.saxutils import escape
@@ -72,6 +73,24 @@ from app.storage.minio_client import MinioStorage
 from app.ws_manager import ws_manager
 
 settings = get_settings()
+DEBUG_LOG_PATH = Path("/workspace/debug-755228.log")
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    payload = {
+        "sessionId": "755228",
+        "runId": "workflow-title-debug",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(datetime.now(UTC).timestamp() * 1000),
+    }
+    try:
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 MENTION_RE = re.compile(r"@([a-zA-Z0-9_.-]{1,100})")
 MAX_FILE_SIZE = 50 * 1024 * 1024
 MAX_OPENAPI_IMPORT_BYTES = 2 * 1024 * 1024
@@ -1282,7 +1301,6 @@ class VulnerabilityService:
             hydrated_steps = [
                 {
                     "id": str(uuid4()),
-                    "title": "Этап 1",
                     "description": vuln.steps_to_reproduce,
                     "image_file_ids": [],
                 }
@@ -1297,24 +1315,46 @@ class VulnerabilityService:
     @staticmethod
     def _normalize_workflow_steps(steps: list[dict] | None) -> list[dict]:
         normalized: list[dict] = []
-        for raw_step in steps or []:
-            title = str(raw_step.get("title", "")).strip()
+        raw_steps = steps or []
+        # #region agent log
+        _debug_log(
+            "H3",
+            "backend/app/services.py:_normalize_workflow_steps:start",
+            "Normalizing workflow steps",
+            {
+                "raw_count": len(raw_steps),
+                "raw_with_legacy_title_count": sum(1 for step in raw_steps if str(step.get("title", "")).strip()),
+                "raw_has_description_count": sum(1 for step in raw_steps if str(step.get("description", "")).strip()),
+            },
+        )
+        # #endregion
+        for raw_step in raw_steps:
             description = str(raw_step.get("description", "")).strip()
             endpoint_request_raw = str(raw_step.get("endpoint_request_raw", "")).strip()
             endpoint_id = raw_step.get("endpoint_id")
             image_file_ids = [str(file_id) for file_id in raw_step.get("image_file_ids", []) if file_id]
-            if not title and not description and not image_file_ids and not endpoint_id and not endpoint_request_raw:
+            if not description and not image_file_ids and not endpoint_id and not endpoint_request_raw:
                 continue
             normalized.append(
                 {
                     "id": str(raw_step.get("id") or uuid4()),
-                    "title": title or "Этап",
                     "description": description or None,
                     "image_file_ids": image_file_ids,
                     "endpoint_id": str(endpoint_id) if endpoint_id else None,
                     "endpoint_request_raw": endpoint_request_raw or None,
                 }
             )
+        # #region agent log
+        _debug_log(
+            "H3",
+            "backend/app/services.py:_normalize_workflow_steps:end",
+            "Workflow steps normalized",
+            {
+                "normalized_count": len(normalized),
+                "normalized_with_title_count": sum(1 for step in normalized if str(step.get("title", "")).strip()),
+            },
+        )
+        # #endregion
         return normalized
 
     @staticmethod
@@ -1323,9 +1363,8 @@ class VulnerabilityService:
             return None
         blocks: list[str] = []
         for index, step in enumerate(steps, start=1):
-            title = str(step.get("title", "")).strip() or f"Этап {index}"
             description = str(step.get("description", "")).strip()
-            block = f"{index}. {title}"
+            block = f"{index}. Этап {index}"
             if description:
                 block = f"{block}\n{description}"
             if step.get("endpoint_id") or step.get("endpoint_request_raw"):
