@@ -6,6 +6,8 @@ import { unreadCount } from "./api";
 
 const initialize = vi.fn();
 const signOut = vi.fn();
+const pushToast = vi.fn();
+const dismissToast = vi.fn();
 const authState: {
   user: User | null;
   isInitialized: boolean;
@@ -18,8 +20,15 @@ const authState: {
   signOut,
 };
 
+const toastState = {
+  toasts: [] as Array<{ id: string; message: string; severity: "success" | "error" | "info" | "warning" }>,
+  pushToast,
+  dismissToast,
+};
+
 vi.mock("./store", () => ({
   useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
+  useToastStore: (selector: (state: typeof toastState) => unknown) => selector(toastState),
 }));
 
 vi.mock("./api", () => ({
@@ -69,6 +78,9 @@ describe("App routing", () => {
     authState.isInitialized = true;
     initialize.mockReset();
     signOut.mockReset();
+    pushToast.mockReset();
+    dismissToast.mockReset();
+    toastState.toasts = [];
     vi.stubGlobal("WebSocket", WebSocketMock);
   });
 

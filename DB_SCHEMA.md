@@ -86,16 +86,41 @@ erDiagram
 
 ---
 
+### `mail_jobs` — Очередь отправки email
+
+| Колонка         | Тип           | Ограничения                          | Описание                                  |
+|-----------------|---------------|--------------------------------------|-------------------------------------------|
+| id              | UUID          | PK                                   | Первичный ключ                             |
+| user_id         | UUID          | NULLABLE, FK → users.id              | Получатель (если связан с пользователем)   |
+| created_by      | UUID          | NULLABLE, FK → users.id              | Кто инициировал отправку                   |
+| recipient_email | VARCHAR(255)  | NOT NULL                             | Email адрес получателя                     |
+| subject         | VARCHAR(255)  | NOT NULL                             | Тема письма                                |
+| template        | VARCHAR(100)  | NOT NULL                             | Имя шаблона/типа письма                    |
+| payload         | JSON          | NOT NULL                             | Параметры письма                           |
+| status          | VARCHAR(32)   | NOT NULL, DEFAULT 'pending'          | Статус задания (`pending`/`queued`/`processing`/`sent`/`failed`) |
+| attempts        | INTEGER       | NOT NULL, DEFAULT 0                  | Количество попыток отправки                |
+| published_at    | TIMESTAMPTZ   | NULLABLE                             | Время публикации в очередь                 |
+| sent_at         | TIMESTAMPTZ   | NULLABLE                             | Время успешной отправки                    |
+| last_error      | TEXT          | NULLABLE                             | Последняя ошибка отправки                  |
+| created_at      | TIMESTAMPTZ   | NOT NULL, DEFAULT now()              | Дата создания                              |
+| updated_at      | TIMESTAMPTZ   | NOT NULL, DEFAULT now()              | Дата последнего изменения                  |
+
+**Индексы:** `recipient_email`, `template`, `status`
+
+---
+
 ### `projects` — Пентест-проекты
 
 | Колонка     | Тип          | Ограничения                   | Описание                      |
 |-------------|--------------|-------------------------------|-------------------------------|
 | id          | UUID         | PK                            | Первичный ключ                |
 | name        | VARCHAR(255) | NOT NULL                      | Название проекта              |
+| folder      | VARCHAR(255) | NOT NULL, DEFAULT ''          | Папка/группа проекта в интерфейсе |
 | description | TEXT         | NULLABLE                      | Описание                      |
 | start_date  | DATE         | NULLABLE                      | Дата начала                   |
 | end_date    | DATE         | NULLABLE                      | Дата окончания                |
-| status      | ENUM('active','completed','archived') | NOT NULL, DEFAULT 'active' | Статус    |
+| timeline_frozen_at | TIMESTAMPTZ | NULLABLE                | Время фиксации таймлайна проекта |
+| status      | ENUM('active','handover_to_development','vulnerability_recheck','completed','archived') | NOT NULL, DEFAULT 'active' | Статус    |
 | created_by  | UUID         | NOT NULL, FK → users.id       | Кто создал                    |
 | created_at  | TIMESTAMPTZ  | NOT NULL, DEFAULT now()       | Дата создания                 |
 | updated_at  | TIMESTAMPTZ  | NOT NULL, DEFAULT now()       | Дата последнего изменения     |
@@ -195,7 +220,7 @@ erDiagram
 | cvss_vector          | VARCHAR(255)                                                   | NULLABLE                       | Векторная строка CVSS                 |
 | cwe_id               | VARCHAR(20)                                                    | NULLABLE                       | Идентификатор CWE (например, CWE-89)  |
 | status               | ENUM('open','in_progress','fixed','wont_fix','accepted_risk') | NOT NULL, DEFAULT 'open'       | Статус уязвимости                     |
-| workflow_steps       | JSON                                                           | NULLABLE                       | Структурированные этапы воспроизведения с `title`, `description`, `image_file_ids`; `image_file_ids` валидируются приложением и должны ссылаться только на `files` этой же уязвимости |
+| workflow_steps       | JSON                                                           | NULLABLE                       | Структурированные этапы воспроизведения; у каждого этапа обязателен непустой `title`, `description` опционален, `image_file_ids` валидируются приложением и должны ссылаться только на `files` этой же уязвимости |
 | steps_to_reproduce   | TEXT                                                           | NULLABLE                       | Шаги воспроизведения                  |
 | impact               | TEXT                                                           | NULLABLE                       | Описание влияния                      |
 | recommendations      | TEXT                                                           | NULLABLE                       | Рекомендации по устранению            |
@@ -324,11 +349,13 @@ Vulnerability ──► vulnerability_assets (asset_type + asset_id)
 
 ### Проекта (`projects.status`)
 
-| Значение  | Описание         |
-|-----------|------------------|
-| active    | Активный проект  |
-| completed | Завершён         |
-| archived  | В архиве         |
+| Значение                    | Описание                                  |
+|----------------------------|--------------------------------------------|
+| active                     | Активный проект                            |
+| handover_to_development    | Передача результатов разработке             |
+| vulnerability_recheck      | Повторная проверка после исправлений        |
+| completed                  | Завершён                                   |
+| archived                   | В архиве                                   |
 
 ---
 
@@ -360,7 +387,7 @@ Vulnerability ──► vulnerability_assets (asset_type + asset_id)
 }
 ```
 
-WebSocket-подключение авторизуется access-токеном. Клиент подписывается на комнату конкретного проекта.
+WebSocket-подключение авторизуется `access_token` из httpOnly cookie в handshake-запросе. Клиент подписывается на комнату конкретного проекта.
 
 ---
 

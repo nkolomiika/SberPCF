@@ -50,9 +50,12 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = False
+    smtp_use_ssl: bool = False
+    smtp_timeout_seconds: float = 20.0
     smtp_from_email: str = "noreply@example.com"
     smtp_from_name: str = "PCF"
     mail_preview_url: str | None = "http://localhost:8025"
+    mail_max_attempts: int = 5
 
     @field_validator("jwt_secret_key")
     @classmethod

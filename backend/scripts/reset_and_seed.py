@@ -46,17 +46,22 @@ DEMO_PNG_BYTES = base64.b64decode(
 )
 
 
-async def reset_schema() -> None:
+async def ensure_schema() -> None:
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
 
-def reset_minio() -> None:
+def reset_minio(minio_keys: list[str]) -> None:
+    if not minio_keys:
+        return
     storage = MinioStorage()
     storage.ensure_bucket()
-    for item in storage.client.list_objects(storage.bucket, recursive=True):
-        storage.client.remove_object(storage.bucket, item.object_name)
+    for object_key in minio_keys:
+        try:
+            storage.client.remove_object(storage.bucket, object_key)
+        except Exception:
+            # Объект может отсутствовать в MinIO (например, был удалён вручную).
+            pass
 
 
 async def reset_clickhouse() -> None:
@@ -89,18 +94,52 @@ async def create_users() -> dict[str, User]:
             ("eve", "eve@example.com", UserRole.DEVELOPER),
         ]
         for username, email, role in demo_users:
-            user = User(
-                username=username,
-                email=email,
-                password_hash=hash_password("admin"),
-                role=role,
-                is_active=True,
-            )
-            db.add(user)
-            await db.flush()
+            user = await db.scalar(select(User).where(User.username == username))
+            if not user:
+                user = await db.scalar(select(User).where(User.email == email))
+            if not user:
+                user = User(
+                    username=username,
+                    email=email,
+                    password_hash=hash_password("admin"),
+                    role=role,
+                    is_active=True,
+                )
+                db.add(user)
+                await db.flush()
             users[username] = user
         await db.commit()
     return users
+
+
+async def clear_domain_data_preserve_users() -> list[str]:
+    async with SessionLocal() as db:
+        minio_keys = list((await db.scalars(select(File.minio_key).where(File.minio_key.is_not(None)))).all())
+        await db.execute(
+            text(
+                """
+                TRUNCATE TABLE
+                    comment_mentions,
+                    notifications,
+                    comments,
+                    vulnerability_assets,
+                    files,
+                    vulnerabilities,
+                    services,
+                    ports,
+                    endpoints,
+                    hosts,
+                    project_members,
+                    projects,
+                    project_folders,
+                    mail_jobs,
+                    audit_logs
+                RESTART IDENTITY CASCADE
+                """
+            )
+        )
+        await db.commit()
+    return minio_keys
 
 
 async def seed_demo_data() -> None:
@@ -351,11 +390,12 @@ async def seed_demo_data() -> None:
 
 
 async def main() -> None:
-    reset_minio()
+    await ensure_schema()
+    minio_keys = await clear_domain_data_preserve_users()
+    reset_minio(minio_keys)
     await reset_clickhouse()
-    await reset_schema()
     await seed_demo_data()
-    print("Database reset complete. Seeded admin/admin plus demo users, folders, projects, hosts, ports, services, endpoints, vulnerabilities, files, comments, notifications and audit logs.")
+    print("Database reseed complete. Existing users were preserved; demo data for projects/assets/vulnerabilities was refreshed.")
 
 
 if __name__ == "__main__":

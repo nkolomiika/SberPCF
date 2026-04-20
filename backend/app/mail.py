@@ -25,11 +25,17 @@ async def send_plain_text_email(*, recipient_email: str, subject: str, body: str
     message["To"] = recipient_email
     message["Subject"] = subject
     message.set_content(body, charset="utf-8")
+    # For port 465 use implicit TLS (use_tls=True, start_tls=False).
+    # For STARTTLS-enabled servers (e.g. 587), use start_tls=True.
+    use_tls = bool(settings.smtp_use_ssl)
+    start_tls = bool(settings.smtp_use_tls) and not use_tls
     await aiosmtplib.send(
         message,
         hostname=settings.smtp_host,
         port=settings.smtp_port,
         username=settings.smtp_username or None,
         password=settings.smtp_password or None,
-        start_tls=settings.smtp_use_tls,
+        use_tls=use_tls,
+        start_tls=start_tls,
+        timeout=settings.smtp_timeout_seconds,
     )

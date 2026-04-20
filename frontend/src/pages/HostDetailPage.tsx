@@ -42,9 +42,10 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { MarkdownOutlinedReadonlyField } from "../components/MarkdownOutlinedReadonlyField";
 import {
   createHost,
   createVulnerabilityComment,
@@ -534,13 +535,11 @@ export function HostDetailPage() {
   const [createServicePortId, setCreateServicePortId] = useState<string | null>(null);
   const [creatingServiceName, setCreatingServiceName] = useState("");
   const [creatingServiceVersion, setCreatingServiceVersion] = useState("");
-  const [creatingServiceBanner, setCreatingServiceBanner] = useState("");
   const [isEditServiceOpen, setEditServiceOpen] = useState(false);
   const [editServicePortId, setEditServicePortId] = useState<string | null>(null);
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
   const [editingServiceName, setEditingServiceName] = useState("");
   const [editingServiceVersion, setEditingServiceVersion] = useState("");
-  const [editingServiceBanner, setEditingServiceBanner] = useState("");
   const [isEditEndpointOpen, setEditEndpointOpen] = useState(false);
   const [editingEndpointId, setEditingEndpointId] = useState<string | null>(null);
   const [editingEndpointPath, setEditingEndpointPath] = useState("");
@@ -594,16 +593,27 @@ export function HostDetailPage() {
   const [editingHostNotes, setEditingHostNotes] = useState("");
   const [portActionsAnchorEl, setPortActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activePort, setActivePort] = useState<Port | null>(null);
-  const [serviceActionsAnchorEl, setServiceActionsAnchorEl] = useState<HTMLElement | null>(null);
-  const [activeService, setActiveService] = useState<Service | null>(null);
-  const [activeServicePortId, setActiveServicePortId] = useState<string | null>(null);
+  const [portsSectionMenuAnchorEl, setPortsSectionMenuAnchorEl] = useState<HTMLElement | null>(null);
+  const portsSectionMenuOpen = Boolean(portsSectionMenuAnchorEl);
+  const closePortsSectionMenu = () => setPortsSectionMenuAnchorEl(null);
+  const nmapImportInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedPortIds, setSelectedPortIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeletingPorts, setBulkDeletingPorts] = useState(false);
+  const [portBulkDeleteMode, setPortBulkDeleteMode] = useState(false);
+  const [serviceBulkDeletePortId, setServiceBulkDeletePortId] = useState<string | null>(null);
+  const [selectedServiceIdsForDelete, setSelectedServiceIdsForDelete] = useState<Set<string>>(() => new Set());
+  const [bulkDeletingServices, setBulkDeletingServices] = useState(false);
   const [endpointActionsAnchorEl, setEndpointActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activeEndpoint, setActiveEndpoint] = useState<Endpoint | null>(null);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(() => new Set());
   const [bulkDeletingEndpoints, setBulkDeletingEndpoints] = useState(false);
   const [endpointBulkDeleteMode, setEndpointBulkDeleteMode] = useState(false);
-  const [vulnerabilityActionsAnchorEl, setVulnerabilityActionsAnchorEl] = useState<HTMLElement | null>(null);
-  const [activeVulnerability, setActiveVulnerability] = useState<Vulnerability | null>(null);
+  const [vulnerabilitiesSectionMenuAnchorEl, setVulnerabilitiesSectionMenuAnchorEl] = useState<HTMLElement | null>(null);
+  const vulnerabilitiesSectionMenuOpen = Boolean(vulnerabilitiesSectionMenuAnchorEl);
+  const closeVulnerabilitiesSectionMenu = () => setVulnerabilitiesSectionMenuAnchorEl(null);
+  const [selectedVulnerabilityIds, setSelectedVulnerabilityIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeletingVulnerabilities, setBulkDeletingVulnerabilities] = useState(false);
+  const [vulnerabilityBulkDeleteMode, setVulnerabilityBulkDeleteMode] = useState(false);
   const [expandedPortIds, setExpandedPortIds] = useState<string[]>([]);
   const [expandedEndpointIds, setExpandedEndpointIds] = useState<string[]>([]);
   const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<string[]>([]);
@@ -627,15 +637,44 @@ export function HostDetailPage() {
   }, [normalizedHostEndpoints]);
 
   useEffect(() => {
+    setSelectedVulnerabilityIds((prev) => {
+      const valid = new Set(vulnerabilities.map((v) => v.id));
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (valid.has(id)) {
+          next.add(id);
+        }
+      });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [vulnerabilities]);
+
+  useEffect(() => {
     if (selectedSection !== "endpoints") {
       setEndpointBulkDeleteMode(false);
       setSelectedEndpointIds(new Set());
+    }
+    if (selectedSection !== "ports") {
+      setPortBulkDeleteMode(false);
+      setSelectedPortIds(new Set());
+      setServiceBulkDeletePortId(null);
+      setSelectedServiceIdsForDelete(new Set());
+    }
+    if (selectedSection !== "vulns") {
+      setVulnerabilityBulkDeleteMode(false);
+      setSelectedVulnerabilityIds(new Set());
     }
   }, [selectedSection]);
 
   useEffect(() => {
     setEndpointBulkDeleteMode(false);
     setSelectedEndpointIds(new Set());
+    setPortBulkDeleteMode(false);
+    setSelectedPortIds(new Set());
+    setServiceBulkDeletePortId(null);
+    setSelectedServiceIdsForDelete(new Set());
+    setVulnerabilityBulkDeleteMode(false);
+    setSelectedVulnerabilityIds(new Set());
   }, [hostId]);
 
   useEffect(() => {
@@ -827,7 +866,9 @@ export function HostDetailPage() {
         setLoading(false);
       }
     }
-  }, [hostId, location.pathname, projectId, selectedSection]);
+    // Host payload does not depend on sidebar section or vulnerability deep-link path; including those
+    // values forced a full reload + loading screen on every section switch.
+  }, [hostId, projectId]);
 
   const applyRemovedEndpointsLocally = useCallback(
     (removedIds: Set<string>) => {
@@ -936,9 +977,7 @@ export function HostDetailPage() {
 
   const hostActionsOpen = Boolean(hostActionsAnchorEl);
   const portActionsOpen = Boolean(portActionsAnchorEl);
-  const serviceActionsOpen = Boolean(serviceActionsAnchorEl);
   const endpointActionsOpen = Boolean(endpointActionsAnchorEl);
-  const vulnerabilityActionsOpen = Boolean(vulnerabilityActionsAnchorEl);
 
   const openHostActionsMenu = (event: React.MouseEvent<HTMLElement>) => {
     setHostActionsAnchorEl(event.currentTarget);
@@ -957,19 +996,6 @@ export function HostDetailPage() {
   const closePortActions = () => {
     setPortActionsAnchorEl(null);
     setActivePort(null);
-  };
-
-  const openServiceActions = (event: React.MouseEvent<HTMLElement>, portId: string, service: Service) => {
-    event.stopPropagation();
-    setServiceActionsAnchorEl(event.currentTarget);
-    setActiveService(service);
-    setActiveServicePortId(portId);
-  };
-
-  const closeServiceActions = () => {
-    setServiceActionsAnchorEl(null);
-    setActiveService(null);
-    setActiveServicePortId(null);
   };
 
   const openHostEdit = () => {
@@ -1031,17 +1057,6 @@ export function HostDetailPage() {
   const closeEndpointActions = () => {
     setEndpointActionsAnchorEl(null);
     setActiveEndpoint(null);
-  };
-
-  const openVulnerabilityActions = (event: React.MouseEvent<HTMLElement>, vulnerability: Vulnerability) => {
-    event.stopPropagation();
-    setVulnerabilityActionsAnchorEl(event.currentTarget);
-    setActiveVulnerability(vulnerability);
-  };
-
-  const closeVulnerabilityActions = () => {
-    setVulnerabilityActionsAnchorEl(null);
-    setActiveVulnerability(null);
   };
 
   const toggleExpandedId = (id: string, setExpanded: React.Dispatch<React.SetStateAction<string[]>>) => {
@@ -1134,17 +1149,6 @@ export function HostDetailPage() {
       state: editingPortState,
     });
     setEditPortOpen(false);
-    await loadHost();
-  };
-
-  const removePort = async (portId: string) => {
-    if (!projectId || !hostId) {
-      return;
-    }
-    if (!window.confirm("Удалить порт?")) {
-      return;
-    }
-    await deletePort(projectId, hostId, portId);
     await loadHost();
   };
 
@@ -1285,7 +1289,6 @@ export function HostDetailPage() {
     setCreateServicePortId(portId);
     setCreatingServiceName("");
     setCreatingServiceVersion("");
-    setCreatingServiceBanner("");
     setCreateServiceOpen(true);
   };
 
@@ -1296,7 +1299,6 @@ export function HostDetailPage() {
     await createService(projectId, hostId, createServicePortId, {
       name: creatingServiceName.trim(),
       version: creatingServiceVersion.trim() || undefined,
-      banner: creatingServiceBanner.trim() || undefined,
     });
     setCreateServiceOpen(false);
     await loadHost();
@@ -1307,8 +1309,52 @@ export function HostDetailPage() {
     setEditingServiceId(service.id);
     setEditingServiceName(service.name);
     setEditingServiceVersion(service.version || "");
-    setEditingServiceBanner(service.banner || "");
     setEditServiceOpen(true);
+  };
+
+  const cancelServiceBulkDelete = () => {
+    setServiceBulkDeletePortId(null);
+    setSelectedServiceIdsForDelete(new Set());
+  };
+
+  const toggleServiceSelectionForDelete = (serviceId: string) => {
+    setSelectedServiceIdsForDelete((prev) => {
+      const next = new Set(prev);
+      if (next.has(serviceId)) {
+        next.delete(serviceId);
+      } else {
+        next.add(serviceId);
+      }
+      return next;
+    });
+  };
+
+  const removeSelectedServicesFromPort = async (portId: string) => {
+    if (!projectId || !hostId || selectedServiceIdsForDelete.size === 0) {
+      return;
+    }
+    if (!window.confirm(`Удалить выбранные сервисы (${selectedServiceIdsForDelete.size})?`)) {
+      return;
+    }
+    setBulkDeletingServices(true);
+    setError(null);
+    const failures: string[] = [];
+    try {
+      for (const serviceId of Array.from(selectedServiceIdsForDelete)) {
+        try {
+          await deleteService(projectId, hostId, portId, serviceId);
+        } catch (deleteError) {
+          failures.push(getApiErrorMessage(deleteError, "Не удалось удалить сервис."));
+        }
+      }
+      cancelServiceBulkDelete();
+      await loadHost();
+      if (failures.length) {
+        setError(failures.join("\n"));
+      }
+    } finally {
+      setBulkDeletingServices(false);
+    }
   };
 
   const saveServiceEdit = async () => {
@@ -1318,20 +1364,8 @@ export function HostDetailPage() {
     await updateService(projectId, hostId, editServicePortId, editingServiceId, {
       name: editingServiceName.trim() || undefined,
       version: editingServiceVersion.trim() || undefined,
-      banner: editingServiceBanner.trim() || undefined,
     });
     setEditServiceOpen(false);
-    await loadHost();
-  };
-
-  const removeService = async (portId: string, serviceId: string) => {
-    if (!projectId || !hostId) {
-      return;
-    }
-    if (!window.confirm("Удалить сервис?")) {
-      return;
-    }
-    await deleteService(projectId, hostId, portId, serviceId);
     await loadHost();
   };
 
@@ -1818,55 +1852,145 @@ export function HostDetailPage() {
     await loadHost();
   };
 
-  const removeVulnerability = async (vulnerabilityId: string) => {
-    if (!projectId) {
+  const toggleVulnerabilitySelection = useCallback((vulnerabilityId: string) => {
+    setSelectedVulnerabilityIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(vulnerabilityId)) {
+        next.delete(vulnerabilityId);
+      } else {
+        next.add(vulnerabilityId);
+      }
+      return next;
+    });
+  }, []);
+
+  const removeSelectedVulnerabilities = async () => {
+    if (!projectId || selectedVulnerabilityIds.size === 0) {
       return;
     }
-    if (!window.confirm("Удалить уязвимость?")) {
+    if (!window.confirm(`Удалить выбранные уязвимости (${selectedVulnerabilityIds.size})?`)) {
       return;
     }
-    await deleteVulnerability(projectId, vulnerabilityId);
-    await loadHost();
+    setBulkDeletingVulnerabilities(true);
+    setError(null);
+    const failures: string[] = [];
+    try {
+      for (const vulnerabilityId of Array.from(selectedVulnerabilityIds)) {
+        try {
+          await deleteVulnerability(projectId, vulnerabilityId);
+        } catch (deleteError) {
+          failures.push(getApiErrorMessage(deleteError, "Не удалось удалить уязвимость."));
+        }
+      }
+      setSelectedVulnerabilityIds(new Set());
+      setVulnerabilityBulkDeleteMode(false);
+      await loadHost();
+      if (failures.length) {
+        setError(failures.join("\n"));
+      } else {
+        setInfoMessage("Выбранные уязвимости удалены.");
+      }
+    } finally {
+      setBulkDeletingVulnerabilities(false);
+    }
   };
 
   const createHostVulnerability = async () => {
-    if (!projectId || !hostId) {
+    if (!projectId || !hostId || !creatingVulnerabilityTitle.trim()) {
       return;
     }
-    const created = await createVulnerability(projectId, {
-      host_id: hostId,
-      title: creatingVulnerabilityTitle.trim(),
-      description: null,
-      severity: severityFromCvssScore(
-        creatingVulnerabilityCvssScore === "" ? null : Number(creatingVulnerabilityCvssScore),
-        creatingVulnerabilitySeverity
-      ),
-      status: creatingVulnerabilityStatus,
-      cvss_version: creatingVulnerabilityCvssVector.trim() ? CVSS_VERSION : null,
-      cvss_score: creatingVulnerabilityCvssScore === "" ? null : Number(creatingVulnerabilityCvssScore),
-      cvss_vector: creatingVulnerabilityCvssVector.trim() || null,
-      cwe_id: creatingVulnerabilityCweId.trim() || null,
-      workflow_steps: creatingVulnerabilityStages,
-      impact: creatingVulnerabilityImpact.trim() || null,
-      recommendations: creatingVulnerabilityRecommendations.trim() || null,
-    });
-    setCreateVulnerabilityOpen(false);
-    setCreatingVulnerabilityTitle("");
-    setCreatingVulnerabilitySeverity("info");
-    setCreatingVulnerabilityStatus("open");
-    setCreatingVulnerabilityCvssScore("");
-    setCreatingVulnerabilityCvssVector("");
-    setCreatingVulnerabilityCweId("");
-    setCreatingVulnerabilityStages([]);
-    setCreatingVulnerabilityImpact("");
-    setCreatingVulnerabilityRecommendations("");
-    await loadHost();
-    if (isVulnerabilityRoute) {
-      navigate(`/projects/${projectId}/hosts/${hostId}/vulnerabilities/${created.id}`, { replace: true, state: { section: "vulns" } });
+    setError(null);
+    try {
+      const created = await createVulnerability(projectId, {
+        host_id: hostId,
+        title: creatingVulnerabilityTitle.trim(),
+        description: null,
+        severity: "info",
+        status: "open",
+        cvss_version: null,
+        cvss_score: null,
+        cvss_vector: null,
+        cwe_id: null,
+        workflow_steps: [],
+        impact: null,
+        recommendations: null,
+        steps_to_reproduce: null,
+      });
+      setCreateVulnerabilityOpen(false);
+      setCreatingVulnerabilityTitle("");
+      setCreatingVulnerabilitySeverity("info");
+      setCreatingVulnerabilityStatus("open");
+      setCreatingVulnerabilityCvssScore("");
+      setCreatingVulnerabilityCvssVector("");
+      setCreatingVulnerabilityCweId("");
+      setCreatingVulnerabilityStages([]);
+      setCreatingVulnerabilityImpact("");
+      setCreatingVulnerabilityRecommendations("");
+      navigate(`/projects/${projectId}/hosts/${hostId}/vulnerabilities/${created.id}`, {
+        replace: true,
+        state: { section: "vulns", startVulnEdit: true },
+      });
+      void loadHost();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось создать уязвимость."));
     }
   };
 
-  const hostServices = useMemo(() => Object.values(servicesByPortId).flat(), [servicesByPortId]);
+  useEffect(() => {
+    setSelectedPortIds((prev) => {
+      const valid = new Set((host?.ports ?? []).map((p) => p.id));
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (valid.has(id)) {
+          next.add(id);
+        }
+      });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [host?.ports]);
+
+  const togglePortSelection = useCallback((portId: string) => {
+    setSelectedPortIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(portId)) {
+        next.delete(portId);
+      } else {
+        next.add(portId);
+      }
+      return next;
+    });
+  }, []);
+
+  const removeSelectedPorts = async () => {
+    if (!projectId || !hostId || selectedPortIds.size === 0) {
+      return;
+    }
+    if (!window.confirm(`Удалить выбранные порты (${selectedPortIds.size})?`)) {
+      return;
+    }
+    setBulkDeletingPorts(true);
+    setError(null);
+    const failures: string[] = [];
+    try {
+      for (const portId of Array.from(selectedPortIds)) {
+        try {
+          await deletePort(projectId, hostId, portId);
+        } catch (deleteError) {
+          failures.push(getApiErrorMessage(deleteError, "Не удалось удалить порт."));
+        }
+      }
+      setSelectedPortIds(new Set());
+      setPortBulkDeleteMode(false);
+      await loadHost();
+      if (failures.length) {
+        setError(failures.join("\n"));
+      } else {
+        setInfoMessage("Выбранные порты удалены.");
+      }
+    } finally {
+      setBulkDeletingPorts(false);
+    }
+  };
 
   const buildAutoCvssFields = (vector: string | null) => {
     const normalizedVersion = vector?.trim() ? CVSS_VERSION : null;
@@ -1879,43 +2003,73 @@ export function HostDetailPage() {
     };
   };
 
-  const loadVulnerabilityDetails = useCallback(async (vulnerabilityId: string) => {
-    if (!projectId) {
-      return;
-    }
-    setVulnBusy(true);
-    setError(null);
-    try {
-      const [vulnDetail, commentsPage] = await Promise.all([
-        getVulnerability(projectId, vulnerabilityId),
-        listVulnerabilityComments(projectId, vulnerabilityId),
-      ]);
-      setActiveVulnDetails(vulnDetail);
-      setVulnComments(commentsPage.items);
-      setVulnEditMode(false);
-      setVulnDetailOpen(true);
-    } catch (error) {
-      setError(getApiErrorMessage(error, "Не удалось загрузить карточку уязвимости."));
-    } finally {
-      setVulnBusy(false);
-    }
-  }, [hostId, projectId]);
+  const loadVulnerabilityDetails = useCallback(
+    async (vulnerabilityId: string, options?: { startVulnEdit?: boolean }) => {
+      if (!projectId) {
+        return;
+      }
+      setVulnBusy(true);
+      setError(null);
+      try {
+        const [vulnDetail, commentsPage] = await Promise.all([
+          getVulnerability(projectId, vulnerabilityId),
+          listVulnerabilityComments(projectId, vulnerabilityId),
+        ]);
+        setActiveVulnDetails(vulnDetail);
+        setVulnComments(commentsPage.items);
+        if (options?.startVulnEdit) {
+          setVulnEditMode(true);
+          navigate(".", { replace: true, state: { section: "vulns" } });
+        }
+        setVulnDetailOpen(true);
+      } catch (error) {
+        setError(getApiErrorMessage(error, "Не удалось загрузить карточку уязвимости."));
+      } finally {
+        setVulnBusy(false);
+      }
+    },
+    [projectId, navigate],
+  );
 
   useEffect(() => {
     if (!vulnerabilityId) {
       setVulnDetailOpen(false);
       setActiveVulnDetails(null);
       setVulnComments([]);
+      setVulnEditMode(false);
       return;
     }
     setSelectedSection("vulns");
-    void loadVulnerabilityDetails(vulnerabilityId);
+    const st = location.state as { startVulnEdit?: boolean } | null;
+    const shouldStartEdit = Boolean(st?.startVulnEdit);
+    if (!shouldStartEdit) {
+      setVulnEditMode(false);
+    }
+    void loadVulnerabilityDetails(vulnerabilityId, { startVulnEdit: shouldStartEdit });
   }, [loadVulnerabilityDetails, vulnerabilityId]);
 
   const [mentionHighlightActive, setMentionHighlightActive] = useState(false);
 
+  const vulnCommentIdsKey = useMemo(
+    () =>
+      vulnComments
+        .map((comment) => comment.id)
+        .sort()
+        .join("\n"),
+    [vulnComments]
+  );
+
   useEffect(() => {
-    if (!highlightedCommentId || !activeVulnDetails || !vulnComments.some((comment) => comment.id === highlightedCommentId)) {
+    if (!highlightedCommentId || !activeVulnDetails?.id) {
+      setMentionHighlightActive(false);
+      return;
+    }
+    const commentInList = vulnCommentIdsKey.split("\n").filter(Boolean).includes(highlightedCommentId);
+    if (!commentInList) {
+      setMentionHighlightActive(false);
+      return;
+    }
+    if (vulnEditMode) {
       setMentionHighlightActive(false);
       return;
     }
@@ -1933,12 +2087,33 @@ export function HostDetailPage() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [activeVulnDetails, highlightedCommentId, vulnComments]);
+  }, [activeVulnDetails?.id, highlightedCommentId, vulnCommentIdsKey, vulnEditMode]);
 
   const saveActiveVulnerability = async () => {
     if (!projectId || !activeVulnDetails) {
       return;
     }
+    const workflowSteps = activeVulnDetails.workflow_steps || [];
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
+      body: JSON.stringify({
+        sessionId: "755228",
+        runId: "workflow-title-debug",
+        hypothesisId: "H1",
+        location: "frontend/src/pages/HostDetailPage.tsx:saveActiveVulnerability",
+        message: "Submitting vulnerability workflow steps",
+        data: {
+          vulnerabilityId: activeVulnDetails.id,
+          stepsCount: workflowSteps.length,
+          hasDescriptionCount: workflowSteps.filter((step) => Boolean((step.description || "").trim())).length,
+          withLegacyTitleCount: workflowSteps.filter((step) => Boolean((step as { title?: string }).title?.trim())).length,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     setVulnBusy(true);
     setError(null);
     try {
@@ -1951,7 +2126,7 @@ export function HostDetailPage() {
         cvss_score: activeVulnDetails.cvss_score,
         cvss_vector: activeVulnDetails.cvss_vector,
         cwe_id: activeVulnDetails.cwe_id,
-        workflow_steps: activeVulnDetails.workflow_steps,
+        workflow_steps: workflowSteps,
         steps_to_reproduce: activeVulnDetails.steps_to_reproduce || null,
         impact: activeVulnDetails.impact || null,
         recommendations: activeVulnDetails.recommendations || null,
@@ -2433,16 +2608,16 @@ export function HostDetailPage() {
         Комментарии ({vulnComments.length})
       </Typography>
       <List dense disablePadding>
-        {vulnComments.map((comment) => {
+        {vulnComments.map((comment, commentIndex) => {
           const isHighlighted = highlightedCommentId === comment.id && mentionHighlightActive;
           const canManageComment = user?.id === comment.user_id;
           return (
+            <Fragment key={comment.id}>
             <ListItem
               id={`comment-${comment.id}`}
-              key={comment.id}
               alignItems="flex-start"
               sx={{
-                mb: 2.5,
+                mb: 0,
                 border: "1px solid transparent",
                 ...(isHighlighted
                   ? {
@@ -2525,6 +2700,18 @@ export function HostDetailPage() {
                 </Typography>
               </Stack>
             </ListItem>
+            {commentIndex < vulnComments.length - 1 ? (
+              <Divider
+                component="li"
+                sx={{
+                  my: 2.25,
+                  borderColor: "rgba(126,224,255,0.2)",
+                  borderBottomWidth: 2,
+                  listStyle: "none",
+                }}
+              />
+            ) : null}
+            </Fragment>
           );
         })}
         {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
@@ -2574,11 +2761,22 @@ export function HostDetailPage() {
     </Stack>
   );
 
-  const renderMarkdownPreview = (value: string | null | undefined, emptyText: string): ReactNode => (
-    <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
-      {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
-    </Box>
-  );
+  const renderMarkdownPreview = (value: string | null | undefined, emptyText: string, title?: string): ReactNode => {
+    if (title) {
+      const inputId =
+        title === "Влияние"
+          ? "host-detail-vuln-impact"
+          : title === "Рекомендации"
+            ? "host-detail-vuln-recommendations"
+            : `host-detail-md-${title.replace(/\s+/g, "-").toLowerCase()}`;
+      return <MarkdownOutlinedReadonlyField label={title} inputId={inputId} value={value} emptyText={emptyText} />;
+    }
+    return (
+      <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+        {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
+      </Box>
+    );
+  };
 
   const renderVulnerabilityDetailsContent = (): ReactNode => {
     if (!activeVulnDetails) {
@@ -2694,12 +2892,7 @@ export function HostDetailPage() {
                 onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev))}
               />
             ) : (
-              <>
-                <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
-                  Влияние
-                </Typography>
-                {renderMarkdownPreview(activeVulnDetails.impact, "Влияние не указано.")}
-              </>
+              renderMarkdownPreview(activeVulnDetails.impact, "Влияние не указано.", "Влияние")
             )}
           </Grid>
           <Grid size={{ xs: 12 }}>
@@ -2715,12 +2908,7 @@ export function HostDetailPage() {
                 }
               />
             ) : (
-              <>
-                <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
-                  Рекомендации
-                </Typography>
-                {renderMarkdownPreview(activeVulnDetails.recommendations, "Рекомендации не указаны.")}
-              </>
+              renderMarkdownPreview(activeVulnDetails.recommendations, "Рекомендации не указаны.", "Рекомендации")
             )}
           </Grid>
           {vulnEditMode && (
@@ -2896,32 +3084,97 @@ export function HostDetailPage() {
                   <Typography variant="h6" fontWeight={700}>
                     Порты
                   </Typography>
-                  <Stack direction="row" spacing={0.5}>
-                    <Tooltip title="Импортировать порты из Nmap">
-                      <IconButton size="small" component="label" disabled={nmapImporting}>
-                        <UploadFileIcon fontSize="small" />
-                        <input
-                          hidden
-                          type="file"
-                          accept=".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml"
-                          onChange={(event) => {
-                            const selectedFile = event.target.files?.[0] ?? null;
-                            void importPortsFromNmapFile(selectedFile);
-                            event.target.value = "";
-                          }}
-                        />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="Добавить порт">
-                      <IconButton
+                  <Stack direction="row" alignItems="center" spacing={0.5}>
+                    {portBulkDeleteMode && selectedPortIds.size > 0 ? (
+                      <Tooltip title="Удалить выбранные порты">
+                        <span>
+                          <Button
+                            size="small"
+                            color="error"
+                            variant="outlined"
+                            startIcon={<DeleteIcon fontSize="small" />}
+                            disabled={bulkDeletingPorts}
+                            onClick={() => void removeSelectedPorts()}
+                          >
+                            Удалить ({selectedPortIds.size})
+                          </Button>
+                        </span>
+                      </Tooltip>
+                    ) : null}
+                    {portBulkDeleteMode && selectedPortIds.size === 0 ? (
+                      <Button
                         size="small"
-                        onClick={() => setCreatePortOpen(true)}
-                        sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                        variant="outlined"
+                        onClick={() => {
+                          setPortBulkDeleteMode(false);
+                          setSelectedPortIds(new Set());
+                        }}
                       >
-                        <AddIcon fontSize="small" />
-                      </IconButton>
+                        Отменить
+                      </Button>
+                    ) : null}
+                    <Tooltip title="Действия с портами">
+                      <span>
+                        <IconButton
+                          size="small"
+                          onClick={(event) => setPortsSectionMenuAnchorEl(event.currentTarget)}
+                          disabled={nmapImporting}
+                          sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                        >
+                          <MoreVertIcon fontSize="small" />
+                        </IconButton>
+                      </span>
                     </Tooltip>
                   </Stack>
+                  <input
+                    ref={nmapImportInputRef}
+                    hidden
+                    type="file"
+                    accept=".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml"
+                    onChange={(event) => {
+                      const selectedFile = event.target.files?.[0] ?? null;
+                      void importPortsFromNmapFile(selectedFile);
+                      event.target.value = "";
+                    }}
+                  />
+                  <Menu
+                    anchorEl={portsSectionMenuAnchorEl}
+                    open={portsSectionMenuOpen}
+                    onClose={closePortsSectionMenu}
+                    anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                    transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  >
+                    <MenuItem
+                      onClick={() => {
+                        closePortsSectionMenu();
+                        setCreatePortOpen(true);
+                      }}
+                    >
+                      <AddIcon fontSize="small" sx={{ mr: 1 }} />
+                      Добавить порт
+                    </MenuItem>
+                    <MenuItem
+                      disabled={nmapImporting}
+                      onClick={() => {
+                        closePortsSectionMenu();
+                        nmapImportInputRef.current?.click();
+                      }}
+                    >
+                      <UploadFileIcon fontSize="small" sx={{ mr: 1 }} />
+                      Импортировать из Nmap
+                    </MenuItem>
+                    <MenuItem
+                      disabled={!host?.ports.length}
+                      onClick={() => {
+                        closePortsSectionMenu();
+                        cancelServiceBulkDelete();
+                        setPortBulkDeleteMode(true);
+                      }}
+                    >
+                      <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+                      Выбрать порты для удаления
+                    </MenuItem>
+                  </Menu>
                 </Stack>
                 <Stack spacing={1}>
                   {host?.ports.map((port) => (
@@ -2943,16 +3196,60 @@ export function HostDetailPage() {
                           opacity: 1,
                           pointerEvents: "auto",
                         },
+                        ...(serviceBulkDeletePortId === port.id
+                          ? {
+                              "& .port-actions": {
+                                opacity: 1,
+                                pointerEvents: "auto",
+                              },
+                            }
+                          : {}),
                       }}
                     >
                       <Stack direction="row" justifyContent="space-between" alignItems="center">
                         <Stack direction="row" spacing={1} alignItems="center">
+                          {portBulkDeleteMode ? (
+                            <Checkbox
+                              size="small"
+                              checked={selectedPortIds.has(port.id)}
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={() => togglePortSelection(port.id)}
+                              sx={{ p: 0.25, mr: -0.5 }}
+                            />
+                          ) : null}
                           <Typography fontWeight={600}>
                             {port.port_number}/{port.protocol}
                           </Typography>
                           <Chip label={port.state} size="small" />
                         </Stack>
-                        <Stack direction="row" spacing={0.4} className="port-actions">
+                        <Stack direction="row" spacing={0.4} className="port-actions" alignItems="center">
+                          {serviceBulkDeletePortId === port.id && selectedServiceIdsForDelete.size > 0 ? (
+                            <Button
+                              size="small"
+                              color="error"
+                              variant="outlined"
+                              startIcon={<DeleteIcon fontSize="small" />}
+                              disabled={bulkDeletingServices}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void removeSelectedServicesFromPort(port.id);
+                              }}
+                            >
+                              Удалить ({selectedServiceIdsForDelete.size})
+                            </Button>
+                          ) : null}
+                          {serviceBulkDeletePortId === port.id && selectedServiceIdsForDelete.size === 0 ? (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                cancelServiceBulkDelete();
+                              }}
+                            >
+                              Отменить
+                            </Button>
+                          ) : null}
                           <Tooltip title="Действия">
                             <IconButton size="small" onClick={(event) => openPortActions(event, port)}>
                               <MoreVertIcon fontSize="small" />
@@ -2965,23 +3262,9 @@ export function HostDetailPage() {
                           <Typography color="text.secondary" variant="body2">
                             Порт {port.port_number}/{port.protocol} сейчас в состоянии {port.state}.
                           </Typography>
-                          <Stack direction="row" justifyContent="space-between" alignItems="center">
-                            <Typography variant="body2" fontWeight={600}>
-                              Сервисы
-                            </Typography>
-                            <Tooltip title="Добавить сервис">
-                              <IconButton
-                                size="small"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openCreateServiceDialog(port.id);
-                                }}
-                                sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
-                              >
-                                <AddIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                          </Stack>
+                          <Typography variant="body2" fontWeight={600}>
+                            Сервисы
+                          </Typography>
                           <Stack spacing={0.8}>
                             {(servicesByPortId[port.id] ?? []).map((service) => (
                               <Stack
@@ -2989,37 +3272,47 @@ export function HostDetailPage() {
                                 direction="row"
                                 justifyContent="space-between"
                                 alignItems="center"
+                                onClick={(event) => event.stopPropagation()}
                                 sx={{
                                   border: "1px solid rgba(126,224,255,0.12)",
                                   p: 1,
                                   borderRadius: 0,
                                   backgroundColor: "rgba(8,17,31,0.26)",
-                                  "& .service-actions": {
-                                    opacity: 0,
-                                    pointerEvents: "none",
-                                    transition: "opacity 0.15s ease",
-                                  },
-                                  "&:hover .service-actions": {
-                                    opacity: 1,
-                                    pointerEvents: "auto",
-                                  },
                                 }}
                               >
-                                <Stack spacing={0.2}>
-                                  <Typography variant="body2" fontWeight={600}>
-                                    {service.name}
-                                  </Typography>
-                                  <Typography variant="caption" color="text.secondary">
-                                    {service.version || "version n/a"}
-                                  </Typography>
+                                <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
+                                  {serviceBulkDeletePortId === port.id ? (
+                                    <Checkbox
+                                      size="small"
+                                      checked={selectedServiceIdsForDelete.has(service.id)}
+                                      onClick={(event) => event.stopPropagation()}
+                                      onChange={() => toggleServiceSelectionForDelete(service.id)}
+                                      sx={{ p: 0.25, mr: -0.25 }}
+                                    />
+                                  ) : null}
+                                  <Stack spacing={0.2} sx={{ minWidth: 0 }}>
+                                    <Typography variant="body2" fontWeight={600}>
+                                      {service.name}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary">
+                                      {service.version || "version n/a"}
+                                    </Typography>
+                                  </Stack>
                                 </Stack>
-                                <Stack direction="row" spacing={0.4} className="service-actions">
-                                  <Tooltip title="Действия">
-                                    <IconButton size="small" onClick={(event) => openServiceActions(event, port.id, service)}>
-                                      <MoreVertIcon fontSize="small" />
+                                {serviceBulkDeletePortId === port.id ? null : (
+                                  <Tooltip title="Редактировать">
+                                    <IconButton
+                                      size="small"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        openEditServiceDialog(port.id, service);
+                                      }}
+                                      sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                                    >
+                                      <EditIcon fontSize="small" />
                                     </IconButton>
                                   </Tooltip>
-                                </Stack>
+                                )}
                               </Stack>
                             ))}
                             {(servicesByPortId[port.id] ?? []).length === 0 && (
@@ -3050,48 +3343,36 @@ export function HostDetailPage() {
                     }}
                   >
                     <EditIcon fontSize="small" sx={{ mr: 1 }} />
-                    Редактировать
+                    Редактировать порт
                   </MenuItem>
                   <MenuItem
                     onClick={() => {
                       if (activePort) {
-                        void removePort(activePort.id);
+                        openCreateServiceDialog(activePort.id);
                       }
                       closePortActions();
                     }}
                   >
-                    <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
-                    Удалить
-                  </MenuItem>
-                </Menu>
-                <Menu
-                  anchorEl={serviceActionsAnchorEl}
-                  open={serviceActionsOpen}
-                  onClose={closeServiceActions}
-                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-                  transformOrigin={{ vertical: "top", horizontal: "right" }}
-                >
-                  <MenuItem
-                    onClick={() => {
-                      if (activeService && activeServicePortId) {
-                        openEditServiceDialog(activeServicePortId, activeService);
-                      }
-                      closeServiceActions();
-                    }}
-                  >
-                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
-                    Редактировать
+                    <AddIcon fontSize="small" sx={{ mr: 1 }} />
+                    Добавить сервис
                   </MenuItem>
                   <MenuItem
+                    disabled={!activePort || (servicesByPortId[activePort.id] ?? []).length === 0}
                     onClick={() => {
-                      if (activeService && activeServicePortId) {
-                        void removeService(activeServicePortId, activeService.id);
+                      if (!activePort) {
+                        closePortActions();
+                        return;
                       }
-                      closeServiceActions();
+                      closePortActions();
+                      setPortBulkDeleteMode(false);
+                      setSelectedPortIds(new Set());
+                      setServiceBulkDeletePortId(activePort.id);
+                      setSelectedServiceIdsForDelete(new Set());
+                      setExpandedPortIds((prev) => (prev.includes(activePort.id) ? prev : [...prev, activePort.id]));
                     }}
                   >
-                    <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
-                    Удалить
+                    <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+                    Выбрать сервисы для удаления
                   </MenuItem>
                 </Menu>
               </CardContent>
@@ -3124,6 +3405,18 @@ export function HostDetailPage() {
                           </Button>
                         </span>
                       </Tooltip>
+                    ) : null}
+                    {endpointBulkDeleteMode && selectedEndpointIds.size === 0 ? (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={() => {
+                          setEndpointBulkDeleteMode(false);
+                          setSelectedEndpointIds(new Set());
+                        }}
+                      >
+                        Отменить
+                      </Button>
                     ) : null}
                     <Tooltip title="Действия с эндпоинтами">
                       <span>
@@ -3185,31 +3478,17 @@ export function HostDetailPage() {
                       <DownloadIcon fontSize="small" sx={{ mr: 1 }} />
                       Экспортировать Swagger/OpenAPI
                     </MenuItem>
-                    {!endpointBulkDeleteMode ? (
-                      <MenuItem
-                        data-endpoint-delete-mode-item="true"
-                        disabled={!normalizedHostEndpoints.length}
-                        onClick={() => {
-                          closeEndpointsMenu();
-                          setEndpointBulkDeleteMode(true);
-                        }}
-                      >
-                        <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
-                        Выбрать эндпоинты для удаления
-                      </MenuItem>
-                    ) : (
-                      <MenuItem
-                        data-endpoint-delete-mode-item="true"
-                        onClick={() => {
-                          closeEndpointsMenu();
-                          setEndpointBulkDeleteMode(false);
-                          setSelectedEndpointIds(new Set());
-                        }}
-                      >
-                        <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
-                        Выйти из режима удаления
-                      </MenuItem>
-                    )}
+                    <MenuItem
+                      data-endpoint-delete-mode-item="true"
+                      disabled={!normalizedHostEndpoints.length}
+                      onClick={() => {
+                        closeEndpointsMenu();
+                        setEndpointBulkDeleteMode(true);
+                      }}
+                    >
+                      <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+                      Выбрать эндпоинты для удаления
+                    </MenuItem>
                   </Menu>
                 </Stack>
                 <Stack spacing={1.25}>
@@ -3290,9 +3569,79 @@ export function HostDetailPage() {
             ) : (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
-                <Typography variant="h6" fontWeight={700} mb={1}>
-                  Уязвимости хоста
-                </Typography>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                  <Typography variant="h6" fontWeight={700}>
+                    Уязвимости хоста
+                  </Typography>
+                  <Stack direction="row" alignItems="center" spacing={0.5}>
+                    {vulnerabilityBulkDeleteMode && selectedVulnerabilityIds.size > 0 ? (
+                      <Tooltip title="Удалить выбранные уязвимости">
+                        <span>
+                          <Button
+                            size="small"
+                            color="error"
+                            variant="outlined"
+                            startIcon={<DeleteIcon fontSize="small" />}
+                            disabled={bulkDeletingVulnerabilities}
+                            onClick={() => void removeSelectedVulnerabilities()}
+                          >
+                            Удалить ({selectedVulnerabilityIds.size})
+                          </Button>
+                        </span>
+                      </Tooltip>
+                    ) : null}
+                    {vulnerabilityBulkDeleteMode && selectedVulnerabilityIds.size === 0 ? (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={() => {
+                          setVulnerabilityBulkDeleteMode(false);
+                          setSelectedVulnerabilityIds(new Set());
+                        }}
+                      >
+                        Отменить
+                      </Button>
+                    ) : null}
+                    <Tooltip title="Действия с уязвимостями">
+                      <span>
+                        <IconButton
+                          size="small"
+                          onClick={(event) => setVulnerabilitiesSectionMenuAnchorEl(event.currentTarget)}
+                          sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+                        >
+                          <MoreVertIcon fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </Stack>
+                  <Menu
+                    anchorEl={vulnerabilitiesSectionMenuAnchorEl}
+                    open={vulnerabilitiesSectionMenuOpen}
+                    onClose={closeVulnerabilitiesSectionMenu}
+                    anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                    transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  >
+                    <MenuItem
+                      onClick={() => {
+                        closeVulnerabilitiesSectionMenu();
+                        setCreateVulnerabilityOpen(true);
+                      }}
+                    >
+                      <AddIcon fontSize="small" sx={{ mr: 1 }} />
+                      Добавить уязвимость (конструктор)
+                    </MenuItem>
+                    <MenuItem
+                      disabled={!vulnerabilities.length}
+                      onClick={() => {
+                        closeVulnerabilitiesSectionMenu();
+                        setVulnerabilityBulkDeleteMode(true);
+                      }}
+                    >
+                      <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+                      Выбрать уязвимости для удаления
+                    </MenuItem>
+                  </Menu>
+                </Stack>
                 <Stack spacing={1}>
                   {vulnerabilities.map((item) => (
                     <Box
@@ -3304,25 +3653,22 @@ export function HostDetailPage() {
                         borderRadius: 0,
                         backgroundColor: "rgba(8,17,31,0.24)",
                         cursor: "pointer",
-                        "& .vuln-actions": {
-                          opacity: 0,
-                          pointerEvents: "none",
-                          transition: "opacity 0.15s ease-in-out",
-                        },
-                        "&:hover .vuln-actions": {
-                          opacity: 1,
-                          pointerEvents: "auto",
-                        },
                       }}
                     >
-                      <Stack direction="row" justifyContent="space-between" alignItems="center">
-                        <Typography fontWeight={600}>{item.title}</Typography>
-                        <Stack direction="row" spacing={0.4} alignItems="center" className="vuln-actions">
-                          <Tooltip title="Действия">
-                            <IconButton size="small" onClick={(event) => openVulnerabilityActions(event, item)}>
-                              <MoreVertIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
+                      <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
+                        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
+                          {vulnerabilityBulkDeleteMode ? (
+                            <Checkbox
+                              size="small"
+                              checked={selectedVulnerabilityIds.has(item.id)}
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={() => toggleVulnerabilitySelection(item.id)}
+                              sx={{ p: 0.25, mr: -0.5 }}
+                            />
+                          ) : null}
+                          <Typography fontWeight={600} sx={{ minWidth: 0 }}>
+                            {item.title}
+                          </Typography>
                         </Stack>
                       </Stack>
                       <Collapse in={expandedVulnerabilityIds.includes(item.id)} timeout="auto" unmountOnExit>
@@ -3354,47 +3700,6 @@ export function HostDetailPage() {
                   ))}
                   {!vulnerabilities.length && <Typography color="text.secondary">Уязвимости, привязанные к этому хосту, пока не добавлены.</Typography>}
                 </Stack>
-                <Menu
-                  anchorEl={vulnerabilityActionsAnchorEl}
-                  open={vulnerabilityActionsOpen}
-                  onClose={closeVulnerabilityActions}
-                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-                  transformOrigin={{ vertical: "top", horizontal: "right" }}
-                >
-                  <MenuItem
-                    onClick={() => {
-                      if (activeVulnerability) {
-                        openVulnerabilityPage(activeVulnerability.id);
-                      }
-                      closeVulnerabilityActions();
-                    }}
-                  >
-                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
-                    Карточка
-                  </MenuItem>
-                  <MenuItem
-                    onClick={() => {
-                      if (activeVulnerability) {
-                        openVulnerabilityEdit(activeVulnerability);
-                      }
-                      closeVulnerabilityActions();
-                    }}
-                  >
-                    <EditIcon fontSize="small" sx={{ mr: 1 }} />
-                    Редактировать
-                  </MenuItem>
-                  <MenuItem
-                    onClick={() => {
-                      if (activeVulnerability) {
-                        void removeVulnerability(activeVulnerability.id);
-                      }
-                      closeVulnerabilityActions();
-                    }}
-                  >
-                    <DeleteIcon fontSize="small" sx={{ mr: 1 }} />
-                    Удалить
-                  </MenuItem>
-                </Menu>
               </CardContent>
             </Card>
             ))}
@@ -3490,7 +3795,6 @@ export function HostDetailPage() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Название сервиса" value={creatingServiceName} onChange={(event) => setCreatingServiceName(event.target.value)} />
             <TextField label="Версия" value={creatingServiceVersion} onChange={(event) => setCreatingServiceVersion(event.target.value)} />
-            <TextField multiline minRows={3} label="Banner" value={creatingServiceBanner} onChange={(event) => setCreatingServiceBanner(event.target.value)} />
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -3507,7 +3811,6 @@ export function HostDetailPage() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Название сервиса" value={editingServiceName} onChange={(event) => setEditingServiceName(event.target.value)} />
             <TextField label="Версия" value={editingServiceVersion} onChange={(event) => setEditingServiceVersion(event.target.value)} />
-            <TextField multiline minRows={3} label="Banner" value={editingServiceBanner} onChange={(event) => setEditingServiceBanner(event.target.value)} />
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -3867,95 +4170,26 @@ export function HostDetailPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={isCreateVulnerabilityOpen} onClose={() => setCreateVulnerabilityOpen(false)} fullWidth>
-        <DialogTitle>Добавить уязвимость к хосту</DialogTitle>
+      <Dialog open={isCreateVulnerabilityOpen} onClose={() => setCreateVulnerabilityOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Новая уязвимость</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <Grid container spacing={2}>
-              <Grid size={{ xs: 12, md: 7 }}>
-                <TextField
-                  label="Название"
-                  value={creatingVulnerabilityTitle}
-                  onChange={(event) => setCreatingVulnerabilityTitle(event.target.value)}
-                  fullWidth
-                />
-              </Grid>
-              <Grid size={{ xs: 12, md: 3 }}>
-                <TextField
-                  label="CWE ID"
-                  value={creatingVulnerabilityCweId}
-                  onChange={(event) => setCreatingVulnerabilityCweId(event.target.value)}
-                  fullWidth
-                />
-              </Grid>
-              <Grid size={{ xs: 12, md: 2 }}>
-                <TextField
-                  select
-                  label="Статус"
-                  value={creatingVulnerabilityStatus}
-                  onChange={(event) => setCreatingVulnerabilityStatus(event.target.value as Vulnerability["status"])}
-                  fullWidth
-                >
-                  <MenuItem value="open">open</MenuItem>
-                  <MenuItem value="in_progress">in_progress</MenuItem>
-                  <MenuItem value="fixed">fixed</MenuItem>
-                  <MenuItem value="wont_fix">wont_fix</MenuItem>
-                  <MenuItem value="accepted_risk">accepted_risk</MenuItem>
-                </TextField>
-              </Grid>
-              <Grid size={{ xs: 12, md: 2 }}>
-                <TextField
-                  label="Критичность"
-                  value={creatingVulnerabilitySeverity}
-                  slotProps={{ input: { readOnly: true } }}
-                  fullWidth
-                />
-              </Grid>
-              <Grid size={{ xs: 12, md: 2 }}>
-                <TextField
-                  label="CVSS score"
-                  type="number"
-                  inputProps={{ min: 0, max: 10, step: 0.1 }}
-                  value={creatingVulnerabilityCvssScore}
-                  slotProps={{ input: { readOnly: true } }}
-                  fullWidth
-                />
-              </Grid>
-              <Grid size={{ xs: 12, md: 8 }}>
-                <TextField
-                  label="CVSS vector"
-                  value={creatingVulnerabilityCvssVector}
-                  onChange={(event) => {
-                    const nextVector = event.target.value;
-                    const { score } = calculateCvssScore(CVSS_VERSION, nextVector || null);
-                    setCreatingVulnerabilityCvssVector(nextVector);
-                    setCreatingVulnerabilityCvssScore(score === null ? "" : String(score));
-                    setCreatingVulnerabilitySeverity(severityFromCvssScore(score));
-                  }}
-                  fullWidth
-                />
-              </Grid>
-            </Grid>
-            <VulnerabilityStagesEditor
-              stages={creatingVulnerabilityStages}
-              endpoints={normalizedHostEndpoints}
-              hostLabel={host?.hostname || host?.ip_address || undefined}
-              onChange={setCreatingVulnerabilityStages}
-            />
-            <TextField multiline minRows={3} label="Влияние" value={creatingVulnerabilityImpact} onChange={(event) => setCreatingVulnerabilityImpact(event.target.value)} />
+            <Typography variant="body2" color="text.secondary">
+              Укажите название — после создания откроется карточка, где можно заполнить остальные поля.
+            </Typography>
             <TextField
-              multiline
-              minRows={3}
-              label="Рекомендации"
-              value={creatingVulnerabilityRecommendations}
-              onChange={(event) => setCreatingVulnerabilityRecommendations(event.target.value)}
+              label="Название"
+              value={creatingVulnerabilityTitle}
+              onChange={(event) => setCreatingVulnerabilityTitle(event.target.value)}
+              fullWidth
+              autoFocus
             />
           </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 3, pt: 1.5 }}>
           <Button onClick={() => setCreateVulnerabilityOpen(false)}>Отмена</Button>
           <Button variant="contained" size="large" sx={{ minWidth: 180 }} onClick={() => void createHostVulnerability()} disabled={!creatingVulnerabilityTitle.trim()}>
-            Создать
+            Создать и открыть карточку
           </Button>
         </DialogActions>
       </Dialog>

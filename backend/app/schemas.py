@@ -323,7 +323,6 @@ class EndpointOut(ORMBase):
 
 class VulnerabilityWorkflowStep(InputBaseModel):
     id: str = Field(min_length=1, max_length=100)
-    title: str = Field(min_length=1, max_length=500)
     description: str | None = None
     image_file_ids: list[UUID] = Field(default_factory=list)
     endpoint_id: UUID | None = None

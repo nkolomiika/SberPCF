@@ -122,7 +122,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
 
   const loadNotificationsList = useCallback(async () => {
     try {
-      const response = await listNotifications();
+      const response = await listNotifications({ is_read: false });
       setNotifications(response.items);
     } catch {
       setNotifications([]);
@@ -190,15 +190,19 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
         closeNotifications();
         return;
       }
+      let readOk = notification.is_read;
       if (!notification.is_read) {
         try {
           await markNotificationRead(notification.id);
+          readOk = true;
         } catch {
           // Keep navigation working even if the read flag update fails.
         }
       }
-      setNotifications((prev) => prev.map((item) => (item.id === notification.id ? { ...item, is_read: true } : item)));
-      setCount((prev) => Math.max(0, prev - (notification.is_read ? 0 : 1)));
+      if (readOk) {
+        setNotifications((prev) => prev.filter((item) => item.id !== notification.id));
+        setCount((prev) => Math.max(0, prev - (notification.is_read ? 0 : 1)));
+      }
       closeNotifications();
       if (hostId && vulnerabilityId) {
         const query = notification.comment_id ? `?comment=${notification.comment_id}` : "";
@@ -443,7 +447,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
                   onClick={() => void openNotificationTarget(notification)}
                   sx={{
                     alignItems: "flex-start",
-                    backgroundColor: notification.is_read ? "transparent" : "rgba(126,224,255,0.08)",
+                    backgroundColor: "rgba(126,224,255,0.08)",
                   }}
                 >
                   <ListItemText

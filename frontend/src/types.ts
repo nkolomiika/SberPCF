@@ -165,7 +165,6 @@ export interface Vulnerability {
 
 export interface VulnerabilityWorkflowStep {
   id: string;
-  title: string;
   description: string | null;
   image_file_ids: string[];
   endpoint_id: string | null;

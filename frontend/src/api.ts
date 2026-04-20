@@ -461,7 +461,6 @@ export async function createVulnerability(
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
     workflow_steps?: Array<{
       id: string;
-      title: string;
       description?: string | null;
       image_file_ids?: string[];
       endpoint_id?: string | null;
@@ -494,7 +493,6 @@ export async function updateVulnerability(
     status?: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
     workflow_steps?: Array<{
       id: string;
-      title: string;
       description?: string | null;
       image_file_ids?: string[];
       endpoint_id?: string | null;
@@ -629,8 +627,12 @@ export async function generateProjectReport(projectId: string, format: "md" | "p
   return data as Blob;
 }
 
-export async function listNotifications(): Promise<PaginatedResponse<Notification>> {
-  const { data } = await api.get<PaginatedResponse<Notification>>("/notifications", { params: { page: 1, size: 20 } });
+export async function listNotifications(options?: { is_read?: boolean }): Promise<PaginatedResponse<Notification>> {
+  const params: Record<string, number | boolean> = { page: 1, size: 20 };
+  if (options?.is_read !== undefined) {
+    params.is_read = options.is_read;
+  }
+  const { data } = await api.get<PaginatedResponse<Notification>>("/notifications", { params });
   return data;
 }
 

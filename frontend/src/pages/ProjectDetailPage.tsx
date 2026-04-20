@@ -32,9 +32,10 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
+import { MarkdownOutlinedReadonlyField } from "../components/MarkdownOutlinedReadonlyField";
 import {
   createHost,
   createVulnerabilityComment,
@@ -581,6 +582,27 @@ export function ProjectDetailPage() {
     if (!projectId || !activeVuln) {
       return;
     }
+    const workflowSteps = activeVuln.workflow_steps || [];
+    // #region agent log
+    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
+      body: JSON.stringify({
+        sessionId: "755228",
+        runId: "workflow-title-debug",
+        hypothesisId: "H1",
+        location: "frontend/src/pages/ProjectDetailPage.tsx:saveActiveVulnerability",
+        message: "Submitting vulnerability workflow steps",
+        data: {
+          vulnerabilityId: activeVuln.id,
+          stepsCount: workflowSteps.length,
+          hasDescriptionCount: workflowSteps.filter((step) => Boolean((step.description || "").trim())).length,
+          withLegacyTitleCount: workflowSteps.filter((step) => Boolean((step as { title?: string }).title?.trim())).length,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     setVulnBusy(true);
     setError(null);
     try {
@@ -593,7 +615,7 @@ export function ProjectDetailPage() {
         cvss_score: activeVuln.cvss_score,
         cvss_vector: activeVuln.cvss_vector,
         cwe_id: activeVuln.cwe_id,
-        workflow_steps: activeVuln.workflow_steps,
+        workflow_steps: workflowSteps,
         steps_to_reproduce: activeVuln.steps_to_reproduce || null,
         impact: activeVuln.impact || null,
         recommendations: activeVuln.recommendations || null,
@@ -699,75 +721,87 @@ export function ProjectDetailPage() {
         Комментарии ({vulnComments.length})
       </Typography>
       <List dense disablePadding>
-        {vulnComments.map((comment) => {
+        {vulnComments.map((comment, commentIndex) => {
           const canManageComment = user?.id === comment.user_id;
           return (
-            <ListItem
-              key={comment.id}
-              alignItems="flex-start"
-              sx={{
-                mb: 2.5,
-                ...(canManageComment
-                  ? {
-                      "&:hover .comment-row-actions, &:focus-within .comment-row-actions": {
-                        opacity: 1,
-                        pointerEvents: "auto",
-                      },
-                    }
-                  : {}),
-              }}
-            >
-              <Stack spacing={0.75} sx={{ width: "100%" }}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2}>
-                  <Stack direction="row" alignItems="center" spacing={1.25} minWidth={0}>
-                    <Avatar
-                      src={comment.avatar_url || undefined}
-                      alt={comment.username}
-                      sx={{ width: 28, height: 28, fontSize: "0.8rem", bgcolor: "rgba(126,224,255,0.18)" }}
-                    >
-                      {comment.username.slice(0, 1).toUpperCase()}
-                    </Avatar>
-                    <Typography fontWeight={700} color="text.primary" noWrap>
-                      {comment.username}
-                    </Typography>
+            <Fragment key={comment.id}>
+              <ListItem
+                alignItems="flex-start"
+                sx={{
+                  mb: 0,
+                  ...(canManageComment
+                    ? {
+                        "&:hover .comment-row-actions, &:focus-within .comment-row-actions": {
+                          opacity: 1,
+                          pointerEvents: "auto",
+                        },
+                      }
+                    : {}),
+                }}
+              >
+                <Stack spacing={0.75} sx={{ width: "100%" }}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2}>
+                    <Stack direction="row" alignItems="center" spacing={1.25} minWidth={0}>
+                      <Avatar
+                        src={comment.avatar_url || undefined}
+                        alt={comment.username}
+                        sx={{ width: 28, height: 28, fontSize: "0.8rem", bgcolor: "rgba(126,224,255,0.18)" }}
+                      >
+                        {comment.username.slice(0, 1).toUpperCase()}
+                      </Avatar>
+                      <Typography fontWeight={700} color="text.primary" noWrap>
+                        {comment.username}
+                      </Typography>
+                    </Stack>
+                    <Stack direction="row" alignItems="center" spacing={0} sx={{ flexShrink: 0 }}>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ whiteSpace: "nowrap", textAlign: "right", minWidth: "7.75rem", pr: 0.5 }}
+                      >
+                        {formatCommentTimestamp(comment.created_at)}
+                      </Typography>
+                      <Box sx={{ width: 36, display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
+                        {canManageComment ? (
+                          <IconButton
+                            className="comment-row-actions"
+                            size="small"
+                            onClick={(event) => openCommentActionsMenu(event, comment)}
+                            sx={{
+                              mr: -0.75,
+                              opacity: 0,
+                              pointerEvents: "none",
+                              transition: "opacity 0.15s ease",
+                              color: "rgba(148,163,184,0.85)",
+                              "&:hover": {
+                                color: "rgba(148,163,184,1)",
+                                backgroundColor: "rgba(126,224,255,0.06)",
+                              },
+                            }}
+                          >
+                            <MoreVertIcon fontSize="small" />
+                          </IconButton>
+                        ) : null}
+                      </Box>
+                    </Stack>
                   </Stack>
-                  <Stack direction="row" alignItems="center" spacing={0} sx={{ flexShrink: 0 }}>
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ whiteSpace: "nowrap", textAlign: "right", minWidth: "7.75rem", pr: 0.5 }}
-                    >
-                      {formatCommentTimestamp(comment.created_at)}
-                    </Typography>
-                    <Box sx={{ width: 36, display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
-                      {canManageComment ? (
-                        <IconButton
-                          className="comment-row-actions"
-                          size="small"
-                          onClick={(event) => openCommentActionsMenu(event, comment)}
-                          sx={{
-                            mr: -0.75,
-                            opacity: 0,
-                            pointerEvents: "none",
-                            transition: "opacity 0.15s ease",
-                            color: "rgba(148,163,184,0.85)",
-                            "&:hover": {
-                              color: "rgba(148,163,184,1)",
-                              backgroundColor: "rgba(126,224,255,0.06)",
-                            },
-                          }}
-                        >
-                          <MoreVertIcon fontSize="small" />
-                        </IconButton>
-                      ) : null}
-                    </Box>
-                  </Stack>
+                  <Typography variant="body2" color="rgba(235,245,255,0.92)" sx={{ whiteSpace: "pre-wrap", pr: 1 }}>
+                    {comment.content}
+                  </Typography>
                 </Stack>
-                <Typography variant="body2" color="rgba(235,245,255,0.92)" sx={{ whiteSpace: "pre-wrap", pr: 1 }}>
-                  {comment.content}
-                </Typography>
-              </Stack>
-            </ListItem>
+              </ListItem>
+              {commentIndex < vulnComments.length - 1 ? (
+                <Divider
+                  component="li"
+                  sx={{
+                    my: 2.25,
+                    borderColor: "rgba(126,224,255,0.2)",
+                    borderBottomWidth: 2,
+                    listStyle: "none",
+                  }}
+                />
+              ) : null}
+            </Fragment>
           );
         })}
         {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
@@ -817,11 +851,22 @@ export function ProjectDetailPage() {
     </Stack>
   );
 
-  const renderMarkdownPreview = (value: string | null | undefined, emptyText: string) => (
-    <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
-      {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
-    </Box>
-  );
+  const renderMarkdownPreview = (value: string | null | undefined, emptyText: string, title?: string) => {
+    if (title) {
+      const inputId =
+        title === "Влияние"
+          ? "project-detail-vuln-impact"
+          : title === "Рекомендации"
+            ? "project-detail-vuln-recommendations"
+            : `project-detail-md-${title.replace(/\s+/g, "-").toLowerCase()}`;
+      return <MarkdownOutlinedReadonlyField label={title} inputId={inputId} value={value} emptyText={emptyText} />;
+    }
+    return (
+      <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
+        {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
+      </Box>
+    );
+  };
 
   const submitImport = async () => {
     if (!projectId || !importFile) {
@@ -911,6 +956,28 @@ export function ProjectDetailPage() {
   const cancelProjectDescriptionEdit = () => {
     setProjectDraftDescription(projectDescription);
     setProjectDescriptionEditOpen(false);
+  };
+
+  const MAX_PROJECT_DESC_IMAGE_BYTES = 1_500_000;
+
+  const appendImageToProjectDraft = (file: File | null) => {
+    if (!file?.type.startsWith("image/")) {
+      return;
+    }
+    if (file.size > MAX_PROJECT_DESC_IMAGE_BYTES) {
+      setError("Изображение слишком большое (макс. ~1.5 МБ).");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      if (!dataUrl) {
+        return;
+      }
+      const name = file.name.replace(/[^\w.-]/g, "_") || "image";
+      setProjectDraftDescription((prev) => `${prev.trimEnd()}\n\n![${name}](${dataUrl})\n`);
+    };
+    reader.readAsDataURL(file);
   };
 
   const applyQuickExtension = (days: number) => {
@@ -1094,9 +1161,6 @@ export function ProjectDetailPage() {
     <Stack spacing={2.5}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Box>
-          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: 1.4, fontWeight: 700 }}>
-            Project Workspace
-          </Typography>
           <Typography variant="h4" fontWeight={700}>
             {projectName ? `Проект: ${projectName}` : "Проект"}
           </Typography>
@@ -1472,7 +1536,27 @@ export function ProjectDetailPage() {
                         minRows={4}
                         value={projectDraftDescription}
                         onChange={(event) => setProjectDraftDescription(event.target.value)}
-                        placeholder="Введите описание проекта"
+                        placeholder="Введите описание проекта (Markdown). Вставьте картинку через Ctrl+V или перетащите файл."
+                        helperText="Поддерживаются изображения: вставка из буфера или перетаскивание в поле."
+                        onPaste={(event) => {
+                          const file = Array.from(event.clipboardData?.files || []).find((f) => f.type.startsWith("image/"));
+                          if (file) {
+                            event.preventDefault();
+                            appendImageToProjectDraft(file);
+                          }
+                        }}
+                        onDragOver={(event) => {
+                          if (Array.from(event.dataTransfer?.items || []).some((i) => i.kind === "file" && i.type.startsWith("image/"))) {
+                            event.preventDefault();
+                          }
+                        }}
+                        onDrop={(event) => {
+                          const file = Array.from(event.dataTransfer?.files || []).find((f) => f.type.startsWith("image/"));
+                          if (file) {
+                            event.preventDefault();
+                            appendImageToProjectDraft(file);
+                          }
+                        }}
                       />
                       <Stack direction="row" spacing={1} justifyContent="flex-end">
                         <Button onClick={cancelProjectDescriptionEdit} disabled={projectSaving}>
@@ -1484,9 +1568,21 @@ export function ProjectDetailPage() {
                       </Stack>
                     </Stack>
                   ) : (
-                    <Typography color="text.secondary" whiteSpace="pre-wrap">
-                      {projectDescription || "Описание проекта не заполнено"}
-                    </Typography>
+                    <Box
+                      sx={{
+                        color: "text.secondary",
+                        "& p": { m: 0 },
+                        "& p + p": { mt: 1 },
+                        "& img": { maxWidth: "100%", height: "auto" },
+                        "& ul, & ol": { m: 0, pl: 2.5 },
+                      }}
+                    >
+                      {projectDescription?.trim() ? (
+                        <ReactMarkdown>{projectDescription}</ReactMarkdown>
+                      ) : (
+                        <Typography color="text.secondary">Описание проекта не заполнено</Typography>
+                      )}
+                    </Box>
                   )}
                 </CardContent>
               </Card>
@@ -1875,12 +1971,7 @@ export function ProjectDetailPage() {
                       onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, impact: e.target.value || null } : prev))}
                     />
                   ) : (
-                    <>
-                      <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
-                        Влияние
-                      </Typography>
-                      {renderMarkdownPreview(activeVuln.impact, "Влияние не указано.")}
-                    </>
+                    renderMarkdownPreview(activeVuln.impact, "Влияние не указано.", "Влияние")
                   )}
                 </Grid>
                 <Grid size={{ xs: 12 }}>
@@ -1894,12 +1985,7 @@ export function ProjectDetailPage() {
                       onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: e.target.value || null } : prev))}
                     />
                   ) : (
-                    <>
-                      <Typography variant="subtitle2" sx={{ mb: 0.75 }}>
-                        Рекомендации
-                      </Typography>
-                      {renderMarkdownPreview(activeVuln.recommendations, "Рекомендации не указаны.")}
-                    </>
+                    renderMarkdownPreview(activeVuln.recommendations, "Рекомендации не указаны.", "Рекомендации")
                   )}
                 </Grid>
                 {vulnEditMode && (

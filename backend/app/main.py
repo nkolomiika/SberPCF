@@ -1,3 +1,7 @@
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +32,7 @@ from app.services import UserService
 from app.storage.minio_client import MinioStorage
 
 settings = get_settings()
+DEBUG_LOG_PATH = Path("/workspace/debug-755228.log")
 
 app = FastAPI(title="PCF API", version="1.0.0", openapi_url="/api/v1/openapi.json")
 
@@ -54,6 +59,23 @@ def _register_routes() -> None:
     app.include_router(reports.router, prefix=prefix)
     app.include_router(audit_logs.router, prefix=prefix)
     app.include_router(websocket.router)
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    payload = {
+        "sessionId": "755228",
+        "runId": "workflow-title-debug",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(datetime.now(UTC).timestamp() * 1000),
+    }
+    try:
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _register_error_handlers() -> None:
@@ -83,7 +105,28 @@ def _register_error_handlers() -> None:
         return "; ".join(messages) or "Некорректные входные данные"
 
     @app.exception_handler(RequestValidationError)
-    async def request_validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        workflow_title_errors: list[dict] = []
+        for item in exc.errors():
+            raw_loc = [str(part) for part in item.get("loc", [])]
+            loc = ".".join(part for part in raw_loc if part not in {"body", "query", "path"})
+            if loc.startswith("workflow_steps.") and loc.endswith(".title"):
+                workflow_title_errors.append({"loc": loc, "type": item.get("type"), "msg": item.get("msg")})
+        if workflow_title_errors:
+            body = exc.body if isinstance(exc.body, dict) else {}
+            # #region agent log
+            _debug_log(
+                "H2",
+                "backend/app/main.py:request_validation_handler",
+                "Workflow step title validation error",
+                {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "workflow_title_errors": workflow_title_errors,
+                    "workflow_steps_count": len((body.get("workflow_steps") or [])),
+                },
+            )
+            # #endregion
         return JSONResponse(status_code=422, content={"detail": _format_request_validation(exc)})
 
     @app.exception_handler(NotFoundError)
@@ -133,6 +176,19 @@ async def startup() -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS workflow_steps JSON"))
+            await conn.execute(
+                text(
+                    """
+                    UPDATE vulnerabilities
+                    SET workflow_steps = (
+                        SELECT json_agg(step - 'title')
+                        FROM jsonb_array_elements(workflow_steps::jsonb) AS step
+                    )
+                    WHERE workflow_steps IS NOT NULL
+                      AND jsonb_typeof(workflow_steps::jsonb) = 'array'
+                    """
+                )
+            )
             await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS query_params JSON"))
             await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_body TEXT"))
             await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_content_type VARCHAR(127)"))

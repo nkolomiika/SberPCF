@@ -88,6 +88,8 @@ services:
     image: rabbitmq:3-management
     environment:
       RABBITMQ_ERLANG_COOKIE: pcf_rabbitmq_dev_cookie_1234567890
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/99-local.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
