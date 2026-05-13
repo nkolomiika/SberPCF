@@ -32,8 +32,15 @@ vi.mock("../api", () => ({
   forceChangePassword,
 }));
 
+const toastState = {
+  toasts: [] as Array<{ id: string; message: string; severity: "success" | "error" | "info" | "warning" }>,
+  pushToast: vi.fn(),
+  dismissToast: vi.fn(),
+};
+
 vi.mock("../store", () => ({
   useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
+  useToastStore: (selector: (state: typeof toastState) => unknown) => selector(toastState),
 }));
 
 vi.mock("react-router-dom", async () => {
@@ -50,6 +57,9 @@ describe("ForceChangePasswordPage", () => {
     forceChangePassword.mockReset();
     setUser.mockReset();
     signOut.mockReset();
+    toastState.pushToast.mockReset();
+    toastState.dismissToast.mockReset();
+    toastState.toasts = [];
   });
 
   it("keeps save button disabled until passwords match and are long enough", async () => {

@@ -16,6 +16,7 @@ describe("ProjectTreeNav", () => {
             id: "host-b",
             project_id: "project-1",
             ip_address: "10.0.0.2",
+            ip_addresses: [],
             hostname: "host-b",
             status: "up",
             notes: null,
@@ -23,8 +24,8 @@ describe("ProjectTreeNav", () => {
             updated_at: new Date().toISOString(),
           },
         ]}
-        selectedHostId="host-a"
-        selectedSection="overview"
+        selectedHostId={null}
+        selectedSection="hosts"
         isCollapsed={false}
         portsCount={0}
         endpointsCount={0}
@@ -37,11 +38,32 @@ describe("ProjectTreeNav", () => {
       />
     );
 
-    await userEvent.click(screen.getByTestId("KeyboardArrowRightIcon").closest("button")!);
     await userEvent.click(screen.getByText("Порты (4)"));
 
     expect(onSelectHost).toHaveBeenCalledWith("host-b");
     expect(onSelectSection).toHaveBeenCalledWith("ports");
     expect(onOpenHost).toHaveBeenCalledWith("host-b", "ports");
+  });
+
+  it("selects notes section from root navigation", async () => {
+    const onSelectSection = vi.fn();
+
+    renderWithProviders(
+      <ProjectTreeNav
+        hosts={[]}
+        selectedHostId={null}
+        selectedSection="overview"
+        isCollapsed={false}
+        portsCount={0}
+        endpointsCount={0}
+        vulnerabilitiesCount={0}
+        onToggleCollapsed={() => undefined}
+        onSelectSection={onSelectSection}
+        onSelectHost={() => undefined}
+      />
+    );
+
+    await userEvent.click(screen.getByText("Заметки"));
+    expect(onSelectSection).toHaveBeenCalledWith("notes");
   });
 });

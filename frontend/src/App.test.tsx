@@ -64,6 +64,10 @@ vi.mock("./pages/AuditLogsPage", () => ({
   AuditLogsPage: () => <div>Audit logs page</div>,
 }));
 
+vi.mock("./pages/AiAgentIntegrationPage", () => ({
+  AiAgentIntegrationPage: () => <div>AI agent integration page</div>,
+}));
+
 vi.mock("./pages/UsersAdminPage", () => ({
   UsersAdminPage: () => <div>Users admin page</div>,
 }));

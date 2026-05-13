@@ -27,7 +27,6 @@ import {
   TextField,
   Typography,
   IconButton,
-  Tooltip,
 } from "@mui/material";
 import { type DragEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -36,6 +35,7 @@ import {
   createProject,
   createProjectFolder,
   deleteProject,
+  deleteProjectFolder,
   getApiErrorMessage,
   getProjectFolders,
   getProjects,
@@ -43,6 +43,7 @@ import {
   moveProjectFolder,
   updateProject,
 } from "../api";
+import { MarkdownEditor } from "../components/MarkdownEditor";
 import { PROJECT_STATUS_CHIP_SX, PROJECT_STATUS_LABELS, PROJECT_STATUS_ORDER } from "../projectStatus";
 import { useAuthStore } from "../store";
 import type { Project, ProjectFolder, ProjectStatus, User } from "../types";
@@ -88,6 +89,8 @@ export function ProjectsPage() {
   const [projectActionsAnchorEl, setProjectActionsAnchorEl] = useState<null | HTMLElement>(null);
   const [folderActionsAnchorEl, setFolderActionsAnchorEl] = useState<null | HTMLElement>(null);
   const [activeFolderNode, setActiveFolderNode] = useState<FolderTreeNode | null>(null);
+  const [deleteFolderTarget, setDeleteFolderTarget] = useState<FolderTreeNode | null>(null);
+  const [deleteFolderBusy, setDeleteFolderBusy] = useState<boolean>(false);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -363,6 +366,29 @@ export function ProjectsPage() {
   const closeFolderActions = () => {
     setFolderActionsAnchorEl(null);
     setActiveFolderNode(null);
+  };
+
+  const countFolderDescendants = (node: FolderTreeNode): { folders: number; projects: number } => {
+    if (!node.path) return { folders: 0, projects: 0 };
+    const prefix = `${node.path}/`;
+    const subFolders = folders.filter((f) => f.path === node.path || f.path.startsWith(prefix)).length;
+    const subProjects = projects.filter((p) => (p.folder ?? "") === node.path || (p.folder ?? "").startsWith(prefix)).length;
+    return { folders: Math.max(0, subFolders - 1), projects: subProjects };
+  };
+
+  const handleConfirmDeleteFolder = async () => {
+    const target = deleteFolderTarget;
+    if (!target?.id) return;
+    setDeleteFolderBusy(true);
+    try {
+      await deleteProjectFolder(target.id);
+      setDeleteFolderTarget(null);
+      await loadProjects();
+    } catch (caught) {
+      setError(getApiErrorMessage(caught, "Не удалось удалить папку"));
+    } finally {
+      setDeleteFolderBusy(false);
+    }
   };
 
   const openEditProjectDialog = (project: Project) => {
@@ -784,15 +810,14 @@ export function ProjectsPage() {
                 Вложить в папку
               </Typography>
             )}
-            <Tooltip title="Действия папки">
-              <IconButton
-                size="small"
-                onClick={(event) => openFolderActions(event, node)}
-                sx={{ width: 28, height: 28 }}
-              >
-                <MoreVertIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
+            <IconButton
+              size="small"
+              aria-label="Действия папки"
+              onClick={(event) => openFolderActions(event, node)}
+              sx={{ width: 28, height: 28 }}
+            >
+              <MoreVertIcon fontSize="small" />
+            </IconButton>
           </Stack>
         )}
       </Stack>
@@ -857,15 +882,14 @@ export function ProjectsPage() {
             </ListItemButton>
             {user?.role === "admin" && (
               <Stack direction="row" alignItems="center" className="project-actions" sx={{ pr: 0.5 }}>
-                <Tooltip title="Действия">
-                  <IconButton
-                    size="small"
-                    onClick={(event) => openProjectActions(event, project)}
-                    sx={{ width: 28, height: 28 }}
-                  >
-                    <MoreVertIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
+                <IconButton
+                  size="small"
+                  aria-label="Действия проекта"
+                  onClick={(event) => openProjectActions(event, project)}
+                  sx={{ width: 28, height: 28 }}
+                >
+                  <MoreVertIcon fontSize="small" />
+                </IconButton>
               </Stack>
             )}
           </Stack>
@@ -995,7 +1019,56 @@ export function ProjectsPage() {
           </ListItemIcon>
           Создать папку внутри
         </MenuItem>
+        <MenuItem
+          onClick={() => {
+            const target = activeFolderNode;
+            closeFolderActions();
+            if (target?.id) {
+              setDeleteFolderTarget(target);
+            }
+          }}
+          sx={{ color: "#ff8a80" }}
+        >
+          <ListItemIcon>
+            <DeleteOutlineIcon fontSize="small" sx={{ color: "#ff8a80" }} />
+          </ListItemIcon>
+          Удалить папку
+        </MenuItem>
       </Menu>
+
+      <Dialog open={Boolean(deleteFolderTarget)} onClose={() => !deleteFolderBusy && setDeleteFolderTarget(null)}>
+        <DialogTitle>Удалить папку «{deleteFolderTarget?.name}»?</DialogTitle>
+        <DialogContent>
+          {(() => {
+            if (!deleteFolderTarget) return null;
+            const stats = countFolderDescendants(deleteFolderTarget);
+            return (
+              <Stack spacing={1}>
+                <Typography variant="body2">
+                  Будут безвозвратно удалены вложенные сущности:
+                </Typography>
+                <Typography variant="body2" sx={{ pl: 1 }}>
+                  • Подпапок: <strong>{stats.folders}</strong>
+                </Typography>
+                <Typography variant="body2" sx={{ pl: 1 }}>
+                  • Проектов (со всеми данными): <strong>{stats.projects}</strong>
+                </Typography>
+                <Typography variant="body2" color="warning.main">
+                  Эта операция необратима.
+                </Typography>
+              </Stack>
+            );
+          })()}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteFolderTarget(null)} disabled={deleteFolderBusy}>
+            Отмена
+          </Button>
+          <Button color="error" onClick={handleConfirmDeleteFolder} disabled={deleteFolderBusy}>
+            {deleteFolderBusy ? "Удаление…" : "Удалить"}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Box
         sx={{
@@ -1016,7 +1089,6 @@ export function ProjectsPage() {
           <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
             <TextField
               label="Поиск проекта"
-              placeholder="Название или описание"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
               fullWidth
@@ -1099,12 +1171,11 @@ export function ProjectsPage() {
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Название" value={name} onChange={(e) => setName(e.target.value)} />
-            <TextField
+            <MarkdownEditor
               label="Описание"
-              multiline
               minRows={3}
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(next) => setDescription(next || "")}
             />
             <TextField
               label="Дата начала"
@@ -1179,7 +1250,6 @@ export function ProjectsPage() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField
               label="Название папки"
-              placeholder="Например: Клиенты"
               value={folderName}
               onChange={(event) => setFolderName(event.target.value)}
             />
@@ -1211,12 +1281,11 @@ export function ProjectsPage() {
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Название" value={editingProjectName} onChange={(event) => setEditingProjectName(event.target.value)} />
-            <TextField
+            <MarkdownEditor
               label="Описание"
-              multiline
               minRows={3}
               value={editingProjectDescription}
-              onChange={(event) => setEditingProjectDescription(event.target.value)}
+              onChange={(next) => setEditingProjectDescription(next || "")}
             />
             <TextField
               label="Дата начала"

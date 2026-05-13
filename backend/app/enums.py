@@ -21,6 +21,17 @@ class HostStatus(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
+class OsType(str, enum.Enum):
+    WINDOWS = "windows"
+    LINUX = "linux"
+    MACOS = "macos"
+    FREEBSD = "freebsd"
+    ANDROID = "android"
+    IOS = "ios"
+    OTHER = "other"
+    UNKNOWN = "unknown"
+
+
 class Protocol(str, enum.Enum):
     TCP = "tcp"
     UDP = "udp"

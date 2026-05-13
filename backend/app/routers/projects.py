@@ -85,6 +85,18 @@ async def move_project_folder(
     return ProjectFolderOut.model_validate(folder)
 
 
+@router.delete("/folders/{folder_id}", status_code=status.HTTP_200_OK)
+async def delete_project_folder(
+    folder_id: UUID,
+    request: Request,
+    _: None = Depends(enforce_csrf),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Каскадно удаляет папку проекта со всеми подпапками и проектами."""
+    return await ProjectService(db).delete_folder(folder_id, admin.id, get_client_ip(request))
+
+
 @router.get("/{project_id}", response_model=ProjectOut)
 async def get_project(
     project_id: UUID,

@@ -252,7 +252,7 @@ services:
 | Комментарии | `/api/v1/vulnerabilities/{id}/comments/` |
 | Уведомления | `/api/v1/notifications/` |
 | Импорт | `/api/v1/projects/{id}/import/` |
-| Отчёты | `/api/v1/projects/{id}/reports/` (format: md/pdf/docx) |
+| Отчёты | `/api/v1/projects/{id}/reports/szi`, `/api/v1/projects/{id}/reports/pp` (Word) |
 | Audit logs | `/api/v1/audit-logs/` (только admin) |
 | WebSocket | `ws://host/ws/projects/{project_id}` |
 

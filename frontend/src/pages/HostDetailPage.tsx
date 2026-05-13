@@ -24,13 +24,17 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  FormControl,
   Grid2 as Grid,
   IconButton,
+  InputLabel,
+  LinearProgress,
   List,
   ListItem,
   Menu,
   MenuItem,
   Paper,
+  Select,
   Stack,
   Table,
   TableBody,
@@ -45,7 +49,10 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { MarkdownEditor } from "../components/MarkdownEditor";
+import { MarkdownImage } from "../components/MarkdownImage";
 import { MarkdownOutlinedReadonlyField } from "../components/MarkdownOutlinedReadonlyField";
+import { markdownUrlTransform, normalizeMarkdownForRender } from "../markdownUrlTransform";
 import {
   createHost,
   createVulnerabilityComment,
@@ -77,6 +84,7 @@ import {
   uploadVulnerabilityFile,
 } from "../api";
 import { calculateCvssScore, severityFromCvssScore } from "../cvss";
+import { HostOsIcon } from "../components/HostOsIcon";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
 import { useAuthStore } from "../store";
@@ -86,13 +94,16 @@ import type {
   EndpointRequestHeader,
   Host,
   HostDetails,
+  HostIpAddress,
   HostTreeStats,
+  OsType,
   Port,
   Service,
   Vulnerability,
   VulnerabilityComment,
   VulnerabilityDetails,
 } from "../types";
+import { OS_TYPE_OPTIONS } from "../types";
 import { useErrorToast, useToastMessage } from "../useErrorToast";
 
 /** Swagger UI–style colors for HTTP methods */
@@ -108,6 +119,11 @@ const SWAGGER_METHOD_COLORS: Record<string, { main: string; contrast: string }> 
 const CVSS_VERSION = "4.0" as const;
 const UUID_PATH_SEGMENT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ENDPOINT_TABLE_NAME_COLUMN_WIDTH = "32%";
+
+type HostIpDraft = Pick<HostIpAddress, "ip_address" | "is_primary"> & {
+  id: string;
+  label: string;
+};
 
 function swaggerMethodColors(method: string | null | undefined): { main: string; contrast: string } {
   const key = (method || "GET").toUpperCase();
@@ -491,21 +507,9 @@ function collectExpandableFolderKeys(node: EndpointPathTreeNode): string[] {
   return keys;
 }
 
-function postEndpointDeleteModeDebugLog(location: string, message: string, data: Record<string, unknown>, hypothesisId: string) {
-  fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
-    body: JSON.stringify({ sessionId: "755228", runId: "endpoint-delete-mode", hypothesisId, location, message, data, timestamp: Date.now() }),
-  }).catch(() => {});
-}
+function postEndpointDeleteModeDebugLog(_location: string, _message: string, _data: Record<string, unknown>, _hypothesisId: string): void {}
 
-function postHostDetailReloadDebugLog(location: string, message: string, data: Record<string, unknown>, hypothesisId: string) {
-  fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
-    body: JSON.stringify({ sessionId: "755228", runId: "host-detail-reload", hypothesisId, location, message, data, timestamp: Date.now() }),
-  }).catch(() => {});
-}
+function postHostDetailReloadDebugLog(_location: string, _message: string, _data: Record<string, unknown>, _hypothesisId: string): void {}
 
 export function HostDetailPage() {
   const { projectId, hostId, vulnerabilityId } = useParams<{ projectId: string; hostId: string; vulnerabilityId?: string }>();
@@ -588,9 +592,10 @@ export function HostDetailPage() {
   const [creatingVulnerabilityRecommendations, setCreatingVulnerabilityRecommendations] = useState("");
   const [hostActionsAnchorEl, setHostActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [isEditHostOpen, setEditHostOpen] = useState(false);
-  const [editingHostIp, setEditingHostIp] = useState("");
+  const [editingHostIps, setEditingHostIps] = useState<HostIpDraft[]>([]);
   const [editingHostName, setEditingHostName] = useState("");
   const [editingHostNotes, setEditingHostNotes] = useState("");
+  const [editingHostOsType, setEditingHostOsType] = useState<OsType>("unknown");
   const [portActionsAnchorEl, setPortActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activePort, setActivePort] = useState<Port | null>(null);
   const [portsSectionMenuAnchorEl, setPortsSectionMenuAnchorEl] = useState<HTMLElement | null>(null);
@@ -998,13 +1003,55 @@ export function HostDetailPage() {
     setActivePort(null);
   };
 
+  const buildHostIpDrafts = (source: HostDetails): HostIpDraft[] => {
+    const items =
+      source.ip_addresses?.length > 0
+        ? source.ip_addresses
+        : source.ip_address
+          ? [{ id: "primary", ip_address: source.ip_address, label: null, is_primary: true }]
+          : [];
+    return items.map((item) => ({
+      id: item.id || crypto.randomUUID(),
+      ip_address: item.ip_address,
+      label: item.label ?? "",
+      is_primary: item.is_primary,
+    }));
+  };
+
+  const updateHostIpDraft = (draftId: string, patch: Partial<HostIpDraft>) => {
+    setEditingHostIps((prev) => prev.map((item) => (item.id === draftId ? { ...item, ...patch } : item)));
+  };
+
+  const addHostIpDraft = () => {
+    setEditingHostIps((prev) => [...prev, { id: crypto.randomUUID(), ip_address: "", label: "", is_primary: prev.length === 0 }]);
+  };
+
+  const removeHostIpDraft = (draftId: string) => {
+    setEditingHostIps((prev) => {
+      const next = prev.filter((item) => item.id !== draftId);
+      if (next.length > 0 && !next.some((item) => item.is_primary)) {
+        return next.map((item, index) => ({ ...item, is_primary: index === 0 }));
+      }
+      return next;
+    });
+  };
+
+  const markHostIpPrimary = (draftId: string) => {
+    setEditingHostIps((prev) => prev.map((item) => ({ ...item, is_primary: item.id === draftId })));
+  };
+
+  const normalizedEditingHostIps = editingHostIps
+    .map((item) => ({ ...item, ip_address: item.ip_address.trim(), label: item.label.trim() }))
+    .filter((item) => item.ip_address);
+
   const openHostEdit = () => {
     if (!host) {
       return;
     }
-    setEditingHostIp(host.ip_address ?? "");
+    setEditingHostIps(buildHostIpDrafts(host));
     setEditingHostName(host.hostname ?? "");
     setEditingHostNotes(host.notes ?? "");
+    setEditingHostOsType(host.os_type ?? "unknown");
     closeHostActionsMenu();
     setEditHostOpen(true);
   };
@@ -1015,18 +1062,27 @@ export function HostDetailPage() {
     }
     setError(null);
     try {
+      const ipAddresses = normalizedEditingHostIps.map((item, index) => ({
+        ip_address: item.ip_address,
+        label: item.label || null,
+        is_primary: item.is_primary || !normalizedEditingHostIps.some((candidate) => candidate.is_primary) && index === 0,
+      }));
       const updatedHost = await updateHost(projectId, hostId, {
-        ip_address: editingHostIp.trim() || undefined,
+        ip_address: ipAddresses.find((item) => item.is_primary)?.ip_address || ipAddresses[0]?.ip_address,
+        ip_addresses: ipAddresses,
         hostname: editingHostName.trim() || undefined,
         notes: editingHostNotes.trim() || undefined,
+        os_type: editingHostOsType,
       });
       setHost((prev) =>
         prev
           ? {
               ...prev,
               ip_address: updatedHost.ip_address,
+              ip_addresses: updatedHost.ip_addresses,
               hostname: updatedHost.hostname,
               status: updatedHost.status,
+              os_type: updatedHost.os_type,
               notes: updatedHost.notes,
             }
           : prev
@@ -2094,26 +2150,6 @@ export function HostDetailPage() {
       return;
     }
     const workflowSteps = activeVulnDetails.workflow_steps || [];
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
-      body: JSON.stringify({
-        sessionId: "755228",
-        runId: "workflow-title-debug",
-        hypothesisId: "H1",
-        location: "frontend/src/pages/HostDetailPage.tsx:saveActiveVulnerability",
-        message: "Submitting vulnerability workflow steps",
-        data: {
-          vulnerabilityId: activeVulnDetails.id,
-          stepsCount: workflowSteps.length,
-          hasDescriptionCount: workflowSteps.filter((step) => Boolean((step.description || "").trim())).length,
-          withLegacyTitleCount: workflowSteps.filter((step) => Boolean((step as { title?: string }).title?.trim())).length,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     setVulnBusy(true);
     setError(null);
     try {
@@ -2200,6 +2236,13 @@ export function HostDetailPage() {
   const portsCount = host?.ports.length ?? 0;
   const endpointsCount = normalizedHostEndpoints.length;
   const vulnerabilitiesCount = vulnerabilities.length;
+  const vulnsBySeverity = useMemo(() => {
+    const counts: Record<Vulnerability["severity"], number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    vulnerabilities.forEach((v) => {
+      counts[v.severity] = (counts[v.severity] ?? 0) + 1;
+    });
+    return counts;
+  }, [vulnerabilities]);
   const severityChipSx: Record<Vulnerability["severity"], object> = {
     critical: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
     high: { bgcolor: "rgba(255,152,0,0.18)", color: "#ffcc80", border: "1px solid rgba(255,152,0,0.4)" },
@@ -2772,8 +2815,14 @@ export function HostDetailPage() {
       return <MarkdownOutlinedReadonlyField label={title} inputId={inputId} value={value} emptyText={emptyText} />;
     }
     return (
-      <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
-        {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
+      <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)", "& p": { color: "#ffffff" }, "& li": { color: "#ffffff" }, "& a": { color: "rgba(255,255,255,0.92)" } }}>
+        {value?.trim() ? (
+          <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
+            {normalizeMarkdownForRender(value)}
+          </ReactMarkdown>
+        ) : (
+          <Typography color="text.secondary">{emptyText}</Typography>
+        )}
       </Box>
     );
   };
@@ -2883,13 +2932,11 @@ export function HostDetailPage() {
           </Grid>
           <Grid size={{ xs: 12 }}>
             {vulnEditMode ? (
-              <TextField
+              <MarkdownEditor
                 label="Влияние"
-                fullWidth
-                multiline
                 minRows={2}
-                value={activeVulnDetails.impact || ""}
-                onChange={(event) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: event.target.value || null } : prev))}
+                value={activeVulnDetails.impact}
+                onChange={(next) => setActiveVulnDetails((prev) => (prev ? { ...prev, impact: next } : prev))}
               />
             ) : (
               renderMarkdownPreview(activeVulnDetails.impact, "Влияние не указано.", "Влияние")
@@ -2897,14 +2944,12 @@ export function HostDetailPage() {
           </Grid>
           <Grid size={{ xs: 12 }}>
             {vulnEditMode ? (
-              <TextField
+              <MarkdownEditor
                 label="Рекомендации"
-                fullWidth
-                multiline
                 minRows={2}
-                value={activeVulnDetails.recommendations || ""}
-                onChange={(event) =>
-                  setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: event.target.value || null } : prev))
+                value={activeVulnDetails.recommendations}
+                onChange={(next) =>
+                  setActiveVulnDetails((prev) => (prev ? { ...prev, recommendations: next } : prev))
                 }
               />
             ) : (
@@ -2946,10 +2991,13 @@ export function HostDetailPage() {
   return (
     <Stack spacing={2.5}>
       <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
-        <Stack spacing={0.2}>
-          <Typography variant="h4" fontWeight={700}>
-            Хост: {hostTitle}
-          </Typography>
+        <Stack direction="row" alignItems="center" spacing={1.5}>
+          <HostOsIcon os_type={host?.os_type ?? "unknown"} sx={{ fontSize: 36 }} />
+          <Stack spacing={0.2}>
+            <Typography variant="h4" fontWeight={700}>
+              Хост: {hostTitle}
+            </Typography>
+          </Stack>
         </Stack>
       </Stack>
 
@@ -3061,6 +3109,94 @@ export function HostDetailPage() {
             <Stack spacing={2}>
               <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
                 <CardContent>
+                  <Typography variant="h6" fontWeight={700} mb={1.5}>
+                    Уязвимости по уровням
+                  </Typography>
+                  <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
+                    {(["critical", "high", "medium", "low", "info"] as const).map((sev) => {
+                      const count = vulnsBySeverity[sev] ?? 0;
+                      const total = vulnerabilitiesCount || 1;
+                      const percent = vulnerabilitiesCount > 0 ? (count / total) * 100 : 0;
+                      const palette: Record<typeof sev, { bg: string; text: string; bar: string; ring: string }> = {
+                        critical: { bg: "#b71c1c", text: "#fff", bar: "#f44336", ring: "rgba(244,67,54,0.45)" },
+                        high: { bg: "#e65100", text: "#fff", bar: "#ff9800", ring: "rgba(255,152,0,0.45)" },
+                        medium: { bg: "#f9a825", text: "#1a1a1a", bar: "#ffeb3b", ring: "rgba(255,235,59,0.45)" },
+                        low: { bg: "#2e7d32", text: "#fff", bar: "#4caf50", ring: "rgba(76,175,80,0.45)" },
+                        info: { bg: "#1565c0", text: "#fff", bar: "#2196f3", ring: "rgba(33,150,243,0.45)" },
+                      };
+                      const labels: Record<typeof sev, string> = {
+                        critical: "Critical",
+                        high: "High",
+                        medium: "Medium",
+                        low: "Low",
+                        info: "Info",
+                      };
+                      const p = palette[sev];
+                      return (
+                        <Box key={sev} sx={{ minWidth: 110, textAlign: "center" }}>
+                          <Avatar
+                            sx={{
+                              width: 56,
+                              height: 56,
+                              bgcolor: p.bg,
+                              color: p.text,
+                              fontWeight: 700,
+                              fontSize: "1.25rem",
+                              mx: "auto",
+                              boxShadow: `0 0 0 4px ${p.ring}`,
+                            }}
+                          >
+                            {count}
+                          </Avatar>
+                          <Typography variant="caption" sx={{ display: "block", mt: 0.75, color: "text.secondary" }}>
+                            {labels[sev]}
+                          </Typography>
+                          <LinearProgress
+                            variant="determinate"
+                            value={percent}
+                            sx={{
+                              mt: 0.5,
+                              height: 4,
+                              borderRadius: 2,
+                              backgroundColor: "rgba(255,255,255,0.06)",
+                              "& .MuiLinearProgress-bar": { backgroundColor: p.bar },
+                            }}
+                          />
+                          <Typography variant="caption" sx={{ color: "text.secondary", fontSize: "0.7rem" }}>
+                            {vulnerabilitiesCount > 0 ? `${percent.toFixed(0)}%` : "—"}
+                          </Typography>
+                        </Box>
+                      );
+                    })}
+                  </Stack>
+                </CardContent>
+              </Card>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
+                <CardContent>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                    <Typography variant="h6" fontWeight={700}>
+                      IP-адреса
+                    </Typography>
+                    <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={openHostEdit}>
+                      Добавить
+                    </Button>
+                  </Stack>
+                  <Stack spacing={1}>
+                    {(host?.ip_addresses?.length ? host.ip_addresses : host?.ip_address ? [{ id: "primary", ip_address: host.ip_address, label: null, is_primary: true }] : []).map((ip) => (
+                      <Box key={ip.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, backgroundColor: "rgba(8,17,31,0.24)" }}>
+                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                          <Typography fontWeight={700}>{ip.ip_address}</Typography>
+                          {ip.label ? <Typography color="text.secondary">{ip.label}</Typography> : null}
+                          {ip.is_primary ? <Chip size="small" color="primary" label="Основной" /> : null}
+                        </Stack>
+                      </Box>
+                    ))}
+                    {!host?.ip_addresses?.length && !host?.ip_address && <Typography color="text.secondary">IP-адреса не добавлены.</Typography>}
+                  </Stack>
+                </CardContent>
+              </Card>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
+                <CardContent>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                     <Typography variant="h6" fontWeight={700}>
                       Описание хоста
@@ -3070,7 +3206,13 @@ export function HostDetailPage() {
                     </IconButton>
                   </Stack>
                   <Box sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 2, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
-                    <ReactMarkdown>{host?.notes || "_Описание хоста не заполнено_"}</ReactMarkdown>
+                    {host?.notes?.trim() ? (
+                      <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
+                        {normalizeMarkdownForRender(host.notes)}
+                      </ReactMarkdown>
+                    ) : (
+                      <Typography color="text.secondary">Описание хоста не заполнено</Typography>
+                    )}
                   </Box>
                 </CardContent>
               </Card>
@@ -3710,20 +3852,75 @@ export function HostDetailPage() {
         <DialogTitle>Редактировать хост</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField label="IP-адрес" value={editingHostIp} onChange={(event) => setEditingHostIp(event.target.value)} />
+            <Stack spacing={1}>
+              <Stack direction="row" justifyContent="space-between" alignItems="center">
+                <Typography variant="subtitle2">IP-адреса</Typography>
+                <Button size="small" startIcon={<AddIcon />} onClick={addHostIpDraft}>
+                  Добавить IP
+                </Button>
+              </Stack>
+              {editingHostIps.map((item) => (
+                <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.2, backgroundColor: "rgba(8,17,31,0.24)" }}>
+                  <Stack direction={{ xs: "column", md: "row" }} spacing={1} alignItems={{ md: "center" }}>
+                    <TextField
+                      label="IP-адрес"
+                      value={item.ip_address}
+                      onChange={(event) => updateHostIpDraft(item.id, { ip_address: event.target.value })}
+                      sx={{ flex: 1 }}
+                    />
+                    <TextField
+                      label="Метка"
+                      value={item.label}
+                      onChange={(event) => updateHostIpDraft(item.id, { label: event.target.value })}
+                      sx={{ flex: 1 }}
+                    />
+                    <Stack direction="row" spacing={0.5} alignItems="center">
+                      <Chip
+                        size="small"
+                        color={item.is_primary ? "primary" : "default"}
+                        variant={item.is_primary ? "filled" : "outlined"}
+                        label={item.is_primary ? "Основной" : "Сделать основным"}
+                        onClick={() => markHostIpPrimary(item.id)}
+                      />
+                      <IconButton size="small" onClick={() => removeHostIpDraft(item.id)} disabled={editingHostIps.length <= 1 && !editingHostName.trim()}>
+                        <DeleteOutlineIcon fontSize="small" />
+                      </IconButton>
+                    </Stack>
+                  </Stack>
+                </Box>
+              ))}
+              {editingHostIps.length === 0 && <Typography color="text.secondary">IP-адреса не добавлены. Укажите hostname или добавьте IP.</Typography>}
+            </Stack>
             <TextField label="Hostname" value={editingHostName} onChange={(event) => setEditingHostName(event.target.value)} />
-            <TextField
-              multiline
+            <FormControl fullWidth size="small">
+              <InputLabel id="host-os-type-label">Тип ОС</InputLabel>
+              <Select
+                labelId="host-os-type-label"
+                label="Тип ОС"
+                value={editingHostOsType}
+                onChange={(event) => setEditingHostOsType(event.target.value as OsType)}
+              >
+                {OS_TYPE_OPTIONS.map((option) => (
+                  <MenuItem key={option.value} value={option.value}>
+                    <Stack direction="row" alignItems="center" spacing={1}>
+                      <HostOsIcon os_type={option.value} fontSize="small" />
+                      <span>{option.label}</span>
+                    </Stack>
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <MarkdownEditor
               minRows={4}
               label="Описание"
               value={editingHostNotes}
-              onChange={(event) => setEditingHostNotes(event.target.value)}
+              onChange={(next) => setEditingHostNotes(next || "")}
             />
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditHostOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={() => void saveHostInfo()} disabled={!editingHostIp.trim() && !editingHostName.trim()}>
+          <Button variant="contained" onClick={() => void saveHostInfo()} disabled={normalizedEditingHostIps.length === 0 && !editingHostName.trim()}>
             Сохранить
           </Button>
         </DialogActions>
@@ -3833,7 +4030,6 @@ export function HostDetailPage() {
                 placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
                 value={editingEndpointImportRaw}
                 onChange={(event) => setEditingEndpointImportRaw(event.target.value)}
-                helperText="Поля ниже заполняются автоматически, если запрос удалось разобрать."
               />
             </Stack>
             <Divider />
@@ -3871,7 +4067,6 @@ export function HostDetailPage() {
                 minRows={2}
                 label="Параметры запроса (query string)"
                 placeholder="foo=bar&limit=10"
-                helperText="Пары имя=значение, разделитель & или новая строка"
                 value={editingEndpointQueryString}
                 onChange={(event) => setEditingEndpointQueryString(event.target.value)}
               />
@@ -3881,7 +4076,6 @@ export function HostDetailPage() {
               minRows={4}
               label="Заголовки"
               placeholder={"Accept: application/json\nCookie: ... (будет заменён на плейсхолдер при сохранении)"}
-              helperText="Каждый заголовок с новой строки: Name: value. Cookie и Authorization при сохранении очищаются."
               value={editingEndpointHeadersText}
               onChange={(event) => setEditingEndpointHeadersText(event.target.value)}
               sx={{ "& textarea": { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } }}
@@ -3961,7 +4155,6 @@ export function HostDetailPage() {
                 placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
                 value={creatingEndpointImportRaw}
                 onChange={(event) => setCreatingEndpointImportRaw(event.target.value)}
-                helperText="Поля ниже заполняются автоматически, если запрос удалось разобрать."
               />
             </Stack>
             <Divider />
@@ -3999,7 +4192,6 @@ export function HostDetailPage() {
                 minRows={2}
                 label="Параметры запроса (query string)"
                 placeholder="foo=bar&limit=10"
-                helperText="Пары имя=значение, разделитель & или новая строка"
                 value={creatingEndpointQueryString}
                 onChange={(event) => setCreatingEndpointQueryString(event.target.value)}
               />
@@ -4009,7 +4201,6 @@ export function HostDetailPage() {
               minRows={4}
               label="Заголовки"
               placeholder={"Accept: application/json\nAuthorization: Bearer ..."}
-              helperText="Каждый заголовок с новой строки: Name: value. Cookie и Authorization при сохранении очищаются."
               value={creatingEndpointHeadersText}
               onChange={(event) => setCreatingEndpointHeadersText(event.target.value)}
               sx={{ "& textarea": { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } }}
@@ -4129,12 +4320,11 @@ export function HostDetailPage() {
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Название" value={editingVulnerabilityTitle} onChange={(event) => setEditingVulnerabilityTitle(event.target.value)} />
-            <TextField
-              multiline
+            <MarkdownEditor
               minRows={3}
               label="Описание"
               value={editingVulnerabilityDescription}
-              onChange={(event) => setEditingVulnerabilityDescription(event.target.value)}
+              onChange={(next) => setEditingVulnerabilityDescription(next || "")}
             />
             <TextField
               select

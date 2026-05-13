@@ -105,13 +105,7 @@ export function ProfilePage() {
           <TextField label="Отображаемое имя" value={fullName} onChange={(event) => setFullName(event.target.value)} fullWidth />
           <TextField label="Логин" value={username} onChange={(event) => setUsername(event.target.value)} fullWidth />
           <TextField label="Email" value={email} onChange={(event) => setEmail(event.target.value)} fullWidth />
-          <TextField
-            label="Теги"
-            value={tagsText}
-            onChange={(event) => setTagsText(event.target.value)}
-            helperText="Укажи теги через запятую, например: teamlead, web, internal"
-            fullWidth
-          />
+          <TextField label="Теги" value={tagsText} onChange={(event) => setTagsText(event.target.value)} fullWidth />
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
             {tagsPreview.map((tag) => (
               <Chip key={tag} label={tag} size="small" />

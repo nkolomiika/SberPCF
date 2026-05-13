@@ -13,6 +13,8 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: "./src/setupTests.ts",
+    /** Дубликаты компилированных *.test.js рядом с *.test.tsx давали двойной запуск одних и тех же тестов. */
+    exclude: ["**/node_modules/**", "**/dist/**", "**/*.test.js"],
   },
   server: {
     host: "0.0.0.0",

@@ -8,6 +8,7 @@ from app.enums import (
     CvssVersion,
     HostStatus,
     HttpMethod,
+    OsType,
     PortState,
     ProjectStatus,
     Protocol,
@@ -55,6 +56,33 @@ class LoginResponse(BaseModel):
 class RefreshResponse(BaseModel):
     ok: bool = True
     must_change_password: bool = False
+
+
+class AgentTokenCreate(InputBaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    scopes: list[str] = Field(default_factory=list)
+    project_ids: list[UUID] = Field(default_factory=list)
+    all_projects: bool = False
+    expires_at: datetime | None = None
+
+
+class AgentTokenOut(ORMBase):
+    id: UUID
+    name: str
+    token_prefix: str
+    scopes: list[str] = Field(default_factory=list)
+    all_projects: bool
+    created_by: UUID
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    project_ids: list[UUID] = Field(default_factory=list)
+
+
+class AgentTokenCreateResponse(AgentTokenOut):
+    token: str
 
 
 class UserCreate(InputBaseModel):
@@ -187,23 +215,145 @@ class ProjectMemberOut(BaseModel):
     added_at: datetime
 
 
+class JiraConfigUpsert(InputBaseModel):
+    name: str = Field(default="default", min_length=1, max_length=255)
+    base_url: str = Field(min_length=1, max_length=1024)
+    email: EmailStr
+    api_token: str | None = Field(default=None, min_length=1)
+    default_issue_type: str = Field(default="Task", min_length=1, max_length=100)
+    is_enabled: bool = True
+
+
+class JiraConfigOut(ORMBase):
+    id: UUID
+    name: str
+    base_url: str
+    email: EmailStr
+    default_issue_type: str
+    is_enabled: bool
+    created_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectJiraLinkUpsert(InputBaseModel):
+    jira_project_key: str = Field(min_length=1, max_length=32)
+
+
+class ProjectJiraLinkOut(ORMBase):
+    id: UUID
+    project_id: UUID
+    jira_project_key: str
+    created_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class JiraIssueLinkOut(ORMBase):
+    id: UUID
+    vulnerability_id: UUID
+    jira_issue_key: str
+    jira_issue_url: str
+    status: str
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectNoteCreate(InputBaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    parent_id: UUID | None = None
+    content: str | None = None
+
+
+class ProjectNoteUpdate(InputBaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    content: str | None = None
+
+
+class ProjectNoteMove(InputBaseModel):
+    parent_id: UUID | None = None
+
+
+class ProjectNoteReorderItem(InputBaseModel):
+    id: UUID
+    sort_order: int = Field(ge=0, le=100000)
+
+
+class ProjectNoteReorder(InputBaseModel):
+    parent_id: UUID | None = None
+    items: list[ProjectNoteReorderItem] = Field(default_factory=list, min_length=1)
+
+
+class ProjectNoteOut(ORMBase):
+    id: UUID
+    project_id: UUID
+    parent_id: UUID | None
+    title: str
+    content: str | None
+    sort_order: int
+    created_by: UUID
+    updated_by: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class HostIpAddressCreate(InputBaseModel):
+    ip_address: str = Field(min_length=1, max_length=45)
+    label: str | None = Field(default=None, max_length=100)
+    is_primary: bool = False
+
+
+class HostIpAddressUpdate(InputBaseModel):
+    ip_address: str | None = Field(default=None, min_length=1, max_length=45)
+    label: str | None = Field(default=None, max_length=100)
+    is_primary: bool | None = None
+
+
+class HostIpAddressOut(ORMBase):
+    id: UUID
+    host_id: UUID
+    ip_address: str
+    label: str | None
+    is_primary: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class HostCreate(InputBaseModel):
     ip_address: str | None = Field(default=None, max_length=45)
+    """Алиас для обратной совместимости — попадает в primary IP при создании."""
+    ip_addresses: list[str] = Field(default_factory=list)
+    """Полный список IP-адресов хоста; первый помечается как primary."""
     hostname: str | None = Field(default=None, max_length=255)
     status: HostStatus = HostStatus.UNKNOWN
+    os_type: OsType = OsType.UNKNOWN
     notes: str | None = None
 
     @model_validator(mode="after")
     def validate_target_defined(self) -> "HostCreate":
-        if not self.ip_address and not self.hostname:
-            raise ValueError("Нужно указать ip_address или hostname")
+        # Унифицируем ip_address и ip_addresses в один список без дублей и пустот.
+        merged: list[str] = []
+        for raw in [self.ip_address, *self.ip_addresses]:
+            if not raw:
+                continue
+            value = raw.strip()
+            if value and value not in merged:
+                merged.append(value)
+        self.ip_addresses = merged
+        if merged:
+            self.ip_address = merged[0]
+        if not self.ip_addresses and not self.hostname:
+            raise ValueError("Нужно указать хотя бы один ip_address или hostname")
         return self
 
 
 class HostUpdate(InputBaseModel):
     ip_address: str | None = Field(default=None, max_length=45)
+    ip_addresses: list[HostIpAddressCreate] | None = None
     hostname: str | None = Field(default=None, max_length=255)
     status: HostStatus | None = None
+    os_type: OsType | None = None
     notes: str | None = None
 
 
@@ -211,8 +361,11 @@ class HostOut(ORMBase):
     id: UUID
     project_id: UUID
     ip_address: str | None
+    """Primary IP — синоним для is_primary=true записи в ip_addresses."""
+    ip_addresses: list[HostIpAddressOut] = Field(default_factory=list)
     hostname: str | None
     status: HostStatus
+    os_type: OsType = OsType.UNKNOWN
     notes: str | None
     created_at: datetime
     updated_at: datetime
@@ -440,6 +593,26 @@ class CommentOut(ORMBase):
     avatar_url: str | None = None
     content: str
     mentions: list[MentionOut]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectNoteCommentCreate(InputBaseModel):
+    content: str = Field(min_length=1)
+
+
+class ProjectNoteCommentUpdate(InputBaseModel):
+    content: str = Field(min_length=1)
+
+
+class ProjectNoteCommentOut(ORMBase):
+    id: UUID
+    project_id: UUID
+    note_id: UUID
+    user_id: UUID
+    username: str
+    avatar_url: str | None = None
+    content: str
     created_at: datetime
     updated_at: datetime
 

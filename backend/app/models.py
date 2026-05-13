@@ -27,6 +27,7 @@ from app.enums import (
     HostStatus,
     HttpMethod,
     NotificationType,
+    OsType,
     PortState,
     ProjectStatus,
     Protocol,
@@ -87,6 +88,35 @@ class RefreshToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentApiToken(Base, TimestampMixin):
+    """Bearer-токен для машинного `/api/v2` доступа AI-агентов."""
+
+    __tablename__ = "agent_api_tokens"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    all_projects: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_by: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentApiTokenProjectGrant(Base):
+    """Разрешение agent token на конкретный проект."""
+
+    __tablename__ = "agent_api_token_project_grants"
+    __table_args__ = (UniqueConstraint("token_id", "project_id", name="uq_agent_api_token_project"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    token_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("agent_api_tokens.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class MailJob(Base, TimestampMixin):
@@ -160,8 +190,88 @@ class ProjectMember(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class JiraInstance(Base, TimestampMixin):
+    """Глобальная конфигурация Jira для backend-only интеграции."""
+
+    __tablename__ = "jira_instances"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="default", server_default="default")
+    base_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    default_issue_type: Mapped[str] = mapped_column(String(100), nullable=False, default="Task", server_default="Task")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_by: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+
+class ProjectJiraLink(Base, TimestampMixin):
+    """Привязка проекта PCF к Jira project key."""
+
+    __tablename__ = "project_jira_links"
+    __table_args__ = (UniqueConstraint("project_id", name="uq_project_jira_link_project"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    jira_project_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+
+class ProjectNote(Base, TimestampMixin):
+    """Вложенная заметка проекта (Confluence-like)."""
+
+    __tablename__ = "project_notes"
+    __table_args__ = (UniqueConstraint("project_id", "parent_id", "title", name="uq_project_note_sibling_title"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    parent_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("project_notes.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_by: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    updated_by: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+
+
+class ProjectNoteComment(Base, TimestampMixin):
+    """Комментарий к странице заметки проекта."""
+
+    __tablename__ = "project_note_comments"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    note_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("project_notes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class Host(Base, TimestampMixin):
-    """Хост инфраструктуры проекта."""
+    """Хост инфраструктуры проекта.
+
+    Поле ``ip_address`` сохранено для обратной совместимости и хранит «основной»
+    IP-адрес (тот же, что и ``HostIpAddress.is_primary == True``). Полный список
+    IP-адресов хоста ведётся в отдельной таблице :class:`HostIpAddress`.
+    """
 
     __tablename__ = "hosts"
     __table_args__ = (
@@ -173,7 +283,42 @@ class Host(Base, TimestampMixin):
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[HostStatus] = mapped_column(Enum(HostStatus, name="host_status"), nullable=False, default=HostStatus.UNKNOWN)
+    os_type: Mapped[OsType] = mapped_column(
+        Enum(OsType, name="host_os_type"),
+        nullable=False,
+        default=OsType.UNKNOWN,
+        server_default=OsType.UNKNOWN.value,
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    ip_addresses: Mapped[list["HostIpAddress"]] = relationship(
+        "HostIpAddress",
+        back_populates="host",
+        cascade="all, delete-orphan",
+        order_by="HostIpAddress.created_at",
+    )
+
+
+class HostIpAddress(Base, TimestampMixin):
+    """Один IP-адрес хоста — у одного хоста их может быть несколько."""
+
+    __tablename__ = "host_ip_addresses"
+    __table_args__ = (
+        UniqueConstraint("host_id", "ip_address", name="uq_host_ip_address"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    host_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("hosts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ip_address: Mapped[str] = mapped_column(String(45), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    host: Mapped[Host] = relationship("Host", back_populates="ip_addresses")
 
 
 class Port(Base, TimestampMixin):
@@ -258,6 +403,25 @@ class VulnerabilityAsset(Base):
     )
     asset_type: Mapped[AssetType] = mapped_column(Enum(AssetType, name="asset_type"), nullable=False)
     asset_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+
+
+class JiraIssueLink(Base, TimestampMixin):
+    """Связь уязвимости PCF с issue в Jira."""
+
+    __tablename__ = "jira_issue_links"
+    __table_args__ = (UniqueConstraint("vulnerability_id", name="uq_jira_issue_link_vulnerability"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    vulnerability_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("vulnerabilities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    jira_issue_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    jira_issue_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="linked", server_default="linked")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class File(Base):

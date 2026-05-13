@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   AppBar,
@@ -27,6 +27,7 @@ import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import LogoutIcon from "@mui/icons-material/Logout";
 import ManageAccountsIcon from "@mui/icons-material/ManageAccounts";
 import NotificationsIcon from "@mui/icons-material/Notifications";
+import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import HistoryIcon from "@mui/icons-material/History";
 import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
 import type { PaletteMode } from "@mui/material";
@@ -40,8 +41,19 @@ import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { AiAgentIntegrationPage } from "./pages/AiAgentIntegrationPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { UsersAdminPage } from "./pages/UsersAdminPage";
+
+const isEditableTextTarget = (target: EventTarget | null): target is HTMLInputElement | HTMLTextAreaElement | HTMLElement => {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    return !target.readOnly && !target.disabled;
+  }
+  return target.isContentEditable;
+};
 
 type PrivateLayoutProps = {
   themeMode: PaletteMode;
@@ -145,6 +157,11 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     };
   }, [isPasswordChangeLocked, loadUnreadNotifications, user]);
 
+  const notificationsOpenRef = useRef(notificationsOpen);
+  useEffect(() => {
+    notificationsOpenRef.current = notificationsOpen;
+  }, [notificationsOpen]);
+
   useEffect(() => {
     if (!user || isPasswordChangeLocked) {
       return;
@@ -154,14 +171,14 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     socket.onmessage = () => {
       pushToast("Новое уведомление", "info");
       void loadUnreadNotifications();
-      if (notificationsOpen) {
+      if (notificationsOpenRef.current) {
         void loadNotificationsList();
       }
     };
     return () => {
       socket.close();
     };
-  }, [isPasswordChangeLocked, loadNotificationsList, loadUnreadNotifications, notificationsOpen, pushToast, user]);
+  }, [isPasswordChangeLocked, loadNotificationsList, loadUnreadNotifications, pushToast, user]);
 
   const openNotifications = async (event: React.MouseEvent<HTMLElement>) => {
     if (isPasswordChangeLocked) {
@@ -399,6 +416,20 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemText>Журнал действий</ListItemText>
           </MenuItem>
         )}
+        {user.role === "admin" && (
+          <MenuItem
+            onClick={() => {
+              navigate("/ai-integration");
+              closeProfileMenu();
+            }}
+            sx={{ minWidth: 220 }}
+          >
+            <ListItemIcon sx={{ minWidth: 30 }}>
+              <SmartToyOutlinedIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>ИИ / API агента</ListItemText>
+          </MenuItem>
+        )}
         <MenuItem
           onClick={() => {
             closeProfileMenu();
@@ -489,6 +520,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             }
           />
           <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/ai-integration" element={user.role === "admin" ? <AiAgentIntegrationPage /> : <Navigate to="/" replace />} />
           <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId" element={<HostDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId/vulnerabilities/:vulnerabilityId" element={<HostDetailPage />} />
@@ -513,6 +545,26 @@ export default function App({ themeMode }: AppProps) {
   useEffect(() => {
     void initialize();
   }, [initialize]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !(event.ctrlKey || event.metaKey) || event.altKey || !isEditableTextTarget(event.target)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const isUndo = key === "z" && !event.shiftKey;
+      const isRedo = key === "y" || (key === "z" && event.shiftKey);
+      if (!isUndo && !isRedo) {
+        return;
+      }
+      event.preventDefault();
+      document.execCommand(isUndo ? "undo" : "redo");
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+    };
+  }, []);
 
   if (!isInitialized) {
     return (

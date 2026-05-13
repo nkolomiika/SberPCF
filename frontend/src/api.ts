@@ -20,8 +20,11 @@ import type {
   ProjectMember,
   PasswordResetResult,
   User,
+  ProjectNote,
+  ProjectNoteComment,
   Vulnerability,
   VulnerabilityAsset,
+  AgentApiToken,
 } from "./types";
 
 const api = axios.create({
@@ -217,6 +220,17 @@ export async function moveProjectFolder(folderId: string, payload: { parent_id?:
   return data;
 }
 
+export interface DeleteProjectFolderResult {
+  path: string;
+  deleted_folders: number;
+  deleted_projects: number;
+}
+
+export async function deleteProjectFolder(folderId: string): Promise<DeleteProjectFolderResult> {
+  const { data } = await api.delete<DeleteProjectFolderResult>(`/projects/folders/${folderId}`);
+  return data;
+}
+
 export async function createProject(payload: {
   name: string;
   folder?: string;
@@ -265,6 +279,93 @@ export async function removeProjectMember(projectId: string, userId: string): Pr
   await api.delete(`/projects/${projectId}/members/${userId}`);
 }
 
+export async function listProjectNotes(projectId: string): Promise<ProjectNote[]> {
+  const { data } = await api.get<ProjectNote[]>(`/projects/${projectId}/notes`);
+  return data;
+}
+
+export async function getProjectNote(projectId: string, noteId: string): Promise<ProjectNote> {
+  const { data } = await api.get<ProjectNote>(`/projects/${projectId}/notes/${noteId}`);
+  return data;
+}
+
+export async function createProjectNote(
+  projectId: string,
+  payload: { title: string; parent_id?: string | null; content?: string | null }
+): Promise<ProjectNote> {
+  assertRequired(payload.title, "Название страницы");
+  const { data } = await api.post<ProjectNote>(`/projects/${projectId}/notes`, payload);
+  return data;
+}
+
+export async function updateProjectNote(
+  projectId: string,
+  noteId: string,
+  payload: { title?: string; content?: string | null }
+): Promise<ProjectNote> {
+  if (payload.title !== undefined) {
+    assertRequired(payload.title, "Название страницы");
+  }
+  const { data } = await api.put<ProjectNote>(`/projects/${projectId}/notes/${noteId}`, payload);
+  return data;
+}
+
+export async function moveProjectNote(
+  projectId: string,
+  noteId: string,
+  payload: { parent_id?: string | null }
+): Promise<ProjectNote> {
+  const { data } = await api.patch<ProjectNote>(`/projects/${projectId}/notes/${noteId}/move`, payload);
+  return data;
+}
+
+export async function reorderProjectNotes(
+  projectId: string,
+  payload: { parent_id?: string | null; items: Array<{ id: string; sort_order: number }> }
+): Promise<ProjectNote[]> {
+  if (!payload.items.length) {
+    throw new Error("Нужно передать хотя бы одну страницу для сортировки");
+  }
+  const { data } = await api.patch<ProjectNote[]>(`/projects/${projectId}/notes/reorder`, payload);
+  return data;
+}
+
+export async function deleteProjectNote(projectId: string, noteId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/notes/${noteId}`);
+}
+
+export async function listProjectNoteComments(projectId: string, noteId: string): Promise<PaginatedResponse<ProjectNoteComment>> {
+  const { data } = await api.get<PaginatedResponse<ProjectNoteComment>>(`/projects/${projectId}/notes/${noteId}/comments`, {
+    params: { page: 1, size: 100 },
+  });
+  return data;
+}
+
+export async function createProjectNoteComment(
+  projectId: string,
+  noteId: string,
+  content: string
+): Promise<ProjectNoteComment> {
+  assertRequired(content, "Комментарий");
+  const { data } = await api.post<ProjectNoteComment>(`/projects/${projectId}/notes/${noteId}/comments`, { content });
+  return data;
+}
+
+export async function updateProjectNoteComment(
+  projectId: string,
+  noteId: string,
+  commentId: string,
+  content: string
+): Promise<ProjectNoteComment> {
+  assertRequired(content, "Комментарий");
+  const { data } = await api.put<ProjectNoteComment>(`/projects/${projectId}/notes/${noteId}/comments/${commentId}`, { content });
+  return data;
+}
+
+export async function deleteProjectNoteComment(projectId: string, noteId: string, commentId: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/notes/${noteId}/comments/${commentId}`);
+}
+
 export async function deleteProject(projectId: string): Promise<void> {
   await api.delete(`/projects/${projectId}`);
 }
@@ -280,6 +381,7 @@ export async function createHost(
   projectId: string,
   payload: {
     ip_address?: string;
+    ip_addresses?: string[];
     hostname?: string;
     notes?: string;
     status?: "up" | "down" | "unknown";
@@ -302,6 +404,7 @@ export async function updateHost(
   hostId: string,
   payload: {
     ip_address?: string;
+    ip_addresses?: Array<{ ip_address: string; label?: string | null; is_primary?: boolean }>;
     hostname?: string;
     notes?: string;
     status?: "up" | "down" | "unknown";
@@ -619,12 +722,38 @@ export async function exportOpenApiFile(projectId: string, hostId: string): Prom
   return data as Blob;
 }
 
-export async function generateProjectReport(projectId: string, format: "md" | "pdf" | "docx"): Promise<Blob> {
-  const { data } = await api.post(`/projects/${projectId}/reports/generate`, null, {
-    params: { format },
+export async function downloadProjectCertificationReport(projectId: string): Promise<Blob> {
+  const { data } = await api.post(`/projects/${projectId}/reports/szi`, null, {
     responseType: "blob",
   });
   return data as Blob;
+}
+
+export async function downloadProjectAcceptanceReport(projectId: string): Promise<Blob> {
+  const { data } = await api.post(`/projects/${projectId}/reports/pp`, null, {
+    responseType: "blob",
+  });
+  return data as Blob;
+}
+
+export async function listAgentTokens(): Promise<AgentApiToken[]> {
+  const { data } = await api.get<AgentApiToken[]>("/agent-tokens");
+  return data;
+}
+
+export async function createAgentToken(payload: {
+  name: string;
+  scopes: string[];
+  project_ids: string[];
+  all_projects: boolean;
+  expires_at?: string | null;
+}): Promise<AgentApiToken & { token: string }> {
+  const { data } = await api.post<AgentApiToken & { token: string }>("/agent-tokens", payload);
+  return data;
+}
+
+export async function revokeAgentToken(tokenId: string): Promise<void> {
+  await api.delete(`/agent-tokens/${tokenId}`);
 }
 
 export async function listNotifications(options?: { is_read?: boolean }): Promise<PaginatedResponse<Notification>> {

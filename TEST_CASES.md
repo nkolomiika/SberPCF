@@ -1,2533 +1,416 @@
 # Тест-кейсы PCF
-## Pentest Collaboration Framework
+
+> Pentest Collaboration Framework — система совместной работы над пентест-проектами.
+> Документ описывает актуальное тестовое покрытие приложения и предложенные сценарии для расширения покрытия.
 
 ---
 
-## О документе
+## 1. Введение
 
-Этот файл предназначен для QA-тестировщика. Он описывает полное тестовое покрытие приложения PCF — системы для совместного управления пентест-проектами.
+### 1.1 Цели документа
+- Зафиксировать наблюдаемое тестовое покрытие проекта (что уже реализовано в `backend/tests/` и `frontend/src/**/*.test.tsx`).
+- Предложить тест-кейсы (статус «Запланирован»), которые покрывают актуальную функциональность роутеров, но ещё не реализованы как автотесты.
+- Дать QA-инженеру быструю карту: «функция → ID тест-кейса → существующий тест».
 
-**Целевое покрытие:** ≥ 80%  
-**Количество тест-кейсов:** 160+  
-**Типы тестирования:** функциональное, негативное, граничные значения, безопасность, real-time
+### 1.2 Стек тестов
 
-### Условные обозначения
-
-| Обозначение | Значение |
-|---|---|
-| 🟢 Позитивный | Ожидаемый корректный сценарий |
-| 🔴 Негативный | Намеренно некорректный ввод, нарушение прав |
-| 🟡 Граничный | Граничные значения, edge-cases |
-| 🔵 Безопасность | Проверка защиты от атак |
-| **Высокий** | Критичная функциональность, блокирует работу |
-| **Средний** | Важная функциональность, частично блокирует |
-| **Низкий** | Некритично, косметика или редкий сценарий |
-
----
-
-## Тестовая среда
-
-- Базовый URL API: `http://localhost:8000/api/v1`
-- WebSocket: `ws://localhost:8000/ws/projects/{project_id}`
-- Frontend: `http://localhost:3000`
-- MinIO консоль: `http://localhost:9001`
-- Все запросы выполняются с `withCredentials: true` (cookie передаётся автоматически)
-
----
-
-## Тестовые данные (предусловия перед запуском)
-
-Перед запуском тестов в системе должны быть созданы:
-
-| Переменная | Значение | Описание |
+| Слой | Инструменты | Запуск |
 |---|---|---|
-| `ADMIN_LOGIN` | `admin` | Логин администратора |
-| `ADMIN_PASS` | `Admin1234!` | Пароль администратора |
-| `ADMIN_EMAIL` | `admin@pcf.test` | Email администратора |
-| `PENT_LOGIN` | `pentester1` | Логин пентестера |
-| `PENT_PASS` | `Pent1234!` | Пароль пентестера |
-| `PENT_EMAIL` | `pent1@pcf.test` | Email пентестера |
-| `PENT2_LOGIN` | `pentester2` | Логин второго пентестера (не участник проекта) |
-| `PENT2_PASS` | `Pent2234!` | Пароль второго пентестера |
+| Backend (юнит/сервисный) | `pytest`, `pytest-asyncio`, `unittest.mock.AsyncMock`, `MagicMock` | `cd backend && pytest` |
+| Backend (схемы Pydantic) | `pytest`, `pydantic.ValidationError` | `pytest tests/test_schemas.py` |
+| Backend (Word-отчёты) | `pytest`, `python-docx` (чтение результата) | `pytest tests/test_word_builder.py` |
+| Frontend (компоненты/страницы) | `vitest`, `@testing-library/react`, `userEvent`, `vi.mock`, `vi.hoisted` | `cd frontend && npm run test` |
+| Тестовая БД | In-memory SQLite (fallback) или PostgreSQL test DB; внешние зависимости (MinIO, ClickHouse, SMTP, Jira) — мокаются через `monkeypatch` | — |
 
-> **Создание учётных записей:** выполняется вручную через POST /api/v1/users под учётной записью администратора или через сид-скрипт.
+### 1.3 Стратегия
+- Сервисный слой — основной объект юнит-тестирования (`AssetService`, `VulnerabilityService`, `ProjectService`, `ProjectNoteService`, `CommentService`, `ImportService`, `JiraIntegrationService`, `UserService`, `ReportService`).
+- Pydantic-схемы покрываются граничными значениями (длина пароля, диапазоны портов, обязательность полей).
+- Безопасность: cookie-флаги, CSRF Origin-валидация, проверка типов JWT, SSRF-защита Jira, ACL аватаров, шифрование api_token (Fernet).
+- Интеграционных тестов через `httpx.AsyncClient` сейчас нет — соответствующие кейсы для роутеров и WebSocket помечены как «Запланирован».
 
----
-
-## Модуль 1 — Аутентификация (AUTH)
-
-> Система использует **httpOnly cookie** для хранения JWT-токенов. Токены не передаются в теле запроса и не доступны из JavaScript. Логин выставляет `access_token` (TTL 30 мин) и `refresh_token` (TTL 30 дней).
-
----
-
-### TC-AUTH-001 🟢 Успешный вход администратора
-
-**Приоритет:** Высокий
-
-**Предусловия:** Администратор `admin` / `Admin1234!` существует в системе
-
-**Шаги:**
-1. POST `/api/v1/auth/login` с телом `{"username": "admin", "password": "Admin1234!"}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Тело: `{"id": "<uuid>", "username": "admin", "role": "admin"}`
-- Заголовок `Set-Cookie` содержит `access_token=...; HttpOnly; Secure; SameSite=Strict; Path=/`
-- Заголовок `Set-Cookie` содержит `refresh_token=...; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth/refresh`
-- В теле ответа **отсутствуют** поля `access_token`, `refresh_token`, `password_hash`
+### 1.4 Условные обозначения
+- **ID** — уникальный идентификатор `TC-<MODULE>-<NNN>`.
+- **Статус**:
+  - **Реализован** — соответствующий тест найден в `backend/tests/` или `frontend/src/**/*.test.tsx`.
+  - **Запланирован** — кейс описывает поведение, заявленное в роутерах/сервисах, но автотест отсутствует.
+- В колонке «Шаги» приведён сжатый сценарий; для реализованных кейсов в скобках указан файл теста.
 
 ---
 
-### TC-AUTH-002 🟢 Успешный вход пентестера
+## 2. Тест-кейсы по модулям
 
-**Приоритет:** Высокий
+### 2.1 Аутентификация (TC-AUTH-NNN)
 
-**Шаги:**
-1. POST `/api/v1/auth/login` с `{"username": "pentester1", "password": "Pent1234!"}`
+Связано с: `app/security.py`, `app/routers/auth.py`, `app/dependencies.py`, `app/services.AuthService`.
 
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Поле `role` = `"pentester"`
-- Cookie выставлены аналогично TC-AUTH-001
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-AUTH-001 | Round-trip access JWT | — | Создать access-token через `create_access_token(uuid)`, декодировать с `expected_type="access"` (`tests/test_security.py::test_access_token_roundtrip_tc_auth_001`) | `decode_token` возвращает исходный UUID | Реализован |
+| TC-AUTH-002 | Round-trip refresh JWT | — | `create_refresh_token` → `decode_token(expected_type="refresh")` (`tests/test_security.py`) | Возвращается исходный UUID | Реализован |
+| TC-AUTH-003 | Отказ декодирования при неверном типе токена | — | Передать refresh-token в `decode_token(expected_type="access")` | `UnauthorizedError("Некорректный тип токена")` | Реализован |
+| TC-AUTH-004 | Хеш refresh-токена детерминирован | — | `hash_refresh_token` дважды для одной строки | Совпадающие SHA-256 длиной 64 | Реализован |
+| TC-AUTH-005 | Cookie содержат security-флаги | — | `_set_auth_cookies(response, "a", "r")` (`tests/test_auth_cookies.py`) | `access_token` и `refresh_token` имеют `HttpOnly`, `SameSite=strict`, корректные `Path` (`/`, `/api/v1/auth/refresh`) | Реализован |
+| TC-AUTH-006 | Logout очищает cookie с Max-Age=0 | — | `_clear_auth_cookies(response)` | Оба cookie получают `Max-Age=0` | Реализован |
+| TC-AUTH-007 | CSRF: GET-запрос пропускается без Origin | — | `enforce_csrf(request_GET, origin=None)` (`tests/test_dependencies.py`) | Не выбрасывает исключения | Реализован |
+| TC-AUTH-008 | CSRF: POST без Origin → 403 | — | `enforce_csrf(request_POST, origin=None)` | `ForbiddenError("Отсутствует заголовок Origin")` | Реализован |
+| TC-AUTH-009 | CSRF: чужой Origin → 403 | — | `enforce_csrf(request_PATCH, origin="http://evil.local")` | `ForbiddenError("Недопустимый Origin")` | Реализован |
+| TC-AUTH-010 | CSRF: разрешённый Origin принимается | — | `enforce_csrf(request_DELETE, origin="http://localhost:3000")` | Запрос проходит | Реализован |
+| TC-AUTH-011 | Lock: смена пароля разрешает только whitelist endpoints | Пользователь с `must_change_password=True` | `is_password_change_allowed_path(path, method)` для серии комбинаций | True для `/api/v1/auth/force-change-password POST`, `/api/v1/auth/logout POST`, `/api/v1/users/me GET`, `/api/v1/users/me/profile GET`; False для `/api/v1/users/me PATCH`, `/api/v1/users/me/password PATCH`, `/api/v1/projects GET` | Реализован |
+| TC-AUTH-012 | Login: пустые credentials отклоняются | — | `LoginRequest(username="", password="")` (`tests/test_additional_validations.py`) | `pydantic.ValidationError` | Реализован |
+| TC-AUTH-013 | Login: успешный логин выставляет cookie | Существует пользователь admin | POST `/api/v1/auth/login` с валидными credentials | 200; в `Set-Cookie` есть `access_token` (Path=/) и `refresh_token` (Path=/api/v1/auth/refresh); ответ не содержит token-полей | Запланирован |
+| TC-AUTH-014 | Login: неверный пароль → 401 | Существует пользователь | POST `/api/v1/auth/login` с неверным паролем | 401 `UnauthorizedError` | Запланирован |
+| TC-AUTH-015 | Login: неактивный пользователь → 401 | `is_active=False` | POST `/api/v1/auth/login` | 401, аудит `LOGIN_FAILED` | Запланирован |
+| TC-AUTH-016 | Refresh: ротация — старый токен отзывается | Есть refresh cookie | POST `/api/v1/auth/refresh` | 200; новые `access_token`+`refresh_token`; `RefreshTokenRecord.revoked_at` старого выставлен | Запланирован |
+| TC-AUTH-017 | Refresh: повторное использование отзывает все токены пользователя (reuse detection) | Refresh уже был обменен | POST `/api/v1/auth/refresh` со старым refresh-токеном | 401; все `RefreshTokenRecord` пользователя помечены revoked | Запланирован |
+| TC-AUTH-018 | Logout: токены отзываются и cookie очищаются | Авторизован | POST `/api/v1/auth/logout` | 204; cookie с `Max-Age=0`; запись аудита `LOGOUT` | Запланирован |
+| TC-AUTH-019 | Force-change-password: блокирует, если флаг не установлен | `must_change_password=False` | `UserService.force_change_password(user_id, "Pass...")` (`tests/test_user_service_security.py`) | `ForbiddenError("не требуется")` | Реализован |
+| TC-AUTH-020 | Force-change-password: требует длину ≥ 8 | — | `ForceChangePasswordRequest(new_password="short")` | `pydantic.ValidationError` | Запланирован |
+| TC-AUTH-021 | JWT: слишком короткий jwt_secret_key отклоняется в Settings | — | `Settings(jwt_secret_key="short-secret", ...)` (`tests/test_additional_validations.py`) | `pydantic.ValidationError` | Реализован |
+
+### 2.2 Пользователи (TC-USER-NNN)
+
+Связано с: `app/routers/users.py`, `app/services.UserService`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-USER-001 | UserCreate отклоняет короткий пароль | — | `UserCreate(username, email, password="short")` (`tests/test_schemas.py`) | `pydantic.ValidationError` | Реализован |
+| TC-USER-002 | UserCreate принимает роль admin | — | `UserCreate(..., role="admin")` (`tests/test_additional_validations.py`) | `payload.role.value == "admin"` | Реализован |
+| TC-USER-003 | Admin не может менять email другого пользователя | Целевой user existing | `UserService.update_user(user_id, {"email": "new@..."}, actor_id=other)` (`tests/test_user_service_security.py`) | `ValidationError("не может менять email")` | Реализован |
+| TC-USER-004 | Аватар: запрет просмотра чужого аватара пентестером | requester role=PENTESTER, target_id != requester.id | `UserService.ensure_can_view_avatar(requester, target_id)` | `ForbiddenError("чужого аватара")` | Реализован |
+| TC-USER-005 | Создание admin / lead / pentester / developer через POST /users | Логин admin | POST `/api/v1/users` с разными ролями | 201, поля пользователя без `password_hash` | Запланирован |
+| TC-USER-006 | Reset password (admin) генерирует временный пароль и письмо | Admin авторизован | PATCH `/api/v1/users/{user_id}/password` | 200, `must_change_password=True`, `email_sent_to=<email>`, опционально `mail_preview_url` | Запланирован |
+| TC-USER-007 | Self-update profile (PATCH /users/me) меняет full_name/tags | Любой пользователь | PATCH `/api/v1/users/me` с `{full_name, tags}` | 200, обновлённый профиль | Запланирован |
+| TC-USER-008 | Загрузка аватара POST /users/me/avatar | Авторизован | POST `/api/v1/users/me/avatar` с файлом изображения | 200, `avatar_url` обновлён | Запланирован |
+| TC-USER-009 | Самоудаление запрещено (DELETE /users/{self_id}) | Admin | DELETE `/api/v1/users/{admin_id}` под admin | 400/403 | Запланирован |
+| TC-USER-010 | Listing пользователей доступен только admin | Pentester | GET `/api/v1/users` без admin прав | 403 ForbiddenError | Запланирован |
+| TC-USER-011 | Смена собственного пароля требует current_password | Любой пользователь | PATCH `/api/v1/users/me/password` с неверным текущим | 400/403 ValidationError | Запланирован |
+| TC-USER-012 | Скачивание чужого аватара админом разрешено | Admin | GET `/api/v1/users/{other_id}/avatar` | 200, image content | Запланирован |
+
+### 2.3 Проекты и папки (TC-PROJ-NNN)
+
+Связано с: `app/routers/projects.py`, `app/services.ProjectService`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-PROJ-001 | List projects: admin видит без фильтра по membership | Admin | `ProjectService.list_projects(admin, page=1, size=20, status="active")` (`tests/test_project_service.py`) | SQL содержит `projects.status`, не содержит `project_members` | Реализован |
+| TC-PROJ-002 | List projects: pentester ограничен membership | Pentester | `list_projects(pentester, page=2, size=10)` | SQL содержит `JOIN project_members` и `project_members.user_id` | Реализован |
+| TC-PROJ-003 | Delete project удаляет сущность и пишет аудит | — | `ProjectService.delete_project(project_id, actor_id, ip)` | `db.delete(project)`, `audit.log("DELETE", entity_type="project", ...)` | Реализован |
+| TC-PROJ-004 | Update project: первый переход в non-active замораживает timeline | `status=ACTIVE`, `timeline_frozen_at=None` | Перевести в `HANDOVER_TO_DEVELOPMENT` | `timeline_frozen_at != None`, status обновился | Реализован |
+| TC-PROJ-005 | Update project: повторный non-active не сбрасывает frozen | `status=HANDOVER_TO_DEVELOPMENT`, `timeline_frozen_at=ts` | Перевести в `VULNERABILITY_RECHECK` | `timeline_frozen_at` сохраняет прежнее значение | Реализован |
+| TC-PROJ-006 | Update project: возврат в ACTIVE сбрасывает frozen | `status=VULNERABILITY_RECHECK`, frozen=ts | Перевести в `ACTIVE` | `timeline_frozen_at=None` | Реализован |
+| TC-PROJ-007 | ProjectUpdate: неизвестный статус отклоняется | — | `ProjectUpdate(status="invalid_status")` (`tests/test_additional_validations.py`) | `pydantic.ValidationError` | Реализован |
+| TC-PROJ-008 | ProjectUpdate: принимает все поддерживаемые статусы | — | Параметризованный тест по `ProjectStatus.{ACTIVE, HANDOVER_TO_DEVELOPMENT, VULNERABILITY_RECHECK, COMPLETED, ARCHIVED}` | Все валидируются | Реализован |
+| TC-PROJ-009 | CRUD проекта через REST | Admin | POST/GET/PUT/DELETE `/api/v1/projects/{id}` | 201/200/200/204 | Запланирован |
+| TC-PROJ-010 | Создание папки и вложенной папки | Admin | POST `/api/v1/projects/folders` с `parent_id` | 201, иерархия видна в `GET /folders` | Запланирован |
+| TC-PROJ-011 | Move папки нельзя в её дочернюю | Папка A с подпапкой B | PATCH `/api/v1/projects/folders/{A}/move` с `parent_id=B` | `ValidationError` | Запланирован |
+| TC-PROJ-012 | Members: добавление участника | Admin | POST `/api/v1/projects/{id}/members` `{user_id}` | 201, появляется в GET /members | Запланирован |
+| TC-PROJ-013 | Members: pentester получает доступ к проекту | Pentester добавлен в members | GET `/api/v1/projects/{id}` под pentester | 200 | Запланирован |
+| TC-PROJ-014 | Members: pentester без membership получает 403 | — | GET `/api/v1/projects/{id}` под чужим pentester | 403 | Запланирован |
+
+### 2.4 Заметки проекта (TC-NOTE-NNN)
+
+Связано с: `app/routers/project_notes.py`, `app/services.ProjectNoteService`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-NOTE-001 | Move заметки в дочернюю → ValidationError | Существует note → child | `ProjectNoteService.move_note(project_id, note_id, child_id, actor)` (`tests/test_project_note_service.py`) | `ValidationError("дочернюю")` | Реализован |
+| TC-NOTE-002 | Reorder требует полный набор siblings | 2 sibling под parent | `reorder_notes(parent_id, items=[только_один_sibling])` | `ValidationError("полный набор sibling")` | Реализован |
+| TC-NOTE-003 | CRUD заметки в дереве | Member проекта | POST/GET/PUT/DELETE `/api/v1/projects/{id}/notes` | 201/200/200/204 | Запланирован |
+| TC-NOTE-004 | Move в саму себя запрещён | Note существует | PATCH `/move` с `parent_id=note_id` | `ValidationError` | Запланирован |
+| TC-NOTE-005 | Уникальность title среди siblings | Sibling с title="A" | POST с тем же title и тем же `parent_id` | `ValidationError` (unique constraint) | Запланирован |
+| TC-NOTE-006 | Список комментариев к заметке (пагинация) | Note существует | GET `/api/v1/projects/{id}/notes/{note_id}/comments?page=1&size=50` | 200, `{items, total, page, size, pages}` | Запланирован |
+| TC-NOTE-007 | Создание комментария к заметке участником | Member | POST `/api/v1/projects/{id}/notes/{note_id}/comments` | 201, объект ProjectNoteCommentOut | Запланирован |
+| TC-NOTE-008 | Удаление чужого комментария к заметке запрещено даже admin | Comment чужого автора | DELETE comment под admin | `ForbiddenError("только свой комментарий")` (по аналогии с CommentService) | Запланирован |
+
+### 2.5 Активы: хосты, порты, сервисы, endpoints (TC-ASSET-NNN)
+
+Связано с: `app/routers/assets.py`, `app/services.AssetService`, `app/schemas.{HostCreate,PortCreate,EndpointCreate}`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-ASSET-001 | Endpoint path с UUID нормализуется в `{UUID}` | — | `AssetService._normalize_endpoint_path(...)` (`tests/test_asset_service.py`) | `/api/v1/users/{UUID}/orders` | Реализован |
+| TC-ASSET-002 | Парсинг raw HTTP request (UUID-нормализация) | — | `_apply_raw_request_payload({"request_raw": "GET /api/v1/users/<uuid>?page=1 ..."})` | `path="/api/v1/users/{UUID}"`, `query_params=[{name=page, value=1, ...}]` | Реализован |
+| TC-ASSET-003 | Endpoint create: дубль по нормализованному UUID-пути не создаёт новый | Существует endpoint | `create_endpoint(...)` с тем же путём (raw uuid) | Возвращается existing endpoint, `db.add` не вызывается | Реализован |
+| TC-ASSET-004 | apply_raw_request_payload: пустой `request_raw` отбрасывается | — | `_apply_raw_request_payload({"request_raw": None, ...})` | Без ключа `request_raw` | Реализован |
+| TC-ASSET-005 | apply_raw_request_payload: парсинг POST с body и Content-Type | — | `_apply_raw_request_payload(POST .../api/v1/users?role=admin)` | `method=POST`, `path=/api/v1/users`, `request_content_type=application/json`, `request_body={"name":"alice"}`, `query_params=[{name=role, value=admin}]` | Реализован |
+| TC-ASSET-006 | Несколько IP: дедупликация и пометка primary | Список с дублями | `_normalize_host_ip_entries("10.0.0.2", [{ip=10.0.0.1, primary=True}, {ip=10.0.0.2, primary=False}, {ip=10.0.0.1, primary=False}])` | Возвращается 2 entry; primary=True у `10.0.0.2` (значение из главного аргумента) | Реализован |
+| TC-ASSET-007 | HostCreate требует ip_or_hostname | — | `HostCreate(notes="...")` (`tests/test_schemas.py`) | `pydantic.ValidationError` | Реализован |
+| TC-ASSET-008 | HostCreate принимает только hostname | — | `HostCreate(hostname="target.example.com")` | OK, `ip_address=None` | Реализован |
+| TC-ASSET-009 | PortCreate: граничные значения 1 и 65535 принимаются | — | Параметризованный тест (`tests/test_schemas.py`) | OK | Реализован |
+| TC-ASSET-010 | PortCreate: 0 и 65536 отклоняются | — | Параметризованный тест | `pydantic.ValidationError` | Реализован |
+| TC-ASSET-011 | EndpointCreate требует path | — | `EndpointCreate(method="GET")` | `pydantic.ValidationError` | Реализован |
+| TC-ASSET-012 | Создание хоста с несколькими IP через REST | Member | POST `/api/v1/projects/{id}/hosts` `{ip_address, ip_addresses=[...]}` | 201, primary IP корректно выставлен | Запланирован |
+| TC-ASSET-013 | Дубль порта (host, port_number, protocol) запрещён | Port уже существует | POST повторно с теми же данными | `ValidationError`/409 | Запланирован |
+| TC-ASSET-014 | Создание сервиса под существующим портом | Port существует | POST `/api/v1/projects/{id}/hosts/{h}/ports/{p}/services` | 201 | Запланирован |
+| TC-ASSET-015 | Удаление хоста каскадно удаляет порты/endpoints | Host со всеми связями | DELETE `/api/v1/projects/{id}/hosts/{h}` | 204; список ports пуст | Запланирован |
+| TC-ASSET-016 | Sanitization headers: Authorization заменяется placeholder | Endpoint с raw request, содержащим `Authorization: Bearer xxx` | POST с `request_raw` | В сохранённом endpoint header Authorization имеет placeholder, шумные заголовки (Cookie, X-Forwarded-For) отброшены | Запланирован |
+
+### 2.6 Уязвимости (TC-VULN-NNN)
+
+Связано с: `app/routers/vulnerabilities.py`, `app/services.VulnerabilityService`, `app/schemas.{VulnerabilityCreate,VulnerabilityStatusPatch,VulnerabilityWorkflowStep}`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-VULN-001 | normalize_workflow_steps отбрасывает пустые шаги | — | `_normalize_workflow_steps([{description="  "}, {description="...", image_file_ids=["f1"]}])` (`tests/test_vulnerability_workflow.py`) | Возвращается только второй шаг | Реализован |
+| TC-VULN-002 | normalize_workflow_steps оставляет endpoint-only шаги | — | Шаг без description, но с `endpoint_request_raw` | Шаг сохранён с `description=None` | Реализован |
+| TC-VULN-003 | workflow_steps_to_text рендерит нумерованные блоки | — | `_workflow_steps_to_text([2 шага])` | Строка с `1. Этап 1\n...` и счётчиком изображений | Реализован |
+| TC-VULN-004 | CVSS 4.0 score с префиксом vector | — | `_calculate_cvss_score("4.0", "AV:N/AC:L/...")` | `normalized_vector` начинается с `CVSS:4.0/`, `score≈9.3` | Реализован |
+| TC-VULN-005 | CVSS: enum CvssVersion.V40 принимается | — | `_calculate_cvss_score(CvssVersion.V40, "CVSS:4.0/...")` | `score≈9.3` | Реализован |
+| TC-VULN-006 | CVSS: score без vector отклоняется | — | `_apply_calculated_cvss_fields({"cvss_score": 9.9, "cvss_vector": None, ...})` | `ValidationError("CVSS score рассчитывается автоматически")` | Реализован |
+| TC-VULN-007 | CVSS: очистка vector обнуляет score и version | — | `_apply_calculated_cvss_fields({"cvss_vector": ""}, current_version="4.0", ...)` | `cvss_version=None`, `cvss_vector=None`, `cvss_score=None` | Реализован |
+| TC-VULN-008 | Severity from CVSS score (диапазоны) | — | `_severity_from_cvss_score(9.3/7.2/5.5/1.8/0.0)` | CRITICAL/HIGH/MEDIUM/LOW/INFO | Реализован |
+| TC-VULN-009 | hydrate_workflow_steps: legacy `steps_to_reproduce` → один шаг | `workflow_steps=None`, `steps_to_reproduce="..."` | `_hydrate_workflow_steps(vuln)` | `len(workflow_steps)==1` с описанием | Реализован |
+| TC-VULN-010 | hydrate_workflow_steps не помечает SQLAlchemy-модель грязной | Vulnerability ORM | `_hydrate_workflow_steps(vuln)` | `sa_inspect(vuln).attrs.workflow_steps.history.has_changes() is False` | Реализован |
+| TC-VULN-011 | list_for_host не использует DISTINCT по JSON-полям | Host существует | `VulnerabilityService.list_for_host(...)` | SQL count и items не содержит `DISTINCT` | Реализован |
+| TC-VULN-012 | validate_workflow_step_images: чужие file_id отклоняются | Workflow step c file_id, не относящимся к vuln | `_validate_workflow_step_images(vuln_id, [step])` | `ValidationError("workflow_steps.image_file_ids")` | Реализован |
+| TC-VULN-013 | VulnerabilityCreate: severity обязателен | — | `VulnerabilityCreate(title="No severity")` (`tests/test_additional_validations.py`) | `pydantic.ValidationError` | Реализован |
+| TC-VULN-014 | VulnerabilityCreate: severity="extreme" отклоняется | — | `VulnerabilityCreate(severity="extreme")` | `pydantic.ValidationError` | Реализован |
+| TC-VULN-015 | VulnerabilityCreate: cvss_score>10 отклоняется | — | `VulnerabilityCreate(cvss_score=10.1)` (`tests/test_schemas.py`) | `pydantic.ValidationError` | Реализован |
+| TC-VULN-016 | VulnerabilityCreate: cvss_version="3.1" отклоняется (поддержка убрана) | — | `VulnerabilityCreate(cvss_version="3.1")` | `pydantic.ValidationError` | Реализован |
+| TC-VULN-017 | VulnerabilityStatusPatch: status="closed" отклоняется (нет в enum) | — | `VulnerabilityStatusPatch(status="closed")` | `pydantic.ValidationError` | Реализован |
+| TC-VULN-018 | VulnerabilityCreate принимает структурированные workflow_steps | host_id присутствует | `VulnerabilityCreate(host_id=..., workflow_steps=[VulnerabilityWorkflowStep(...)])` | `len(workflow_steps)==1` | Реализован |
+| TC-VULN-019 | CRUD уязвимости через REST | Member, host существует | POST/GET/PUT/PATCH status/DELETE | Все успешные ответы | Запланирован |
+| TC-VULN-020 | Привязка assets к уязвимости (POST/DELETE) | Vuln без assets | POST `/api/v1/projects/{id}/vulnerabilities/{vid}/assets` `{asset_type=host, asset_id}` | 201; повторный DELETE последнего host оставляет 204 (см. бизнес-правило) | Запланирован |
+| TC-VULN-021 | Уязвимость без хоста запрещена | Создание | POST без `host_id` и без assets | `ValidationError` | Запланирован |
+| TC-VULN-022 | Workflow step c image_file_id из чужой уязвимости отклоняется при PUT | Файл из другой vuln | PUT vulnerability с workflow_step image_file_ids=[чужой] | 400 ValidationError | Запланирован |
+
+### 2.7 Файлы (TC-FILE-NNN)
+
+Связано с: `app/routers/files.py`, `app/services.FileService`, константы `MAX_FILE_SIZE=50MB`, `ALLOWED_MIME_TYPES`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-FILE-001 | Загрузка файла > 50 МБ отклоняется | Авторизован | POST `/api/v1/projects/{id}/vulnerabilities/{vid}/files` (51 МБ) | `ValidationError("Размер файла превышает 50 МБ")` | Запланирован |
+| TC-FILE-002 | MIME вне whitelist отклоняется (через python-magic) | Файл с `.txt` но содержимое executable | POST upload | `ValidationError("Неподдерживаемый тип файла")` | Запланирован |
+| TC-FILE-003 | Sanitization filename — path traversal убирается | Файл с именем `../../etc/passwd` | POST upload | `original_name` после `_sanitize_filename` без `../` и control chars | Запланирован |
+| TC-FILE-004 | ACL download: чужому пентестеру 403 | Vuln в чужом проекте | GET `/api/v1/files/{file_id}/download` | `ForbiddenError("Нет доступа к файлу")` | Запланирован |
+| TC-FILE-005 | Admin может скачать любой файл | Admin | GET `/api/v1/files/{file_id}/download` | 200, content | Запланирован |
+| TC-FILE-006 | Inline disposition для image/* | Файл image/png | GET download | `Content-Disposition: inline; filename=...` | Запланирован |
+| TC-FILE-007 | Удаление файла удаляет blob в MinIO | File загружен | DELETE `/api/v1/projects/{id}/vulnerabilities/{vid}/files/{file_id}` | 204; вызван `storage.delete(minio_key)` | Запланирован |
+
+### 2.8 Комментарии и упоминания (TC-COMM-NNN)
+
+Связано с: `app/services.CommentService`, `app/routers/comments.py`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-COMM-001 | Admin не может редактировать чужой комментарий | Comment чужого автора | `CommentService.update(project_id, vuln_id, comment_id, content, admin)` (`tests/test_comment_service.py`) | `ForbiddenError("только свой комментарий")` | Реализован |
+| TC-COMM-002 | Admin не может удалить чужой комментарий | Comment чужого автора | `CommentService.delete(...)` | `ForbiddenError("только свой комментарий")` | Реализован |
+| TC-COMM-003 | @mentions при update создают только запись CommentMention, без Notification | Author редактирует, упоминая `@target` | `CommentService.update(..., "updated @target", actor)` | В `db.add` есть `CommentMention`, но нет `Notification`; `ws_manager.notify_user` не вызван; `ws_manager.broadcast` вызван 1 раз | Реализован |
+| TC-COMM-004 | @mentions при create создают Notification | Comment создаётся с `@target` | POST `/api/v1/projects/{id}/vulnerabilities/{vid}/comments` `{content="@target test"}` | 201; в БД появляется `Notification`; `ws_manager.notify_user(target.id, ...)` вызван | Запланирован |
+| TC-COMM-005 | Комментирование по чужой уязвимости — 403 | Pentester не member | POST comment | 403 | Запланирован |
+
+### 2.9 Уведомления (TC-NOTIF-NNN)
+
+Связано с: `app/routers/notifications.py`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-NOTIF-001 | Список уведомлений с фильтром is_read | Есть прочитанные и непрочитанные | GET `/api/v1/notifications?is_read=false` | Только непрочитанные | Запланирован |
+| TC-NOTIF-002 | Unread count | — | GET `/api/v1/notifications/unread-count` | `{count: N}` | Запланирован |
+| TC-NOTIF-003 | Mark single as read | Есть unread | PATCH `/api/v1/notifications/{id}/read` | 200, `is_read=True` | Запланирован |
+| TC-NOTIF-004 | Mark all as read | Есть несколько unread | PATCH `/api/v1/notifications/read-all` | 204; unread-count==0 | Запланирован |
+| TC-NOTIF-005 | WS push при @mention | WS-подключение к проекту | Создать комментарий с `@target` | `target` получает WS-сообщение `{event:"notification", ...}` | Запланирован |
+
+### 2.10 Импорт PCF/OpenAPI (TC-IMP-NNN)
+
+Связано с: `app/services.ImportService`, `app/routers/import_.py`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-IMP-001 | _find_matching_host: точный матч по ip+hostname | Host (10.0.0.5, api.local) | `ImportService._find_matching_host(project_id, host_data)` (`tests/test_import_service.py`) | Возвращается тот же host | Реализован |
+| TC-IMP-002 | _merge_host_fields заполняет только недостающие поля | Host с пустыми ip/notes | `_merge_host_fields(host, host_data)` | ip_address и notes заполнены, hostname сохранён | Реализован |
+| TC-IMP-003 | _merge_endpoint_fields заполняет недостающие данные | Endpoint без description | `_merge_endpoint_fields(...)` | description, query_params, body заполнены | Реализован |
+| TC-IMP-004 | _load_json_or_yaml_document поддерживает YAML | YAML с openapi 3.0.0 | `_load_json_or_yaml_document(...)` | `parsed["openapi"]=="3.0.0"` | Реализован |
+| TC-IMP-005 | _load_json_or_yaml_document поддерживает «relaxed» Swagger 2.0 | Текст без кавычек | `_load_json_or_yaml_document(...)` | `parsed["swagger"]=="2.0"`, basePath с ведущим слешем | Реализован |
+| TC-IMP-006 | Validate OpenAPI: пустой payload отклоняется | — | `_validate_openapi_payload(b"")` | `ValidationError("пуст")` | Реализован |
+| TC-IMP-007 | Validate OpenAPI: > 2 МБ отклоняется | — | `_validate_openapi_payload(b"a" * (2*1024*1024+1))` | `ValidationError("2 МБ")` | Реализован |
+| TC-IMP-008 | Resolve openapi $ref (локальные ссылки) | Document с $ref в paths/components | `_resolve_openapi_ref(...)` | Распознаёт path item и operation | Реализован |
+| TC-IMP-009 | import_openapi: дубликат endpoint пропускается с warning | Существует endpoint /users GET | `import_openapi(...)` | `endpoints_created=0`, `endpoints_skipped=1`, `result.errors` непуст, host description обновлён | Реализован |
+| TC-IMP-010 | import_openapi принимает relaxed Swagger 2.0 | Swagger без кавычек | `import_openapi(...)` | `endpoints_created=1`, путь `/v1/users/{userId}` | Реализован |
+| TC-IMP-011 | Swagger 2.0 body с $ref/definitions парсится | Pet schema | `_extract_openapi_request_details(...)` | `content_type=application/json`, body содержит `doggie` и `available` | Реализован |
+| TC-IMP-012 | Swagger 2.0 form data → urlencoded body | parameters in formData | `_extract_openapi_request_details(...)` | `body=name=rex&status=available` | Реализован |
+| TC-IMP-013 | Deprecated operations пропускаются | OpenAPI с `deprecated: true` | `import_openapi(...)` | `created=1`, в `errors` упоминание deprecated | Реализован |
+| TC-IMP-014 | Export OpenAPI собирает документ из endpoints | Host с endpoint /pet/{petId} | `export_openapi(project_id, host_id)` | `openapi=3.0.0`, parameters содержат query+header, в т.ч. example | Реализован |
+| TC-IMP-015 | Query params: enum/default подставляется как value | Param с `enum=[available,...]` | `_extract_openapi_query_params(...)` | `value="available"`, для `default=10` → `value="10"` | Реализован |
+| TC-IMP-016 | PCF JSON: host без ip и hostname отклоняется | — | `PcfImportPayload.model_validate({"hosts":[{"status":"unknown"}]})` (`tests/test_schemas.py`) | `pydantic.ValidationError` | Реализован |
+| TC-IMP-017 | PCF JSON: некорректный protocol порта отклоняется | — | Port с `protocol="icmp"` | `pydantic.ValidationError` | Реализован |
+| TC-IMP-018 | PCF JSON: endpoint без path и без request_raw отклоняется | — | Endpoint с `method=GET` без path | `pydantic.ValidationError` | Реализован |
+
+### 2.11 Отчёты Word (TC-REPORT-NNN)
+
+Связано с: `app/services.ReportService`, `app/reports.{build_pp, build_szi}`, `app/routers/reports.py`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-REPORT-001 | normalize_report_image_bytes ре-кодирует валидный PNG | Pillow PNG 8x8 | `ReportService._normalize_report_image_bytes(payload)` (`tests/test_report_service.py`) | Возвращён ненулевой буфер; через PIL читается с size=(8,8) | Реализован |
+| TC-REPORT-002 | normalize_report_image_bytes пропускает невалидный buffer | b"not-an-image" | `_normalize_report_image_bytes(...)` | `None` | Реализован |
+| TC-REPORT-003 | build_szi возвращает непустой DOCX | demo project, host, vuln HIGH+INFO | `build_szi(data, indexes, image_bytes_by_id={})` (`tests/test_word_builder.py`) | Контент начинается с `PK`, текст содержит имя проекта, заголовок vuln, hostname/IP | Реализован |
+| TC-REPORT-004 | build_pp возвращает непустой DOCX | то же payload | `build_pp(...)` | то же | Реализован |
+| TC-REPORT-005 | СЗИ разделяет «Уязвимости» и «Слабости» по severity | vuln HIGH + INFO | `build_szi` → `Document(...)`, парсинг Heading 2 | HIGH в секции «выявленным уязвимостям», INFO в секции «выявленным слабостям» | Реализован |
+| TC-REPORT-006 | POST /reports/szi возвращает Word-стрим с корректным Content-Disposition | Member | POST `/api/v1/projects/{id}/reports/szi` | 200, `media_type=application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `Content-Disposition` с ASCII filename и `filename*=UTF-8''<encoded>` | Запланирован |
+| TC-REPORT-007 | POST /reports/pp аналогично | Member | POST `/reports/pp` | 200, корректный stream | Запланирован |
+| TC-REPORT-008 | Reports без membership → 403 | Pentester не member | POST `/reports/szi` | 403 | Запланирован |
+
+### 2.12 Jira Integration (TC-JIRA-NNN)
+
+Связано с: `app/services.JiraIntegrationService`, `app/routers/jira.py`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-JIRA-001 | api_token шифруется (Fernet) | — | `JiraIntegrationService._encrypt_secret("jira-secret")`, затем `_decrypt_secret(...)` (`tests/test_asset_service.py`) | encrypted != "jira-secret"; round-trip даёт исходное значение | Реализован |
+| TC-JIRA-002 | SSRF: пустой base_url отклоняется | — | `_validate_external_url("")` | `ValidationError("не может быть пустым")` | Запланирован |
+| TC-JIRA-003 | SSRF: схема не http/https отклоняется | — | `_validate_external_url("ftp://jira.local")` | `ValidationError("https:// или http://")` | Запланирован |
+| TC-JIRA-004 | SSRF: http в production запрещён | `settings.debug=False` | `_validate_external_url("http://jira.example.com")` | `ValidationError("в production должен использовать https")` | Запланирован |
+| TC-JIRA-005 | SSRF: localhost запрещён | — | `_validate_external_url("https://localhost/jira")` | `ValidationError("запрещённый хост")` | Запланирован |
+| TC-JIRA-006 | SSRF: cloud metadata host запрещён | — | `_validate_external_url("https://metadata.google.internal/")` | `ValidationError("запрещённый хост")` | Запланирован |
+| TC-JIRA-007 | SSRF: private/loopback/link-local/reserved/multicast IP запрещены | DNS резолв в `10.0.0.1` | `_validate_external_url("https://internal.invalid/")` (мокнуть `socket.getaddrinfo`) | `ValidationError("внутренний/приватный IP")` | Запланирован |
+| TC-JIRA-008 | SSRF: некорректный host (gaierror) отклоняется | DNS error | `_validate_external_url("https://no-such-host.invalid")` | `ValidationError("Не удалось разрешить host Jira")` | Запланирован |
+| TC-JIRA-009 | First config без api_token отклоняется | Нет JiraInstance | `upsert_config({base_url, name, email})` без `api_token` | `ValidationError("Для первой настройки Jira нужен api_token")` | Запланирован |
+| TC-JIRA-010 | get_jira_config доступен только admin | Pentester | GET `/api/v1/jira/config` | 403 | Запланирован |
+| TC-JIRA-011 | Export vulnerability to Jira | Member, link настроен | POST `/api/v1/projects/{id}/vulnerabilities/{vid}/jira/export` | 200, `JiraIssueLinkOut` с `issue_key` | Запланирован |
+| TC-JIRA-012 | Project Jira link upsert (admin) | Admin | PUT `/api/v1/projects/{id}/jira-link` `{jira_project_key="ABC"}` | 200 | Запланирован |
+
+### 2.13 Agent API v2 (TC-AGENT-NNN)
+
+Связано с: `app/routers/v2_agent.py`, `app/routers/agent_tokens.py`, `app/services.AgentTokenService`, `app/dependencies.{require_agent_scope,require_agent_project_access}`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-AGENT-001 | Создание agent token (admin only) | Admin | POST `/api/v1/agent-tokens` `{name, scopes, all_projects}` | 201, в ответе одноразовый `token` (raw) | Запланирован |
+| TC-AGENT-002 | List agent tokens не возвращает raw token | Tokens существуют | GET `/api/v1/agent-tokens` | Поля без `token`/`token_hash` | Запланирован |
+| TC-AGENT-003 | Revoke agent token | Token существует | DELETE `/api/v1/agent-tokens/{id}` | 204; `revoked_at` выставлен | Запланирован |
+| TC-AGENT-004 | Bearer auth: отсутствие заголовка → 401 | — | GET `/api/v2/projects` без `Authorization` | 401 | Запланирован |
+| TC-AGENT-005 | Bearer auth: revoked token → 401 | Token revoked | GET `/api/v2/projects` с этим токеном | 401 | Запланирован |
+| TC-AGENT-006 | Scope check: scope `assets:read` нужен для GET hosts | Token со scope `projects:read` | GET `/api/v2/projects/{id}/hosts` | 403 | Запланирован |
+| TC-AGENT-007 | Project grant: token с `all_projects=False` ограничен явным списком | Token grant на project A | GET `/api/v2/projects/{B}/hosts` | 403 | Запланирован |
+| TC-AGENT-008 | Project grant: `all_projects=True` пропускает все | Token | GET `/api/v2/projects` | список всех проектов | Запланирован |
+| TC-AGENT-009 | Создание заметки требует `notes:write` | Token со scope `notes:read` | POST `/api/v2/projects/{id}/notes` | 403 | Запланирован |
+| TC-AGENT-010 | Создание уязвимости через v2 (`vulns:write`) | Token со scope | POST `/api/v2/projects/{id}/vulnerabilities` `{title, severity, host_id}` | 201, `VulnerabilityOut` | Запланирован |
+
+### 2.14 Audit logs (TC-AUDIT-NNN)
+
+Связано с: `app/services.AuditService`, `audit_store` (ClickHouse), `app/routers/audit_logs.py`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-AUDIT-001 | log() пишет AuditLog в БД и в audit_store | — | `AuditService.log("CREATE", user_id, entity_type=...)` | `db.add(AuditLog)`, `db.commit()`, `audit_store.insert(...)` вызваны | Запланирован |
+| TC-AUDIT-002 | ClickHouse fallback: при недоступности БД-запись остаётся | `audit_store.insert` бросает | `AuditService.log(...)` | Запись в основной БД сохранена; ошибка ClickHouse не валит запрос | Запланирован |
+| TC-AUDIT-003 | GET /audit-logs только для admin | Pentester | GET `/api/v1/audit-logs` | 403 | Запланирован |
+| TC-AUDIT-004 | Фильтрация audit logs по entity_type | Логи разных типов | GET `/audit-logs?entity_type=project` | Только records с `entity_type=project` | Запланирован |
+
+### 2.15 Pagination (TC-PAG-NNN)
+
+Связано с: `app/pagination.py`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-PAG-001 | offset = (page-1)*size | — | `PageParams(page=2, size=20).offset` (`tests/test_pagination.py`) | `20` | Реализован |
+| TC-PAG-002 | to_paginated_response для частичной последней страницы | items=5, total=25, size=20 | `to_paginated_response(...)` | `pages=2`, `page=2`, items сохранены | Реализован |
+| TC-PAG-003 | Пустой набор → 1 page | items=[], total=0 | `to_paginated_response(...)` | `pages=1` | Реализован |
+| TC-PAG-004 | Отрицательная page отклоняется | — | `PageParams(page=-1, size=20)` (`tests/test_additional_validations.py`) | `pydantic.ValidationError` | Реализован |
+| TC-PAG-005 | size=0 отклоняется | — | `PageParams(page=1, size=0)` | `pydantic.ValidationError` | Реализован |
+| TC-PAG-006 | size слишком большой (10000) отклоняется | — | `PageParams(page=1, size=10000)` | `pydantic.ValidationError` | Реализован |
+
+### 2.16 WebSocket (TC-WS-NNN)
+
+Связано с: `app/routers/websocket.py`, `ws_manager`.
+
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-WS-001 | Подключение требует валидный access cookie | Гость | WS connect to `/ws/projects/{id}` без cookie | `close(1008)` | Запланирован |
+| TC-WS-002 | Pentester без membership получает close 1008 | — | WS connect | close 1008 | Запланирован |
+| TC-WS-003 | Broadcast при создании уязвимости | Member, активный WS | POST vulnerability | На WS приходит `{event:"created", entity:"vulnerability", ...}` | Запланирован |
+| TC-WS-004 | Notify_user при @mention | 2 пользователя в проекте | Создать comment с `@user2` | user2 получает private WS-сообщение | Запланирован |
 
 ---
 
-### TC-AUTH-003 🔴 Неверный пароль
+### 2.17 Frontend (TC-UI-NNN)
 
-**Приоритет:** Высокий
+Связано с: `frontend/src/App.tsx`, `frontend/src/pages/{LoginPage, ForceChangePasswordPage}.tsx`, `frontend/src/components/ProjectTreeNav.tsx`, `frontend/src/markdownUrlTransform.ts`.
 
-**Шаги:**
-1. POST `/api/v1/auth/login` с `{"username": "admin", "password": "wrongpassword"}`
-
-**Ожидаемый результат:**
-- Статус: `401 Unauthorized`
-- Тело: `{"detail": "..."}`
-- Cookie **не выставляются**
-- В `audit_logs` появляется запись с `action = "LOGIN_FAILED"`
-
----
-
-### TC-AUTH-004 🔴 Несуществующий пользователь
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/auth/login` с `{"username": "nobody", "password": "any"}`
-
-**Ожидаемый результат:**
-- Статус: `401 Unauthorized`
-- Ответ не раскрывает, что пользователь не существует (одинаковое сообщение как при неверном пароле)
-
----
-
-### TC-AUTH-005 🔴 Пустые поля при логине
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. POST `/api/v1/auth/login` с `{"username": "", "password": ""}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request` или `401`
+| ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
+|---|---|---|---|---|---|
+| TC-UI-001 | App: показывает прогресс-бар, пока auth не инициализирован | `isInitialized=false` | `renderWithProviders(<App themeMode="dark"/>, "/login")` (`src/App.test.tsx`) | `screen.getByRole("progressbar")`; `initialize()` вызван | Реализован |
+| TC-UI-002 | App: рендерит LoginPage для анонимного пользователя | `user=null` | renderWithProviders в `/login` | Видно «Login page» | Реализован |
+| TC-UI-003 | App: не запрашивает unread notifications для анонимного | `user=null` | render | `unreadCount` не вызван | Реализован |
+| TC-UI-004 | App: пользователь с `must_change_password=true` → /force-change-password | user.must_change_password=true | render `/login` | Видно «Force change password page» | Реализован |
+| TC-UI-005 | App: non-admin не видит admin-роут (/users) | role=pentester | render `/users` | Редирект на «Projects page» | Реализован |
+| TC-UI-006 | LoginPage стартует с пустыми credentials | — | render LoginPage (`src/pages/LoginPage.test.tsx`) | username и password пустые | Реализован |
+| TC-UI-007 | LoginPage: успешный логин ведёт на `/` | `signIn` resolves `{must_change_password:false}` | заполнить, кликнуть «Войти» | `signIn("admin","admin")`, `navigate("/")` | Реализован |
+| TC-UI-008 | LoginPage: temp password ведёт на `/force-change-password` | `signIn` resolves с `must_change_password:true` | submit | `navigate("/force-change-password")` | Реализован |
+| TC-UI-009 | LoginPage: при ошибке navigate не вызывается | `signIn` rejects | submit | `navigate` не вызван | Реализован |
+| TC-UI-010 | ForceChangePasswordPage: кнопка disabled пока пароли не совпадают | — | type "Password123" + "Mismatch123" → match (`src/pages/ForceChangePasswordPage.test.tsx`) | enabled только при совпадении | Реализован |
+| TC-UI-011 | ForceChangePasswordPage: submit вызывает API, setUser, navigate("/") replace | — | заполнить, click «Сохранить пароль» | `forceChangePassword("Password123")`, `setUser`, `navigate("/", {replace:true})` | Реализован |
+| TC-UI-012 | ProjectTreeNav: клик «Порты (4)» внутри хоста переключает host+section | host-b с `portsCount=4` | click `Порты (4)` (`src/components/ProjectTreeNav.test.tsx`) | `onSelectHost("host-b")`, `onSelectSection("ports")`, `onOpenHost("host-b","ports")` | Реализован |
+| TC-UI-013 | ProjectTreeNav: клик «Заметки» вне хоста меняет section | section="overview" | click «Заметки» | `onSelectSection("notes")` | Реализован |
+| TC-UI-014 | markdownUrlTransform: разрешает data:image/png;base64,... | — | `markdownUrlTransform("data:image/png;base64,iVBOR...")` | возвращает исходный URL без изменения | Запланирован |
+| TC-UI-015 | markdownUrlTransform: блокирует data:text/html,... | — | `markdownUrlTransform("data:text/html,<script>...")` | URL отбрасывается (defaultUrlTransform поведение) | Запланирован |
+| TC-UI-016 | markdownUrlTransform: разрешает http/https | — | `markdownUrlTransform("https://example.com/img.png")` | URL возвращается | Запланирован |
+| TC-UI-017 | App: WebSocket переподключение после разрыва | WS active | mock close → wait | повторный `new WebSocket(...)` | Запланирован |
+| TC-UI-018 | Защищённые роуты: гость на `/projects` редиректится на `/login` | user=null | render `/projects` | redirect `/login` | Запланирован |
+| TC-UI-019 | Профиль: смена email только сам себе | login pentester | open Profile, edit email | API call PATCH `/users/me` с email | Запланирован |
+| TC-UI-020 | VulnerabilityStagesEditor: добавление шага и удаление превью этапа | open vulnerability edit | add step, attach image, remove image | image_file_ids уменьшается | Запланирован |
+| TC-UI-021 | HostDetailPage: переключение между разделами host (ports/endpoints/vulns) | open host page | click таб | URL обновляется, данные загружаются | Запланирован |
 
 ---
 
-### TC-AUTH-006 🟢 Обновление access-токена через refresh
+## 3. Сводка покрытия
 
-**Приоритет:** Высокий
+### 3.1 Реализованные тесты по файлам
 
-**Предусловия:** Пользователь вошёл (TC-AUTH-001), получил оба cookie
+| Файл | Тестов | Покрываемые ID |
+|---|---|---|
+| `backend/tests/test_security.py` | 4 | TC-AUTH-001..004 |
+| `backend/tests/test_auth_cookies.py` | 2 | TC-AUTH-005, TC-AUTH-006 |
+| `backend/tests/test_dependencies.py` | 5 | TC-AUTH-007..011 |
+| `backend/tests/test_user_service_security.py` | 3 | TC-AUTH-019, TC-USER-003, TC-USER-004 |
+| `backend/tests/test_project_service.py` | 5 | TC-PROJ-001..006 |
+| `backend/tests/test_project_note_service.py` | 2 | TC-NOTE-001, TC-NOTE-002 |
+| `backend/tests/test_asset_service.py` | 7 | TC-ASSET-001..006, TC-JIRA-001 |
+| `backend/tests/test_vulnerability_workflow.py` | 12 | TC-VULN-001..012 |
+| `backend/tests/test_comment_service.py` | 3 | TC-COMM-001..003 |
+| `backend/tests/test_import_service.py` | 13 | TC-IMP-001..015 (часть) |
+| `backend/tests/test_report_service.py` | 2 | TC-REPORT-001, TC-REPORT-002 |
+| `backend/tests/test_word_builder.py` | 3 | TC-REPORT-003..005 (build_szi+build_pp параметризован, разделение severity) |
+| `backend/tests/test_schemas.py` | 12 | TC-USER-001, TC-ASSET-007..011, TC-VULN-015..018, TC-IMP-016..018 |
+| `backend/tests/test_additional_validations.py` | 8 | TC-AUTH-012, TC-AUTH-021, TC-USER-002, TC-VULN-013, TC-VULN-014, TC-PROJ-007, TC-PROJ-008, TC-PAG-004..006 |
+| `backend/tests/test_pagination.py` | 3 | TC-PAG-001..003 |
+| `frontend/src/App.test.tsx` | 5 | TC-UI-001..005 |
+| `frontend/src/pages/LoginPage.test.tsx` | 4 | TC-UI-006..009 |
+| `frontend/src/pages/ForceChangePasswordPage.test.tsx` | 2 | TC-UI-010, TC-UI-011 |
+| `frontend/src/components/ProjectTreeNav.test.tsx` | 2 | TC-UI-012, TC-UI-013 |
 
-**Шаги:**
-1. POST `/api/v1/auth/refresh` (без тела, браузер отправляет `refresh_token` cookie автоматически)
+### 3.2 Команды запуска
 
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Тело: `{"ok": true}`
-- Заголовок `Set-Cookie` содержит новый `access_token`
-- Старый `access_token` более не принимается
-
----
-
-### TC-AUTH-007 🔴 Refresh без cookie
-
-**Приоритет:** Высокий
-
-**Предусловия:** Cookie не установлены
-
-**Шаги:**
-1. POST `/api/v1/auth/refresh` без cookie
-
-**Ожидаемый результат:**
-- Статус: `401 Unauthorized`
-
----
-
-### TC-AUTH-008 🟢 Успешный выход
-
-**Приоритет:** Высокий
-
-**Предусловия:** Пользователь авторизован
-
-**Шаги:**
-1. POST `/api/v1/auth/logout`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- Заголовки содержат: `Set-Cookie: access_token=; Max-Age=0` и `Set-Cookie: refresh_token=; Max-Age=0`
-- После logout GET `/api/v1/users/me` возвращает `401`
-- В `audit_logs` появляется запись `action = "LOGOUT"`
-
----
-
-### TC-AUTH-009 🔴 Обращение к защищённому эндпоинту без cookie
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. GET `/api/v1/users/me` без cookie
-
-**Ожидаемый результат:**
-- Статус: `401 Unauthorized`
-
----
-
-### TC-AUTH-010 🔴 Повторное использование refresh-токена после logout
-
-**Приоритет:** Высокий
-
-**Предусловия:** Пользователь вошёл, затем вышел
-
-**Шаги:**
-1. Выполнить POST `/api/v1/auth/logout`
-2. Попытаться выполнить POST `/api/v1/auth/refresh` с отозванным refresh cookie
-
-**Ожидаемый результат:**
-- Статус: `401 Unauthorized` — refresh-токен отозван
-
----
-
-### TC-AUTH-011 🟡 Вход с деактивированным аккаунтом
-
-**Приоритет:** Средний
-
-**Предусловия:** Администратор деактивировал аккаунт пентестера (`is_active = false`)
-
-**Шаги:**
-1. POST `/api/v1/auth/login` с учётными данными деактивированного пользователя
-
-**Ожидаемый результат:**
-- Статус: `401 Unauthorized`
-
----
-
-### TC-AUTH-012 🟢 Пользователь с временным паролем обязан сначала сменить пароль
-
-**Приоритет:** Высокий
-
-**Предусловия:** Администратор создал пользователя через invite/reset flow, у пользователя `must_change_password = true`
-
-**Шаги:**
-1. POST `/api/v1/auth/login` с временным паролем
-2. GET `/api/v1/users/me`
-3. Попытаться вызвать любой рабочий эндпоинт проекта, например GET `/api/v1/projects`
-4. POST `/api/v1/auth/force-change-password` с новым паролем
-5. Повторно вызвать GET `/api/v1/projects`
-
-**Ожидаемый результат:**
-- На шаге 1: `200 OK`, в теле `must_change_password = true`
-- На шаге 2: `200 OK`
-- На шаге 3: `403 Forbidden`
-- На шаге 4: `200 OK`, поле `must_change_password = false`
-- На шаге 5: `200 OK`
-
----
-
-## Модуль 2 — Пользователи (USERS)
-
-> Все операции с пользователями (кроме GET /me) доступны **только администратору**. Самостоятельная регистрация запрещена.
-
----
-
-### TC-USR-001 🟢 Получить собственный профиль (admin)
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `admin`
-
-**Шаги:**
-1. GET `/api/v1/users/me`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Поля: `id`, `username`, `email`, `full_name`, `tags`, `avatar_url`, `role`, `is_active`, `must_change_password`, `password_changed_at`, `created_at`
-- Поле `password_hash` **отсутствует** в ответе
-
----
-
-### TC-USR-002 🟢 Получить собственный профиль (pentester)
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `pentester1`
-
-**Шаги:**
-1. GET `/api/v1/users/me`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Поле `role` = `"pentester"`
-
----
-
-### TC-USR-003 🟢 Администратор создаёт пентестера
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `admin`
-
-**Шаги:**
-1. POST `/api/v1/users` с телом:
-```json
-{
-  "username": "new_penter",
-  "email": "new@pcf.test",
-  "password": "NewPass1!",
-  "role": "pentester"
-}
+Backend:
+```bash
+cd backend
+pytest                                # все тесты
+pytest tests/test_vulnerability_workflow.py -v
+pytest -k "tc_auth"                   # фильтр по подстроке в имени
 ```
 
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Поля `id`, `username`, `email`, `role`, `is_active` присутствуют
-- `is_active` = `true`
-- `password_hash` **отсутствует** в ответе
-- В `audit_logs` запись `action = "CREATE"`, `entity_type = "user"`
-
----
-
-### TC-USR-004 🟢 Администратор создаёт второго администратора
-
-**Приоритет:** Средний
-
-**Предусловия:** Авторизован как `admin`
-
-**Шаги:**
-1. POST `/api/v1/users` с `"role": "admin"`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- `role` = `"admin"`
-
----
-
-### TC-USR-005 🔴 Пентестер пытается создать пользователя
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `pentester1`
-
-**Шаги:**
-1. POST `/api/v1/users` с корректным телом
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-USR-006 🔴 Дублирующийся username при создании
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `admin`, пользователь `pentester1` существует
-
-**Шаги:**
-1. POST `/api/v1/users` с `"username": "pentester1"`
-
-**Ожидаемый результат:**
-- Статус: `409 Conflict`
-
----
-
-### TC-USR-007 🔴 Дублирующийся email при создании
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/users` с `"email": "pent1@pcf.test"` (уже занят)
-
-**Ожидаемый результат:**
-- Статус: `409 Conflict`
-
----
-
-### TC-USR-008 🟢 Администратор сбрасывает пароль пользователя
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `admin`, у пользователя заполнен `email`, mail worker/SMTP включены
-
-**Шаги:**
-1. PATCH `/api/v1/users/{user_id}/password`
-2. Выполнить вход пользователем со старым паролем
-3. Выполнить вход пользователем с временным паролем из письма
-
-**Ожидаемый результат:**
-- На шаге 1: `200 OK`
-- В ответе есть `email_sent_to`, `must_change_password = true`
-- В `audit_logs` есть запись `action = "UPDATE"`, `entity_type = "user_password_reset"`
-- На шаге 2: `401 Unauthorized`
-- На шаге 3: `200 OK`, в теле `must_change_password = true`
-
----
-
-### TC-USR-015 🟢 Пользователь обновляет собственный профиль
-
-**Приоритет:** Высокий
-
-**Предусловия:** Пользователь авторизован, `must_change_password = false`
-
-**Шаги:**
-1. PATCH `/api/v1/users/me` с телом:
-```json
-{
-  "full_name": "Alice Cooper",
-  "tags": ["web", "red-team"]
-}
+Frontend:
+```bash
+cd frontend
+npm run test                          # vitest run
+npm run test -- --watch               # watch mode
+npm run test -- src/App.test.tsx      # один файл
 ```
 
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Поля `full_name`, `tags` обновлены
-- В `audit_logs` появляется запись `action = "UPDATE"`, `entity_type = "user_profile"`
+### 3.3 Известные пробелы (рекомендации)
+- Нет интеграционных тестов через `httpx.AsyncClient` для роутеров — большинство кейсов «Запланирован» в этом документе адресует именно их.
+- WebSocket-сценарии (TC-WS-NNN) не покрыты — стоит добавить fixture с `WebSocketTestSession`.
+- File upload security (TC-FILE-NNN) полностью отсутствует в автотестах: критично, так как используются `python-magic`, sanitization filename и MinIO ACL.
+- SSRF-защита Jira (`_validate_external_url`) покрыта только косвенно через шифрование секрета — рекомендуется параметризованный тест по серии URL (TC-JIRA-002..008).
+- Frontend: компоненты редактирования (VulnerabilityStagesEditor, HostDetailPage) и страницы Projects/Profile/AuditLogs не покрыты — добавить компонентные сценарии рендера/взаимодействия.
+- markdownUrlTransform: ключевая защита от XSS через `data:text/html` — нужно завести unit-тест в `frontend/src/markdownUrlTransform.test.ts`.
 
 ---
 
-### TC-USR-016 🟢 Пользователь меняет собственный пароль
+## 4. История изменений
 
-**Приоритет:** Высокий
-
-**Предусловия:** Пользователь авторизован, знает текущий пароль
-
-**Шаги:**
-1. PATCH `/api/v1/users/me/password` с телом:
-```json
-{
-  "current_password": "OldPass123!",
-  "new_password": "NewPass123!"
-}
-```
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `must_change_password = false`
-- Старые refresh-сессии отозваны
-- В `audit_logs` появляется запись `entity_type = "user_password"`
-
----
-
-### TC-USR-017 🟢 Пользователь загружает собственный аватар
-
-**Приоритет:** Средний
-
-**Предусловия:** Пользователь авторизован
-
-**Шаги:**
-1. POST `/api/v1/users/me/avatar` как `multipart/form-data`, поле `avatar`
-2. GET `/api/v1/users/me`
-3. GET `/api/v1/users/{my_user_id}/avatar`
-
-**Ожидаемый результат:**
-- На шаге 1: `200 OK`
-- На шаге 2: поле `avatar_url` заполнено
-- На шаге 3: `200 OK`, возвращаются бинарные данные изображения
-
----
-
-### TC-USR-018 🔴 Пользователь не может смотреть чужой аватар
-
-**Приоритет:** Высокий
-
-**Предусловия:** Пользователь `pentester1` авторизован, у `pentester2` загружен аватар
-
-**Шаги:**
-1. GET `/api/v1/users/{pentester2_id}/avatar`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-USR-019 🔴 В режиме must_change_password запрещено редактирование профиля
-
-**Приоритет:** Высокий
-
-**Предусловия:** Пользователь вошёл с временным паролем, `must_change_password = true`
-
-**Шаги:**
-1. PATCH `/api/v1/users/me` с валидным телом
-2. PATCH `/api/v1/users/me/password` с валидным телом
-3. POST `/api/v1/auth/force-change-password`
-
-**Ожидаемый результат:**
-- На шаге 1: `403 Forbidden`
-- На шаге 2: `403 Forbidden`
-- На шаге 3: `200 OK`
-
----
-
-### TC-USR-020 🟡 Пароль короче 8 символов
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. POST `/api/v1/users` с `"password": "abc"`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-USR-009 🟢 Получить список пользователей (admin)
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. GET `/api/v1/users?page=1&size=20`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Структура: `{"items": [...], "total": N, "page": 1, "size": 20, "pages": P}`
-- У каждого пользователя нет поля `password_hash`
-
----
-
-### TC-USR-010 🔴 Пентестер запрашивает список пользователей
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `pentester1`
-
-**Шаги:**
-1. GET `/api/v1/users`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-USR-011 🟢 Обновить данные пользователя
-
-**Приоритет:** Средний
-
-**Предусловия:** Авторизован как `admin`, пользователь `new_penter` создан в TC-USR-003
-
-**Шаги:**
-1. PUT `/api/v1/users/{user_id}` с `{"is_active": false}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `is_active` = `false`
-
----
-
-### TC-USR-012 🔴 Администратор пытается удалить сам себя
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. DELETE `/api/v1/users/{own_id}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-USR-013 🟢 Сброс пароля пользователю
-
-**Приоритет:** Средний
-
-**Предусловия:** Авторизован как `admin`
-
-**Шаги:**
-1. PATCH `/api/v1/users/{user_id}/password` с `{"new_password": "Updated1!"}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- Пользователь может войти с новым паролем
-
----
-
-## Модуль 3 — Проекты (PROJECTS)
-
----
-
-### TC-PRJ-001 🟢 Создание проекта администратором
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `admin`
-
-**Шаги:**
-1. POST `/api/v1/projects` с:
-```json
-{
-  "name": "Pentest Corp 2024",
-  "description": "Внешний тест",
-  "start_date": "2024-01-01",
-  "end_date": "2024-03-31"
-}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Поля: `id`, `name`, `description`, `start_date`, `end_date`, `status` = `"active"`, `created_by`
-- В `audit_logs` запись `action = "CREATE"`, `entity_type = "project"`
-
----
-
-### TC-PRJ-002 🔴 Пентестер пытается создать проект
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `pentester1`
-
-**Шаги:**
-1. POST `/api/v1/projects` с корректным телом
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-PRJ-003 🟢 Администратор видит все проекты
-
-**Приоритет:** Высокий
-
-**Предусловия:** Создано 2 проекта; `pentester1` добавлен только в один
-
-**Шаги:**
-1. GET `/api/v1/projects` под admin
-
-**Ожидаемый результат:**
-- Список содержит **оба** проекта
-
----
-
-### TC-PRJ-004 🟢 Пентестер видит только свои проекты
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester1` добавлен в проект A, не добавлен в проект B
-
-**Шаги:**
-1. GET `/api/v1/projects` под `pentester1`
-
-**Ожидаемый результат:**
-- Список содержит **только** проект A
-
----
-
-### TC-PRJ-005 🟢 Фильтрация проектов по статусу
-
-**Приоритет:** Низкий
-
-**Шаги:**
-1. GET `/api/v1/projects?status=active`
-
-**Ожидаемый результат:**
-- Возвращаются только проекты со `status = "active"`
-
----
-
-### TC-PRJ-006 🟢 Получить проект по ID (участник)
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester1` — участник проекта A
-
-**Шаги:**
-1. GET `/api/v1/projects/{project_a_id}` под `pentester1`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-
----
-
-### TC-PRJ-007 🔴 Пентестер запрашивает чужой проект (IDOR)
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester1` — **не** участник проекта B
-
-**Шаги:**
-1. GET `/api/v1/projects/{project_b_id}` под `pentester1`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden` или `404 Not Found`
-
----
-
-### TC-PRJ-008 🟢 Обновить статус проекта
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. PUT `/api/v1/projects/{id}` с `{"status": "completed"}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `status` = `"completed"`
-- В `audit_logs` запись `action = "STATUS_CHANGE"`
-
----
-
-### TC-PRJ-009 🔴 Недопустимый статус проекта
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. PUT `/api/v1/projects/{id}` с `{"status": "invalid_status"}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-PRJ-010 🟢 Добавить участника в проект
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester1` существует; проект A создан
-
-**Шаги:**
-1. POST `/api/v1/projects/{project_a_id}/members` с `{"user_id": "<pentester1_id>"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Ответ содержит `user_id`, `username`, `added_at`
-
----
-
-### TC-PRJ-011 🔴 Добавить уже существующего участника
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/members` с `user_id` уже-участника
-
-**Ожидаемый результат:**
-- Статус: `409 Conflict`
-
----
-
-### TC-PRJ-012 🟢 Удалить участника из проекта
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. DELETE `/api/v1/projects/{id}/members/{user_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- Пользователь больше не видит проект в GET `/api/v1/projects`
-
----
-
-### TC-PRJ-013 🔴 Пентестер управляет участниками проекта
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `pentester1` (участник проекта)
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/members` с любым `user_id`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-PRJ-014 🟢 Удалить проект (каскадное удаление)
-
-**Приоритет:** Высокий
-
-**Предусловия:** Проект содержит хосты, уязвимости, файлы в MinIO
-
-**Шаги:**
-1. DELETE `/api/v1/projects/{id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- GET `/api/v1/projects/{id}` возвращает `404`
-- Файлы удалены из MinIO (проверить через консоль MinIO)
-
----
-
-## Модуль 4 — Хосты (HOSTS)
-
----
-
-### TC-HOST-001 🟢 Добавить хост с IP-адресом
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `pentester1` (участник проекта A)
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/hosts` с:
-```json
-{"ip_address": "192.168.1.1", "status": "up", "os": "Ubuntu 22.04"}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Поля: `id`, `ip_address`, `hostname`, `os`, `status`, `created_at`
-- WS-событие `{"event": "created", "entity": "host", ...}` приходит всем участникам проекта
-
----
-
-### TC-HOST-002 🟢 Добавить хост с hostname
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST с `{"hostname": "target.example.com"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-HOST-003 🔴 Добавить хост без IP и hostname
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST с `{"os": "Windows"}` (без ip_address и hostname)
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request` — хотя бы одно поле обязательно
-
----
-
-### TC-HOST-004 🔴 Не-участник добавляет хост
-
-**Приоритет:** Высокий
-
-**Предусловия:** Авторизован как `pentester2` (не участник проекта A)
-
-**Шаги:**
-1. POST `/api/v1/projects/{project_a_id}/hosts` с корректным телом
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-HOST-005 🟢 Получить хост с вложенными портами и endpoints
-
-**Приоритет:** Средний
-
-**Предусловия:** К хосту добавлены порты и endpoints
-
-**Шаги:**
-1. GET `/api/v1/projects/{id}/hosts/{host_id}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Поля `ports` и `endpoints` присутствуют (массивы)
-
----
-
-### TC-HOST-006 🟢 Обновить статус хоста
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. PUT `/api/v1/projects/{id}/hosts/{host_id}` с `{"status": "down"}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `status` = `"down"`
-
----
-
-### TC-HOST-007 🟢 Удалить хост (каскад на порты, сервисы, endpoints)
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. DELETE `/api/v1/projects/{id}/hosts/{host_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- Порты и endpoints хоста более не существуют
-
----
-
-## Модуль 5 — Порты (PORTS)
-
----
-
-### TC-PORT-001 🟢 Добавить открытый TCP-порт
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/hosts/{host_id}/ports` с:
-```json
-{"port_number": 80, "protocol": "tcp", "state": "open"}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-PORT-002 🔴 Дублирующийся порт (тот же номер + протокол)
-
-**Приоритет:** Высокий
-
-**Предусловия:** Порт 80/tcp уже добавлен
-
-**Шаги:**
-1. POST с `{"port_number": 80, "protocol": "tcp"}`
-
-**Ожидаемый результат:**
-- Статус: `409 Conflict`
-
----
-
-### TC-PORT-003 🟡 Граничный номер порта: 1
-
-**Приоритет:** Низкий
-
-**Шаги:**
-1. POST с `{"port_number": 1, "protocol": "tcp"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-PORT-004 🟡 Граничный номер порта: 65535
-
-**Приоритет:** Низкий
-
-**Шаги:**
-1. POST с `{"port_number": 65535, "protocol": "tcp"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-PORT-005 🔴 Недопустимый номер порта: 0
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. POST с `{"port_number": 0}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-PORT-006 🔴 Недопустимый номер порта: 65536
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. POST с `{"port_number": 65536}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-PORT-007 🟢 Обновить состояние порта
-
-**Шаги:**
-1. PUT `/...ports/{port_id}` с `{"state": "filtered"}`
-
-**Ожидаемый результат:**
-- `state` = `"filtered"`
-
----
-
-### TC-PORT-008 🟢 Удалить порт (каскад на сервисы)
-
-**Шаги:**
-1. DELETE `.../ports/{port_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- Сервисы порта удалены
-
----
-
-## Модуль 6 — Сервисы (SERVICES)
-
----
-
-### TC-SRV-001 🟢 Добавить сервис на порт
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `.../ports/{port_id}/services` с:
-```json
-{"name": "http", "version": "Apache/2.4.51", "banner": "Apache HTTP Server"}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-SRV-002 🔴 Создать сервис без обязательного поля name
-
-**Шаги:**
-1. POST с `{"version": "1.0"}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-SRV-003 🟢 Обновить версию сервиса
-
-**Шаги:**
-1. PUT `.../services/{service_id}` с `{"version": "Apache/2.4.54"}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-
----
-
-### TC-SRV-004 🟢 Удалить сервис
-
-**Шаги:**
-1. DELETE `.../services/{service_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-
----
-
-## Модуль 7 — Endpoints
-
----
-
-### TC-EP-001 🟢 Добавить HTTP-endpoint
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/hosts/{host_id}/endpoints` с:
-```json
-{"path": "/api/v1/login", "method": "POST", "description": "Авторизация"}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- WS-событие отправлено
-
----
-
-### TC-EP-002 🟢 Добавить endpoint без метода (только путь)
-
-**Шаги:**
-1. POST с `{"path": "/admin"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- `method` = `null`
-
----
-
-### TC-EP-003 🔴 Добавить endpoint без пути
-
-**Шаги:**
-1. POST с `{"method": "GET"}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-EP-004 🔴 Недопустимый HTTP-метод
-
-**Шаги:**
-1. POST с `{"path": "/x", "method": "INVALID"}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-EP-005 🟢 Удалить endpoint
-
-**Шаги:**
-1. DELETE `.../endpoints/{endpoint_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-
----
-
-### TC-EP-006 🟢 Добавить endpoint через request_raw
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/hosts/{host_id}/endpoints` с:
-```json
-{
-  "request_raw": "POST /api/v1/users?role=admin HTTP/1.1\nHost: target.local\nContent-Type: application/json\n\n{\"name\":\"alice\"}"
-}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- `method = "POST"`
-- `path = "/api/v1/users"`
-- `query_params` содержит `role=admin`
-- `request_content_type = "application/json"`
-
----
-
-## Модуль 8 — Уязвимости (VULNERABILITIES)
-
----
-
-### TC-VULN-001 🟢 Создать уязвимость с обязательными полями
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/vulnerabilities` с:
-```json
-{
-  "title": "SQL Injection в форме входа",
-  "severity": "critical"
-}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- `status` = `"open"` (по умолчанию)
-- `created_by` = UUID текущего пользователя
-- WS-событие `{"event": "created", "entity": "vulnerability", ...}`
-
----
-
-### TC-VULN-002 🟢 Создать уязвимость со всеми полями
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST с полным телом:
-```json
-{
-  "title": "RCE через загрузку файла",
-  "description": "Описание уязвимости",
-  "severity": "critical",
-  "cvss_version": "3.1",
-  "cvss_score": 9.8,
-  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-  "cwe_id": "CWE-434",
-  "status": "open",
-  "steps_to_reproduce": "1. Загрузить .php файл\n2. Перейти по ссылке",
-  "impact": "Полная компрометация сервера",
-  "recommendations": "Валидировать MIME-тип по содержимому файла"
-}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Все поля присутствуют в ответе
-
----
-
-### TC-VULN-002A 🔴 Этапы воспроизведения не принимают чужие image_file_ids
-
-**Приоритет:** Высокий
-
-**Предусловия:** Есть уязвимость A и уязвимость B, у B загружен файл-скриншот
-
-**Шаги:**
-1. PATCH `/api/v1/projects/{id}/vulnerabilities/{vuln_a_id}` с `workflow_steps`, где `image_file_ids` содержит файл уязвимости B
-
-**Ожидаемый результат:**
-- Статус: `400` или `422`
-- Ошибка явно указывает на `workflow_steps.image_file_ids`
-
----
-
-### TC-VULN-003 🔴 Создать уязвимость без обязательного поля severity
-
-**Шаги:**
-1. POST с `{"title": "Test"}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-VULN-004 🔴 Недопустимый уровень критичности
-
-**Шаги:**
-1. POST с `{"title": "Test", "severity": "extreme"}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-VULN-005 🟡 CVSS score вне диапазона (0.0–10.0)
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. POST с `{"title": "T", "severity": "high", "cvss_score": 10.1}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-VULN-006 🟢 Получить уязвимость с активами и файлами
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. GET `/api/v1/projects/{id}/vulnerabilities/{vuln_id}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Поля `assets` (массив), `files` (массив), `comments_count` присутствуют
-
----
-
-### TC-VULN-007 🟢 Фильтрация уязвимостей по severity
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. GET `/api/v1/projects/{id}/vulnerabilities?severity=critical`
-
-**Ожидаемый результат:**
-- Все элементы имеют `severity = "critical"`
-
----
-
-### TC-VULN-008 🟢 Фильтрация по статусу
-
-**Шаги:**
-1. GET `...?status=open`
-
-**Ожидаемый результат:**
-- Все элементы имеют `status = "open"`
-
----
-
-### TC-VULN-009 🟢 Изменить статус уязвимости
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. PATCH `/api/v1/projects/{id}/vulnerabilities/{vuln_id}/status` с `{"status": "fixed"}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `status` = `"fixed"`
-- В `audit_logs`: `action = "STATUS_CHANGE"`, `details = {"old_status": "open", "new_status": "fixed"}`
-- WS-событие `{"event": "updated", "entity": "vulnerability", ...}`
-
----
-
-### TC-VULN-010 🔴 Недопустимый статус уязвимости
-
-**Шаги:**
-1. PATCH `.../status` с `{"status": "closed"}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-VULN-011 🟢 Обновить уязвимость (частичное)
-
-**Шаги:**
-1. PUT `.../vulnerabilities/{vuln_id}` с `{"recommendations": "Обновить библиотеку"}`
-
-**Ожидаемый результат:**
-- Только указанное поле изменилось, остальные без изменений
-
----
-
-### TC-VULN-012 🟢 Удалить уязвимость (каскад на файлы, комментарии)
-
-**Приоритет:** Высокий
-
-**Предусловия:** К уязвимости прикреплены файлы и комментарии
-
-**Шаги:**
-1. DELETE `.../vulnerabilities/{vuln_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- Файлы удалены из MinIO
-- Комментарии удалены из БД
-
----
-
-### TC-VULN-013 🔴 Не-участник получает уязвимость по ID (IDOR)
-
-**Предусловия:** `pentester2` не участник проекта
-
-**Шаги:**
-1. GET `.../vulnerabilities/{vuln_id}` под `pentester2`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-## Модуль 9 — Связи уязвимостей с активами (VULN ASSETS)
-
----
-
-### TC-ASSET-001 🟢 Привязать хост к уязвимости
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `.../vulnerabilities/{vuln_id}/assets` с:
-```json
-{"asset_type": "host", "asset_id": "<host_id>"}
-```
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-ASSET-002 🟢 Привязать endpoint к уязвимости
-
-**Шаги:**
-1. POST с `{"asset_type": "endpoint", "asset_id": "<endpoint_id>"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-ASSET-003 🟢 Привязать несколько активов разных типов
-
-**Шаги:**
-1. Привязать хост (TC-ASSET-001)
-2. Привязать порт
-3. Привязать сервис
-4. Привязать endpoint
-
-**Ожидаемый результат:**
-- GET `.../vulnerabilities/{vuln_id}` возвращает все 4 актива в поле `assets`
-
----
-
-### TC-ASSET-004 🔴 Дублирующаяся привязка
-
-**Шаги:**
-1. POST с тем же `asset_type` и `asset_id`, который уже привязан
-
-**Ожидаемый результат:**
-- Статус: `409 Conflict`
-
----
-
-### TC-ASSET-005 🔴 Привязать актив из другого проекта (IDOR)
-
-**Предусловия:** Хост из проекта B
-
-**Шаги:**
-1. POST с `asset_id` хоста из проекта B к уязвимости проекта A
-
-**Ожидаемый результат:**
-- Статус: `422 Unprocessable Entity` — актив принадлежит другому проекту
-
----
-
-### TC-ASSET-006 🔴 Привязать несуществующий актив
-
-**Шаги:**
-1. POST с несуществующим `asset_id`
-
-**Ожидаемый результат:**
-- Статус: `404 Not Found`
-
----
-
-### TC-ASSET-007 🟢 Удалить привязку актива
-
-**Шаги:**
-1. DELETE `.../assets/{asset_link_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- GET уязвимости не содержит удалённый актив
-
----
-
-## Модуль 10 — Файлы (FILES)
-
----
-
-### TC-FILE-001 🟢 Загрузить PNG-скриншот
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `.../vulnerabilities/{vuln_id}/files` с `multipart/form-data`, поле `file` = PNG файл (1 МБ)
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Поля: `id`, `original_name`, `content_type`, `size_bytes`, `uploaded_by`, `uploaded_at`
-- `content_type` = `"image/png"`
-- Файл физически появился в MinIO (проверить через консоль)
-- В `audit_logs`: `action = "FILE_UPLOAD"`
-
----
-
-### TC-FILE-002 🟢 Загрузить PDF-документ
-
-**Шаги:**
-1. POST с PDF файлом
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-FILE-003 🟡 Загрузить файл максимального размера (50 МБ)
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. POST с файлом ровно 52 428 800 байт
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-
----
-
-### TC-FILE-004 🔴 Загрузить файл сверх 50 МБ
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST с файлом 52 428 801 байт
-
-**Ожидаемый результат:**
-- Статус: `413 Payload Too Large`
-
----
-
-### TC-FILE-005 🔴 Загрузить файл недопустимого типа (EXE)
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST с `.exe` файлом (MIME: `application/x-msdownload`)
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-FILE-006 🔴 Загрузить файл с подменённым расширением
-
-**Приоритет:** Высокий (безопасность)
-
-**Шаги:**
-1. Создать исполняемый файл, переименовать в `shell.png`
-2. POST с этим файлом
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request` — сервер проверяет MIME по содержимому, не по расширению
-
----
-
-### TC-FILE-007 🟢 Получить список файлов уязвимости
-
-**Шаги:**
-1. GET `.../vulnerabilities/{vuln_id}/files`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Массив файлов
-
----
-
-## Модуль 17 — Навигация и layout проекта (PROJECT NAV)
-
-> Проверяется согласованная матрешка интерфейса: **Проект → Хосты → (Порты, Endpoints)** и отдельный раздел **«Уязвимости проекта»**.
-
----
-
-### TC-NAV-001 🟢 Отобразить левую древовидную панель проекта
-
-**Приоритет:** Высокий
-
-**Предусловия:** Пользователь авторизован и открыт экран проекта
-
-**Шаги:**
-1. Открыть карточку проекта
-2. Проверить наличие левой панели навигации
-
-**Ожидаемый результат:**
-- Левая панель видна
-- В панели есть узлы: `Обзор проекта`, список хостов, `Уязвимости проекта`
-
----
-
-### TC-NAV-002 🟢 Переключение между узлами хоста
-
-**Приоритет:** Высокий
-
-**Предусловия:** В проекте есть хотя бы один хост
-
-**Шаги:**
-1. В левой панели выбрать хост
-2. Перейти в подпункты `Порты` и `Эндпоинты`
-
-**Ожидаемый результат:**
-- Центральная область меняет контент в соответствии с выбранным узлом
-- В `Порты` показываются только порты выбранного хоста
-- В `Эндпоинты` показываются только endpoints выбранного хоста
-- Paths отображаются деревом (`/api` → `/v1` → `users`) с возможностью разворачивать несколько веток одновременно
-
----
-
-### TC-NAV-003 🟢 Создание порта и endpoint из контекста выбранного хоста
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. Выбрать хост → `Порты`, создать порт
-2. Выбрать хост → `Эндпоинты`, создать endpoint
-
-**Ожидаемый результат:**
-- Статусы API: `201 Created`
-- Новые сущности отображаются в соответствующих разделах выбранного хоста
-- Переключение между узлами не теряет выбранный контекст
-
----
-
-### TC-NAV-004 🟢 Раздел уязвимостей в контексте выбранного хоста
-
-**Приоритет:** Высокий
-
-**Предусловия:** В проекте есть хост с хотя бы одной уязвимостью
-
-**Шаги:**
-1. Открыть карточку хоста
-2. В левой панели выбрать `Уязвимости`
-3. Проверить список уязвимостей
-4. Создать новую уязвимость
-
-**Ожидаемый результат:**
-- Отображаются только уязвимости текущего хоста
-- Новая уязвимость создаётся сразу с обязательной привязкой к открытому хосту
-- После создания уязвимость появляется в списке без перехода на другой экран
-
----
-
-### TC-NAV-005 🟢 Импорт Swagger/OpenAPI в endpoint-дерево хоста
-
-**Приоритет:** Средний
-
-**Предусловия:** Открыта карточка хоста, есть валидный Swagger/OpenAPI файл (`JSON` или `YAML`)
-
-**Шаги:**
-1. В разделе `Эндпоинты` выбрать импорт Swagger/OpenAPI
-2. Загрузить файл
-3. При несовпадении host в спецификации выбрать: импорт в текущий хост или создание нового хоста
-
-**Ожидаемый результат:**
-- Импорт завершён без `500`
-- Созданные endpoints появляются в дереве paths
-- При частичных ошибках пользователь видит список проблемных операций
-
----
-
-### TC-NAV-005 🟢 Карточка уязвимости на странице хоста
-
-**Приоритет:** Высокий
-
-**Предусловия:** На странице хоста уже есть уязвимость
-
-**Шаги:**
-1. Открыть `Хост → Уязвимости`
-2. Нажать `Открыть карточку` или выбрать `Карточка` в меню `...`
-3. Проверить доступные поля в диалоге
-
-**Ожидаемый результат:**
-- Открывается полная карточка уязвимости
-- Доступны поля: название, описание, критичность, статус, CVSS версия, CVSS score, CVSS vector, CWE, шаги воспроизведения, влияние, рекомендации
-- В карточке доступны блоки файлов, комментариев и связанных активов
-- Сохранение изменений обновляет запись без перезагрузки страницы
-
----
-
-### TC-NAV-006 🟢 Работа с файлами уязвимости из контекста хоста
-
-**Приоритет:** Высокий
-
-**Предусловия:** Открыта карточка уязвимости на странице хоста
-
-**Шаги:**
-1. Загрузить PNG или PDF через блок `Файлы`
-2. Убедиться, что файл появился в списке
-3. Скачать файл из списка
-4. Удалить файл
-
-**Ожидаемый результат:**
-- Загрузка успешна, файл появляется в списке без перезагрузки страницы
-- Скачивание открывает/загружает правильный файл
-- После удаления файл исчезает из списка
-
----
-
-### TC-NAV-007 🟢 Работа с комментариями уязвимости из контекста хоста
-
-**Приоритет:** Высокий
-
-**Предусловия:** Открыта карточка уязвимости на странице хоста
-
-**Шаги:**
-1. Добавить комментарий
-2. Добавить комментарий с `@username`
-3. Отредактировать свой комментарий
-4. Удалить свой комментарий
-
-**Ожидаемый результат:**
-- Новый комментарий сразу появляется в списке
-- Комментарий с `@username` создаёт in-app уведомление упомянутому пользователю
-- Автор комментария и администратор видят действия редактирования/удаления
-- После удаления комментарий исчезает из списка
-
----
-
-### TC-NAV-008 🟢 Гибридный режим sidebar (свернуть/развернуть)
-
-**Приоритет:** Средний
-
-**Шаги:**
-1. Нажать кнопку сворачивания панели
-2. Нажать кнопку разворачивания панели
-
-**Ожидаемый результат:**
-- Sidebar сворачивается до компактного состояния
-- Sidebar корректно разворачивается обратно
-- Активный узел/раздел сохраняется после сворачивания
-
----
-
-### TC-NAV-009 🟢 Сохранение контекста выбранного узла после перезагрузки
-
-**Приоритет:** Высокий
-
-**Предусловия:** В проекте есть хотя бы 2 хоста и заполненные разделы `Порты`, `Эндпоинты`, `Уязвимости`
-
-**Шаги:**
-1. Открыть карточку проекта
-2. Выбрать конкретный хост и раздел, например `Уязвимости`
-3. Свернуть sidebar
-4. Перезагрузить страницу браузера
-5. Повторить сценарий на странице конкретного хоста
-
-**Ожидаемый результат:**
-- После reload проект открывается на том же выбранном хосте
-- Активный раздел (`overview` / `ports` / `endpoints` / `vulns`) восстанавливается
-- Состояние sidebar (свернут / развернут) восстанавливается
-- Для страницы хоста активный раздел тоже восстанавливается после reload
-
----
-
-### TC-FILE-008 🟢 Скачать файл (изображение)
-
-**Шаги:**
-1. GET `/api/v1/files/{file_id}/download`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Заголовок `Content-Type: image/png`
-- Заголовок `Content-Disposition: inline; filename="screenshot.png"`
-- Тело: бинарные данные файла
-
----
-
-### TC-FILE-009 🟢 Скачать файл (документ)
-
-**Шаги:**
-1. GET `/api/v1/files/{file_id}/download` для PDF
-
-**Ожидаемый результат:**
-- Заголовок `Content-Disposition: attachment; filename="report.pdf"`
-
----
-
-### TC-FILE-010 🟢 Удалить файл
-
-**Шаги:**
-1. DELETE `.../vulnerabilities/{vuln_id}/files/{file_id}`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- Файл удалён из MinIO
-- GET `/api/v1/files/{file_id}/download` возвращает `404`
-- В `audit_logs`: `action = "FILE_DELETE"`
-
----
-
-### TC-FILE-011 🔴 Скачать файл из другого проекта (IDOR)
-
-**Предусловия:** Файл принадлежит проекту B, пользователь — участник только проекта A
-
-**Шаги:**
-1. GET `/api/v1/files/{file_b_id}/download`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-## Модуль 11 — Комментарии (COMMENTS)
-
----
-
-### TC-CMT-001 🟢 Добавить комментарий без упоминания
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `.../vulnerabilities/{vuln_id}/comments` с `{"content": "Проверил — воспроизводится"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Поля: `id`, `vulnerability_id`, `user_id`, `username`, `content`, `mentions` (пустой массив), `created_at`
-- WS-событие `{"event": "created", "entity": "comment", ...}`
-
----
-
-### TC-CMT-002 🟢 Добавить комментарий с @упоминанием
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester2` является участником проекта
-
-**Шаги:**
-1. POST с `{"content": "Подтверждаю @pentester2, это критично"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- Поле `mentions` содержит `[{"user_id": "<pent2_id>", "username": "pentester2"}]`
-- Пользователь `pentester2` получает in-app уведомление
-- Если `pentester2` онлайн — приходит WS-событие `{"event": "notification", ...}`
-
----
-
-### TC-CMT-003 🟡 Упоминание несуществующего пользователя
-
-**Шаги:**
-1. POST с `{"content": "Проверил @nobody_here"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- `mentions` = пустой массив (неизвестный пользователь игнорируется)
-
----
-
-### TC-CMT-004 🟡 Упоминание пользователя не из проекта
-
-**Предусловия:** `pentester2` существует, но не является участником проекта
-
-**Шаги:**
-1. POST с `{"content": "@pentester2 посмотри"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created` — упоминание сохранено (или уведомление не отправляется — зависит от реализации)
-
----
-
-### TC-CMT-005 🔴 Создать пустой комментарий
-
-**Шаги:**
-1. POST с `{"content": ""}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-CMT-006 🟢 Редактировать свой комментарий
-
-**Приоритет:** Средний
-
-**Предусловия:** `pentester1` создал комментарий
-
-**Шаги:**
-1. PUT `.../comments/{comment_id}` с `{"content": "Обновлённый текст"}`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `content` обновлён
-- `updated_at` изменился
-
----
-
-### TC-CMT-007 🔴 Редактировать чужой комментарий
-
-**Предусловия:** Авторизован как `pentester2`, комментарий создан `pentester1`
-
-**Шаги:**
-1. PUT `.../comments/{comment_id}` с новым content
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-CMT-008 🟢 Удалить свой комментарий
-
-**Шаги:**
-1. DELETE `.../comments/{comment_id}` (автором комментария)
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-
----
-
-### TC-CMT-009 🟢 Администратор удаляет чужой комментарий
-
-**Предусловия:** Авторизован как `admin`
-
-**Шаги:**
-1. DELETE `.../comments/{comment_id}` (комментарий принадлежит пентестеру)
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-
----
-
-### TC-CMT-010 🔴 Пентестер удаляет чужой комментарий
-
-**Предусловия:** Авторизован как `pentester2`, комментарий создан `pentester1`
-
-**Шаги:**
-1. DELETE `.../comments/{comment_id}`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-## Модуль 12 — Уведомления (NOTIFICATIONS)
-
----
-
-### TC-NOTIF-001 🟢 Получить список уведомлений
-
-**Предусловия:** `pentester1` был упомянут в комментарии, авторизован как `pentester1`
-
-**Шаги:**
-1. GET `/api/v1/notifications`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Уведомление `type = "mention"` присутствует
-- `is_read = false`
-- Поле `context` содержит `vulnerability_id`, `vulnerability_title`, `project_id`, `commenter_username`
-
----
-
-### TC-NOTIF-002 🟢 Получить счётчик непрочитанных
-
-**Шаги:**
-1. GET `/api/v1/notifications/unread-count`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `{"count": N}` где N > 0
-
----
-
-### TC-NOTIF-003 🟢 Отметить уведомление как прочитанное
-
-**Шаги:**
-1. PATCH `/api/v1/notifications/{notification_id}/read`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `is_read = true`
-- GET `/api/v1/notifications/unread-count` уменьшился на 1
-
----
-
-### TC-NOTIF-004 🟢 Отметить все уведомления прочитанными
-
-**Шаги:**
-1. PATCH `/api/v1/notifications/read-all`
-
-**Ожидаемый результат:**
-- Статус: `204 No Content`
-- GET `/api/v1/notifications/unread-count` возвращает `{"count": 0}`
-
----
-
-### TC-NOTIF-005 🔴 Прочитать чужое уведомление
-
-**Предусловия:** Уведомление принадлежит `pentester1`, авторизован как `pentester2`
-
-**Шаги:**
-1. PATCH `/api/v1/notifications/{notification_id}/read`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-NOTIF-006 🟢 Фильтрация непрочитанных уведомлений
-
-**Шаги:**
-1. GET `/api/v1/notifications?is_read=false`
-
-**Ожидаемый результат:**
-- Все элементы имеют `is_read = false`
-
----
-
-## Модуль 13 — Импорт данных (IMPORT)
-
----
-
-### TC-IMP-001 🟢 Импорт корректного PCF JSON
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/import` с файлом:
-```json
-{
-  "hosts": [{
-    "ip_address": "10.0.0.1",
-    "hostname": "server.local",
-    "status": "up",
-    "ports": [
-      {"port_number": 22, "protocol": "tcp", "state": "open",
-       "services": [{"name": "ssh", "version": "OpenSSH 7.4"}]}
-    ],
-    "endpoints": [
-      {"path": "/admin", "method": "GET", "description": "Панель"}
-    ]
-  }]
-}
-```
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Тело: `{"hosts_created": 1, "ports_created": 1, "services_created": 1, "endpoints_created": 1, "errors": []}`
-- Хост, порт, сервис, endpoint появились в проекте
-
----
-
-### TC-IMP-001A 🟢 Повторный импорт того же PCF JSON не создаёт дубли
-
-**Приоритет:** Высокий
-
-**Предусловия:** `TC-IMP-001` уже выполнен
-
-**Шаги:**
-1. Повторно отправить тот же JSON на `POST /api/v1/projects/{id}/import`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Повторно не создаются дубли host/port/service/endpoint
-- Счётчики `*_created` увеличиваются только для реально новых сущностей
-
----
-
-### TC-IMP-002 🟢 Импорт нескольких хостов
-
-**Шаги:**
-1. POST с JSON, содержащим 5 хостов
-
-**Ожидаемый результат:**
-- `hosts_created` = 5
-
----
-
-### TC-IMP-003 🔴 Импорт с невалидной JSON-структурой
-
-**Шаги:**
-1. POST с файлом `{"wrong_field": [...]}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-IMP-004 🔴 Импорт пустого JSON
-
-**Шаги:**
-1. POST с `{}`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-IMP-005 🔴 Импорт не-JSON файла
-
-**Шаги:**
-1. POST с `.txt` файлом
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-IMP-006 🟡 Импорт с дублирующимся портом в рамках одного хоста
-
-**Шаги:**
-1. POST с хостом, содержащим два одинаковых порта (80/tcp дважды)
-
-**Ожидаемый результат:**
-- Один из дублей пропущен, `errors` содержит сообщение о конфликте, `hosts_created` = 1
-
----
-
-### TC-IMP-007 🔴 Не-участник импортирует данные
-
-**Предусловия:** `pentester2` не участник проекта
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/import` под `pentester2`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-IMP-008 🟡 Импорт хоста без IP и hostname
-
-**Шаги:**
-1. POST с `{"hosts": [{"os": "Windows"}]}`
-
-**Ожидаемый результат:**
-- Статус: `422 Unprocessable Entity` или хост пропущен с записью в `errors`
-
----
-
-## Модуль 14 — Отчёты (REPORTS)
-
----
-
-### TC-RPT-001 🟢 Сформировать отчёт в формате Markdown
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/projects/{id}/reports/generate?format=md`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `Content-Type: text/markdown`
-- `Content-Disposition: attachment; filename="report-....md"`
-- Тело содержит разделы: общая информация о проекте, статистика, список активов, список уязвимостей
-
----
-
-### TC-RPT-002 🟢 Сформировать отчёт в формате PDF
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `...?format=pdf`
-
-**Ожидаемый результат:**
-- `Content-Type: application/pdf`
-- Файл открывается в PDF-вьюере
-- Содержит все обязательные разделы
-
----
-
-### TC-RPT-003 🟢 Сформировать отчёт в формате DOCX
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `...?format=docx`
-
-**Ожидаемый результат:**
-- `Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document`
-- Файл открывается в Word/LibreOffice
-
----
-
-### TC-RPT-004 🟢 Содержимое отчёта
-
-**Приоритет:** Высокий
-
-**Предусловия:** Проект содержит: 2 хоста, 3 порта, 2 уязвимости (1 critical/open, 1 high/fixed), 1 файл-скриншот
-
-**Шаги:**
-1. POST `...?format=md`
-2. Проверить содержимое файла
-
-**Ожидаемый результат:**
-- Раздел «Общая информация»: название проекта, даты, список участников
-- Раздел «Статистика»: `Critical: 1`, `High: 1`; `Open: 1`, `Fixed: 1`
-- Раздел «Активы»: таблица хостов с портами
-- Раздел «Уязвимости»: название, критичность, CVSS, CWE, статус, шаги, влияние, рекомендации
-- Скриншоты встроены или упомянуты
-
----
-
-### TC-RPT-005 🔴 Неподдерживаемый формат
-
-**Шаги:**
-1. POST `...?format=xlsx`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-RPT-006 🟡 Отчёт по пустому проекту (нет уязвимостей)
-
-**Шаги:**
-1. POST `...?format=md` для проекта без уязвимостей
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Разделы «Уязвимости» и «Статистика» содержат пустые значения / `0`
-
----
-
-## Модуль 15 — Журнал действий (AUDIT LOGS)
-
----
-
-### TC-AUDIT-001 🟢 Администратор просматривает журнал
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. GET `/api/v1/audit-logs?page=1&size=50`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- Каждая запись содержит: `id`, `user_id`, `username`, `action`, `entity_type`, `entity_id`, `details`, `ip_address`, `created_at`
-
----
-
-### TC-AUDIT-002 🔴 Пентестер запрашивает журнал
-
-**Предусловия:** Авторизован как `pentester1`
-
-**Шаги:**
-1. GET `/api/v1/audit-logs`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-AUDIT-003 🟢 Фильтрация журнала по действию
-
-**Шаги:**
-1. GET `/api/v1/audit-logs?action=STATUS_CHANGE`
-
-**Ожидаемый результат:**
-- Все записи имеют `action = "STATUS_CHANGE"`
-- Поле `details` содержит `old_status` и `new_status`
-
----
-
-### TC-AUDIT-004 🟢 Проверка полноты событий аудита
-
-**Предусловия:** Выполнить последовательно: вход, создание проекта, создание уязвимости, смену статуса, загрузку файла, выход
-
-**Шаги:**
-1. GET `/api/v1/audit-logs?user_id={user_id}`
-
-**Ожидаемый результат:**
-- Присутствуют записи: `LOGIN`, `CREATE`(project), `CREATE`(vulnerability), `STATUS_CHANGE`, `FILE_UPLOAD`, `LOGOUT`
-
----
-
-### TC-AUDIT-005 🟢 Фильтрация по пользователю и дате
-
-**Шаги:**
-1. GET `/api/v1/audit-logs?user_id={id}&created_from=2024-01-01&created_to=2024-12-31`
-2. GET `/api/v1/audit-logs?username=admin&query=project`
-
-**Ожидаемый результат:**
-- Только записи указанного пользователя в диапазоне дат
-- Фильтр по `username` и `query` также ограничивает набор строк
-
----
-
-## Модуль 16 — WebSocket (REALTIME)
-
----
-
-### TC-WS-001 🟢 Подключение к каналу проекта
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester1` авторизован (cookie установлена), является участником проекта A
-
-**Шаги:**
-1. Открыть WS-соединение `ws://localhost:8000/ws/projects/{project_a_id}`
-
-**Ожидаемый результат:**
-- Соединение установлено (статус 101 Switching Protocols)
-
----
-
-### TC-WS-002 🔴 WS-подключение без аутентификации
-
-**Предусловия:** Cookie не установлены
-
-**Шаги:**
-1. Открыть WS-соединение без cookie
-
-**Ожидаемый результат:**
-- Соединение отклонено (статус 401 или 403)
-
----
-
-### TC-WS-003 🔴 WS-подключение не-участника проекта
-
-**Предусловия:** `pentester2` авторизован, не является участником проекта A
-
-**Шаги:**
-1. Открыть WS-соединение `ws://localhost:8000/ws/projects/{project_a_id}` под `pentester2`
-
-**Ожидаемый результат:**
-- Соединение отклонено (статус 403)
-
----
-
-### TC-WS-004 🟢 Получение события при создании уязвимости
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester1` и `pentester2` — участники проекта; оба подключены по WS
-
-**Шаги:**
-1. `pentester1` создаёт уязвимость через POST
-2. Прослушать WS-сообщения у `pentester2`
-
-**Ожидаемый результат:**
-- `pentester2` получает сообщение:
-```json
-{
-  "event": "created",
-  "entity": "vulnerability",
-  "project_id": "<uuid>",
-  "data": {"id": "...", "title": "...", "severity": "..."}
-}
-```
-
----
-
-### TC-WS-005 🟢 Получение события при обновлении хоста
-
-**Шаги:**
-1. Один пользователь обновляет хост через PUT
-2. Второй пользователь принимает WS-событие
-
-**Ожидаемый результат:**
-- `{"event": "updated", "entity": "host", ...}`
-
----
-
-### TC-WS-006 🟢 Получение уведомления об @упоминании через WS
-
-**Предусловия:** `pentester2` подключён к персональному каналу `ws://localhost:8000/ws/notifications`
-
-**Шаги:**
-1. `pentester1` создаёт комментарий с `@pentester2`
-2. Прослушать WS у `pentester2`
-3. Проверить бейдж уведомлений в интерфейсе без ожидания polling-таймера
-
-**Ожидаемый результат:**
-- `pentester2` получает WS-событие:
-```json
-{
-  "event": "notification",
-  "entity": "notification",
-  "data": {
-    "type": "mention",
-    "is_read": false,
-    "comment_id": "<uuid>",
-    "vulnerability_id": "<uuid>",
-    "project_id": "<uuid>",
-    "commenter_username": "pentester1"
-  }
-}
-```
-- Бейдж уведомлений обновляется сразу после получения события
-
----
-
-### TC-WS-007 🟢 Отключённый пользователь не получает WS-события
-
-**Предусловия:** `pentester2` закрыл WS-соединение
-
-**Шаги:**
-1. `pentester1` создаёт уязвимость
-2. `pentester2` переподключается
-
-**Ожидаемый результат:**
-- При переподключении пропущенные события не дублируются (WS не хранит историю)
-- Данные актуальны после перезагрузки страницы через REST API
-
----
-
-## Модуль 17 — Безопасность (SECURITY)
-
----
-
-### TC-SEC-001 🔵 Токен недоступен из JavaScript
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. Авторизоваться в браузере
-2. Открыть консоль браузера
-3. Выполнить `document.cookie`
-
-**Ожидаемый результат:**
-- Cookie `access_token` и `refresh_token` **не отображаются** (атрибут `HttpOnly`)
-
----
-
-### TC-SEC-002 🔵 Токен не передаётся в URL
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. Авторизоваться
-2. Выполнить любой API-запрос
-3. Проверить URL запроса в сетевых инструментах браузера
-
-**Ожидаемый результат:**
-- Строка URL не содержит `token=`, `access_token=` и т.п.
-
----
-
-### TC-SEC-003 🔵 Токен не попадает в тело ответа
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/auth/login`
-2. Проверить тело ответа
-
-**Ожидаемый результат:**
-- Тело не содержит полей `access_token`, `refresh_token`, `token`
-
----
-
-### TC-SEC-004 🔵 Password hash не возвращается в ответах
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. GET `/api/v1/users/me`
-2. GET `/api/v1/users` (под admin)
-
-**Ожидаемый результат:**
-- Поле `password_hash` отсутствует в любом ответе
-
----
-
-### TC-SEC-005 🔵 IDOR: пентестер не может получить данные чужого проекта
-
-**Приоритет:** Высокий
-
-**Предусловия:** `pentester2` не участник проекта A, знает `project_a_id`
-
-**Шаги:**
-1. GET `/api/v1/projects/{project_a_id}` под `pentester2`
-2. GET `/api/v1/projects/{project_a_id}/vulnerabilities` под `pentester2`
-3. GET `/api/v1/projects/{project_a_id}/hosts` под `pentester2`
-
-**Ожидаемый результат:**
-- Все запросы: `403 Forbidden`
-
----
-
-### TC-SEC-006 🔵 IDOR: пентестер не может скачать чужой файл
-
-**Приоритет:** Высокий
-
-**Предусловия:** Файл принадлежит проекту B, пользователь — участник только проекта A
-
-**Шаги:**
-1. GET `/api/v1/files/{file_b_id}/download`
-
-**Ожидаемый результат:**
-- Статус: `403 Forbidden`
-
----
-
-### TC-SEC-007 🔵 SQL-инъекция в поле username при логине
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `/api/v1/auth/login` с `{"username": "' OR '1'='1", "password": "any"}`
-
-**Ожидаемый результат:**
-- Статус: `401 Unauthorized`
-- Приложение работает нормально, ошибок БД нет
-
----
-
-### TC-SEC-008 🔵 XSS в поле комментария
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `.../comments` с `{"content": "<script>alert('xss')</script>"}`
-
-**Ожидаемый результат:**
-- Статус: `201 Created`
-- В GET-ответе текст хранится как plain text (не исполняется)
-- Браузер не выполняет скрипт при отображении
-
----
-
-### TC-SEC-009 🔵 Path traversal при загрузке файла
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. POST `.../files` с файлом, имя которого: `../../etc/passwd`
-
-**Ожидаемый результат:**
-- Файл сохранён с безопасным именем (ключ MinIO генерируется сервером, не на основе имени файла)
-- Оригинальное имя хранится только как метаданные
-
----
-
-### TC-SEC-010 🔵 Прямой доступ к объекту MinIO без авторизации
-
-**Приоритет:** Высокий
-
-**Шаги:**
-1. Узнать ключ объекта в MinIO (из `minio_key`)
-2. Попытаться обратиться к MinIO напрямую без авторизации
-
-**Ожидаемый результат:**
-- MinIO не открыт публично; доступ только через бэкенд-прокси (`GET /api/v1/files/{id}/download`)
-
----
-
-## Модуль 18 — Пагинация (PAGINATION)
-
----
-
-### TC-PAG-001 🟢 Стандартная пагинация
-
-**Приоритет:** Средний
-
-**Предусловия:** Существует 25 уязвимостей в проекте
-
-**Шаги:**
-1. GET `...?page=1&size=20`
-2. GET `...?page=2&size=20`
-
-**Ожидаемый результат:**
-- Страница 1: `{"items": [...20 элементов], "total": 25, "page": 1, "size": 20, "pages": 2}`
-- Страница 2: `{"items": [...5 элементов], "total": 25, "page": 2}`
-
----
-
-### TC-PAG-002 🟡 Запрос несуществующей страницы
-
-**Предусловия:** Всего 5 элементов
-
-**Шаги:**
-1. GET `...?page=10&size=20`
-
-**Ожидаемый результат:**
-- Статус: `200 OK`
-- `items` = пустой массив, `total` = 5
-
----
-
-### TC-PAG-003 🔴 Отрицательный номер страницы
-
-**Шаги:**
-1. GET `...?page=-1&size=20`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-PAG-004 🔴 Нулевой размер страницы
-
-**Шаги:**
-1. GET `...?page=1&size=0`
-
-**Ожидаемый результат:**
-- Статус: `400 Bad Request`
-
----
-
-### TC-PAG-005 🟡 Чрезмерно большой размер страницы
-
-**Шаги:**
-1. GET `...?page=1&size=10000`
-
-**Ожидаемый результат:**
-- Сервер ограничивает до максимально допустимого значения (например, 100) или возвращает `400`
-
----
-
-## Итоговая матрица покрытия
-
-| Модуль | Всего TC | Позитивных | Негативных | Граничных | Безопасность |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Auth | 11 | 4 | 5 | 2 | — |
-| Users | 13 | 7 | 5 | 1 | — |
-| Projects | 14 | 8 | 5 | 1 | — |
-| Hosts | 7 | 4 | 2 | 1 | — |
-| Ports | 8 | 3 | 3 | 2 | — |
-| Services | 4 | 3 | 1 | — | — |
-| Endpoints | 5 | 3 | 2 | — | — |
-| Vulnerabilities | 13 | 7 | 4 | 2 | — |
-| Vuln Assets | 7 | 3 | 3 | 1 | — |
-| Files | 11 | 5 | 4 | 1 | 1 |
-| Comments | 10 | 5 | 4 | 1 | — |
-| Notifications | 6 | 4 | 1 | 1 | — |
-| Import | 8 | 2 | 4 | 2 | — |
-| Reports | 6 | 4 | 1 | 1 | — |
-| Audit Logs | 5 | 3 | 1 | 1 | — |
-| WebSocket | 7 | 4 | 2 | 1 | — |
-| Security | 10 | — | — | — | 10 |
-| Pagination | 5 | 1 | 2 | 2 | — |
-| **Итого** | **169** | **80** | **49** | **19** | **11** |
-
-**Расчётное покрытие: ~85%**
+| Дата | Изменение |
+|---|---|
+| 2026-05-13 | Полная переактуализация под текущий состав `backend/tests/` (добавлены модули assets/jira/word_builder/project_notes), reorganизация по новой иерархии `TC-<MODULE>-<NNN>`, добавлен раздел Agent API v2 и Pagination. |

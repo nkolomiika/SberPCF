@@ -72,18 +72,10 @@ async def refresh(
     refresh_token: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> RefreshResponse:
-    """Обновляет access cookie по refresh cookie."""
+    """Обновляет пару cookie-токенов с ротацией refresh-токена."""
     service = AuthService(db)
-    new_access, must_change_password = await service.refresh(refresh_token, get_client_ip(request))
-    response.set_cookie(
-        "access_token",
-        new_access,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite=settings.cookie_samesite,
-        max_age=settings.jwt_access_token_expire_minutes * 60,
-        path="/",
-    )
+    new_access, new_refresh, must_change_password = await service.refresh(refresh_token, get_client_ip(request))
+    _set_auth_cookies(response, new_access, new_refresh)
     response.status_code = status.HTTP_200_OK
     return RefreshResponse(ok=True, must_change_password=must_change_password)
 

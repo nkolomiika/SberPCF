@@ -1,7 +1,3 @@
-import json
-from datetime import UTC, datetime
-from pathlib import Path
-
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,67 +11,65 @@ from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, PCFError, UnauthorizedError, ValidationError
 from app.routers import (
+    agent_tokens,
     assets,
     audit_logs,
     auth,
     comments,
     files,
     import_,
+    jira,
     notifications,
     projects,
+    project_notes,
     reports,
     users,
     vulnerabilities,
+    v2_agent,
     websocket,
 )
 from app.services import UserService
 from app.storage.minio_client import MinioStorage
 
 settings = get_settings()
-DEBUG_LOG_PATH = Path("/workspace/debug-755228.log")
 
 app = FastAPI(title="PCF API", version="1.0.0", openapi_url="/api/v1/openapi.json")
+agent_api_v2 = FastAPI(
+    title="PCF Agent API",
+    version="2.0.0",
+    openapi_url="/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With", "Origin", "Accept"],
 )
 
 
 def _register_routes() -> None:
     prefix = "/api/v1"
     app.include_router(auth.router, prefix=prefix)
+    app.include_router(agent_tokens.router, prefix=prefix)
     app.include_router(users.router, prefix=prefix)
     app.include_router(projects.router, prefix=prefix)
+    app.include_router(project_notes.router, prefix=prefix)
     app.include_router(assets.router, prefix=prefix)
     app.include_router(vulnerabilities.router, prefix=prefix)
     app.include_router(files.router, prefix=prefix)
     app.include_router(comments.router, prefix=prefix)
     app.include_router(notifications.router, prefix=prefix)
     app.include_router(import_.router, prefix=prefix)
+    app.include_router(jira.router, prefix=prefix)
     app.include_router(reports.router, prefix=prefix)
     app.include_router(audit_logs.router, prefix=prefix)
+    agent_api_v2.include_router(v2_agent.router)
+    app.mount("/api/v2", agent_api_v2)
     app.include_router(websocket.router)
-
-
-def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    payload = {
-        "sessionId": "755228",
-        "runId": "workflow-title-debug",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(datetime.now(UTC).timestamp() * 1000),
-    }
-    try:
-        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
 
 
 def _register_error_handlers() -> None:
@@ -105,28 +99,7 @@ def _register_error_handlers() -> None:
         return "; ".join(messages) or "Некорректные входные данные"
 
     @app.exception_handler(RequestValidationError)
-    async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-        workflow_title_errors: list[dict] = []
-        for item in exc.errors():
-            raw_loc = [str(part) for part in item.get("loc", [])]
-            loc = ".".join(part for part in raw_loc if part not in {"body", "query", "path"})
-            if loc.startswith("workflow_steps.") and loc.endswith(".title"):
-                workflow_title_errors.append({"loc": loc, "type": item.get("type"), "msg": item.get("msg")})
-        if workflow_title_errors:
-            body = exc.body if isinstance(exc.body, dict) else {}
-            # #region agent log
-            _debug_log(
-                "H2",
-                "backend/app/main.py:request_validation_handler",
-                "Workflow step title validation error",
-                {
-                    "method": request.method,
-                    "path": request.url.path,
-                    "workflow_title_errors": workflow_title_errors,
-                    "workflow_steps_count": len((body.get("workflow_steps") or [])),
-                },
-            )
-            # #endregion
+    async def request_validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse(status_code=422, content={"detail": _format_request_validation(exc)})
 
     @app.exception_handler(NotFoundError)

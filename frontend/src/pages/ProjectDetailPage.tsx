@@ -1,4 +1,4 @@
-import AddIcon from "@mui/icons-material/Add";
+﻿import AddIcon from "@mui/icons-material/Add";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import CloseIcon from "@mui/icons-material/Close";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
@@ -29,21 +29,26 @@ import {
   MenuItem,
   Stack,
   TextField,
-  Tooltip,
   Typography,
 } from "@mui/material";
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useParams } from "react-router-dom";
+import { MarkdownEditor } from "../components/MarkdownEditor";
+import { MarkdownImage } from "../components/MarkdownImage";
 import { MarkdownOutlinedReadonlyField } from "../components/MarkdownOutlinedReadonlyField";
+import { markdownUrlTransform, normalizeMarkdownForRender } from "../markdownUrlTransform";
 import {
   createHost,
+  createProjectNote,
   createVulnerabilityComment,
   deleteHost,
+  deleteProjectNote,
   addProjectMember,
   deleteVulnerabilityComment,
+  downloadProjectAcceptanceReport,
+  downloadProjectCertificationReport,
   getApiErrorMessage,
-  generateProjectReport,
   getEndpoints,
   getHostVulnerabilities,
   getHosts,
@@ -52,17 +57,23 @@ import {
   getProjectMembers,
   getUsers,
   getProject,
+  getVulnerabilities,
   getVulnerability,
   importProjectData,
+  listProjectNotes,
   listVulnerabilityComments,
+  moveProjectNote,
   removeProjectMember,
+  reorderProjectNotes,
   updateProject,
+  updateProjectNote,
   updateVulnerabilityComment,
   updateVulnerability,
   uploadVulnerabilityFile,
 } from "../api";
 import { calculateCvssScore, severityFromCvssScore } from "../cvss";
 import { PROJECT_STATUS_CHIP_SX, PROJECT_STATUS_LABELS, PROJECT_STATUS_ORDER } from "../projectStatus";
+import { ProjectNotesSection } from "../components/ProjectNotesSection";
 import { ProjectTreeNav, type DetailSection } from "../components/ProjectTreeNav";
 import { VulnerabilityStagesEditor } from "../components/VulnerabilityStagesEditor";
 import { useAuthStore } from "../store";
@@ -73,6 +84,7 @@ import type {
   ImportResult,
   Port,
   ProjectMember,
+  ProjectNote,
   ProjectStatus,
   User,
   Vulnerability,
@@ -80,6 +92,16 @@ import type {
   VulnerabilityDetails,
 } from "../types";
 import { useErrorToast } from "../useErrorToast";
+
+const SEVERITY_LABELS_RU: Record<Vulnerability["severity"], string> = {
+  critical: "Критическая",
+  high: "Высокая",
+  medium: "Средняя",
+  low: "Низкая",
+  info: "Инфо",
+};
+
+const SEVERITY_ORDER: Vulnerability["severity"][] = ["critical", "high", "medium", "low", "info"];
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const CVSS_VERSION = "4.0" as const;
@@ -159,10 +181,13 @@ export function ProjectDetailPage() {
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const normalizedEndpoints = useMemo(() => dedupeEndpointsByNormalizedPath(endpoints), [endpoints]);
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
+  const [projectVulnerabilities, setProjectVulnerabilities] = useState<Vulnerability[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
   const [selectedSection, setSelectedSection] = useState<DetailSection>("overview");
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string>("");
   const [projectDescription, setProjectDescription] = useState<string>("");
   const [projectStatus, setProjectStatus] = useState<ProjectStatus>("active");
@@ -182,12 +207,12 @@ export function ProjectDetailPage() {
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
   const [importSummary, setImportSummary] = useState<ImportResult | null>(null);
-  const [reportLoadingFormat, setReportLoadingFormat] = useState<"md" | "pdf" | "docx" | null>(null);
+  const [reportLoadingKind, setReportLoadingKind] = useState<"szi" | "pp" | null>(null);
   const [actionsAnchorEl, setActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [hostsMenuAnchorEl, setHostsMenuAnchorEl] = useState<HTMLElement | null>(null);
   const [membersMenuAnchorEl, setMembersMenuAnchorEl] = useState<HTMLElement | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportFormat, setExportFormat] = useState<"md" | "pdf" | "docx">("pdf");
+  const [exportReportKind, setExportReportKind] = useState<"szi" | "pp">("szi");
   const [extendDialogOpen, setExtendDialogOpen] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
   const [projectEditDialogOpen, setProjectEditDialogOpen] = useState(false);
@@ -257,10 +282,11 @@ export function ProjectDetailPage() {
       return;
     }
     try {
-      const [hostsResp, projectResp, membersResp] = await Promise.all([
+      const [hostsResp, projectResp, membersResp, vulnsPage] = await Promise.all([
         getHosts(projectId),
         getProject(projectId),
         getProjectMembers(projectId),
+        getVulnerabilities(projectId),
       ]);
       setHosts(hostsResp.items);
       setProjectMembers(membersResp);
@@ -270,6 +296,7 @@ export function ProjectDetailPage() {
       setProjectStartDate(projectResp.start_date);
       setProjectEndDate(projectResp.end_date);
       setProjectTimelineFrozenAt(projectResp.timeline_frozen_at);
+      setProjectVulnerabilities(vulnsPage.items);
       setSelectedHostId((previousHostId) => {
         const storedHostId = storagePrefix ? window.localStorage.getItem(`${storagePrefix}:selectedHostId`) : null;
         if (previousHostId && hostsResp.items.some((host) => host.id === previousHostId)) {
@@ -421,6 +448,13 @@ export function ProjectDetailPage() {
     });
     return stats;
   }, [vulnerabilities]);
+  const projectSeverityStats = useMemo(() => {
+    const stats = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    projectVulnerabilities.forEach((item) => {
+      stats[item.severity] += 1;
+    });
+    return stats;
+  }, [projectVulnerabilities]);
   const severityChipSx: Record<Vulnerability["severity"], object> = {
     critical: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
     high: { bgcolor: "rgba(255,152,0,0.18)", color: "#ffcc80", border: "1px solid rgba(255,152,0,0.4)" },
@@ -583,26 +617,6 @@ export function ProjectDetailPage() {
       return;
     }
     const workflowSteps = activeVuln.workflow_steps || [];
-    // #region agent log
-    fetch("http://127.0.0.1:7847/ingest/092a8b93-589d-44d5-a2a5-67f255084dee", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "755228" },
-      body: JSON.stringify({
-        sessionId: "755228",
-        runId: "workflow-title-debug",
-        hypothesisId: "H1",
-        location: "frontend/src/pages/ProjectDetailPage.tsx:saveActiveVulnerability",
-        message: "Submitting vulnerability workflow steps",
-        data: {
-          vulnerabilityId: activeVuln.id,
-          stepsCount: workflowSteps.length,
-          hasDescriptionCount: workflowSteps.filter((step) => Boolean((step.description || "").trim())).length,
-          withLegacyTitleCount: workflowSteps.filter((step) => Boolean((step as { title?: string }).title?.trim())).length,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     setVulnBusy(true);
     setError(null);
     try {
@@ -807,11 +821,12 @@ export function ProjectDetailPage() {
         {vulnComments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
       </List>
       <TextField
-        label="Комментарий (@username только для участников проекта)"
+        label="Комментарий"
         multiline
         minRows={3}
         value={newComment}
         onChange={(e) => setNewComment(e.target.value)}
+        sx={{ "& .MuiInputBase-input": { color: "#ffffff" } }}
       />
       <Stack direction="row" justifyContent="flex-end">
         <Button variant="contained" disabled={!newComment.trim() || vulnBusy} onClick={() => void addCommentToActiveVuln()}>
@@ -862,8 +877,14 @@ export function ProjectDetailPage() {
       return <MarkdownOutlinedReadonlyField label={title} inputId={inputId} value={value} emptyText={emptyText} />;
     }
     return (
-      <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)" }}>
-        {value?.trim() ? <ReactMarkdown>{value}</ReactMarkdown> : <Typography color="text.secondary">{emptyText}</Typography>}
+      <Box sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.5, backgroundColor: "rgba(8,17,31,0.28)", "& p": { color: "#ffffff" }, "& li": { color: "#ffffff" }, "& a": { color: "rgba(255,255,255,0.92)" } }}>
+        {value?.trim() ? (
+          <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
+            {normalizeMarkdownForRender(value)}
+          </ReactMarkdown>
+        ) : (
+          <Typography color="text.secondary">{emptyText}</Typography>
+        )}
       </Box>
     );
   };
@@ -886,19 +907,21 @@ export function ProjectDetailPage() {
     }
   };
 
-  const downloadReport = async (format: "md" | "pdf" | "docx") => {
+  const downloadReport = async (kind: "szi" | "pp") => {
     if (!projectId) {
       return;
     }
-    setReportLoadingFormat(format);
+    setReportLoadingKind(kind);
     setError(null);
     try {
-      const blob = await generateProjectReport(projectId, format);
+      const blob =
+        kind === "szi" ? await downloadProjectCertificationReport(projectId) : await downloadProjectAcceptanceReport(projectId);
       const fileNameBase = (projectName || "project-report").replace(/[^\w.-]+/g, "_");
+      const suffix = kind === "szi" ? "szi" : "pp";
       const objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = objectUrl;
-      anchor.download = `${fileNameBase}.${format}`;
+      anchor.download = `${fileNameBase}_${suffix}.docx`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -906,7 +929,7 @@ export function ProjectDetailPage() {
     } catch (error) {
       setError(getApiErrorMessage(error, "Не удалось сформировать отчёт"));
     } finally {
-      setReportLoadingFormat(null);
+      setReportLoadingKind(null);
     }
   };
   const actionsMenuOpen = Boolean(actionsAnchorEl);
@@ -1165,9 +1188,11 @@ export function ProjectDetailPage() {
             {projectName ? `Проект: ${projectName}` : "Проект"}
           </Typography>
         </Box>
-        <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", width: 42, height: 42, backgroundColor: "rgba(15,27,45,0.72)" }}>
-          <MoreVertIcon />
-        </IconButton>
+        {selectedSection === "overview" ? (
+          <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", width: 42, height: 42, backgroundColor: "rgba(15,27,45,0.72)" }}>
+            <MoreVertIcon />
+          </IconButton>
+        ) : null}
       </Stack>
 
       <Menu
@@ -1240,20 +1265,81 @@ export function ProjectDetailPage() {
           endpointsCount={normalizedEndpoints.length}
           vulnerabilitiesCount={vulnerabilities.length}
           hostStatsById={hostStatsById}
-          autoExpandSelectedHost={false}
+          notesCount={projectNotes.length}
+          notes={projectNotes}
+          selectedNoteId={selectedNoteId}
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
           onSelectSection={setSelectedSection}
           onSelectProjectOverview={() => setSelectedSection("overview")}
+          onSelectNote={setSelectedNoteId}
+          onCreateNote={async (parentId) => {
+            if (!projectId) return;
+            const title = window.prompt(parentId ? "Название подстраницы:" : "Название страницы:")?.trim();
+            if (!title) return;
+            try {
+              const created = await createProjectNote(projectId, { title, parent_id: parentId });
+              setProjectNotes(await listProjectNotes(projectId));
+              setSelectedNoteId(created.id);
+              setSelectedSection("notes");
+            } catch (err) {
+              setError(getApiErrorMessage(err, "Не удалось создать заметку"));
+            }
+          }}
+          onRenameNote={async (noteId) => {
+            if (!projectId) return;
+            const current = projectNotes.find((n) => n.id === noteId);
+            const nextTitle = window.prompt("Новое название:", current?.title ?? "")?.trim();
+            if (!nextTitle || nextTitle === current?.title) return;
+            try {
+              await updateProjectNote(projectId, noteId, { title: nextTitle });
+              setProjectNotes(await listProjectNotes(projectId));
+            } catch (err) {
+              setError(getApiErrorMessage(err, "Не удалось переименовать заметку"));
+            }
+          }}
+          onDeleteNote={async (noteId) => {
+            if (!projectId) return;
+            const current = projectNotes.find((n) => n.id === noteId);
+            if (!window.confirm(`Удалить заметку "${current?.title ?? ""}" со всеми подстраницами?`)) return;
+            try {
+              await deleteProjectNote(projectId, noteId);
+              setProjectNotes(await listProjectNotes(projectId));
+              if (selectedNoteId === noteId) setSelectedNoteId(null);
+            } catch (err) {
+              setError(getApiErrorMessage(err, "Не удалось удалить заметку"));
+            }
+          }}
+          onMoveNote={async (noteId, newParentId) => {
+            if (!projectId) return;
+            try {
+              await moveProjectNote(projectId, noteId, { parent_id: newParentId });
+              setProjectNotes(await listProjectNotes(projectId));
+            } catch (err) {
+              setError(getApiErrorMessage(err, "Не удалось переместить заметку"));
+            }
+          }}
+          onReorderNotes={async (parentId, orderedIds) => {
+            if (!projectId) return;
+            try {
+              await reorderProjectNotes(projectId, {
+                parent_id: parentId,
+                items: orderedIds.map((id, idx) => ({ id, sort_order: idx + 1 })),
+              });
+              setProjectNotes(await listProjectNotes(projectId));
+            } catch (err) {
+              setError(getApiErrorMessage(err, "Не удалось обновить порядок заметок"));
+            }
+          }}
           onSelectHost={setSelectedHostId}
           onOpenHost={(hostId, section) => navigate(`/projects/${projectId}/hosts/${hostId}`, { state: { section } })}
         />
-
         <Stack flex={1} spacing={2}>
           {selectedSection !== "overview" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Typography variant="h6" fontWeight={700}>
-                  {selectedSection === "hosts" && `Хост: ${hostLabel}`}
+                  {selectedSection === "notes" && "Заметки проекта"}
+                  {selectedSection === "hosts" && "Хосты проекта"}
                   {selectedSection === "ports" && `Порты хоста: ${hostLabel}`}
                   {selectedSection === "endpoints" && `Эндпоинты хоста: ${hostLabel}`}
                   {selectedSection === "vulns" && `Уязвимости хоста: ${hostLabel}`}
@@ -1530,33 +1616,13 @@ export function ProjectDetailPage() {
                   </Stack>
                   {projectDescriptionEditOpen ? (
                     <Stack spacing={1.5}>
-                      <TextField
-                        fullWidth
-                        multiline
+                      <MarkdownEditor
+                        label="Описание проекта"
+                        showLabel={false}
                         minRows={4}
                         value={projectDraftDescription}
-                        onChange={(event) => setProjectDraftDescription(event.target.value)}
-                        placeholder="Введите описание проекта (Markdown). Вставьте картинку через Ctrl+V или перетащите файл."
-                        helperText="Поддерживаются изображения: вставка из буфера или перетаскивание в поле."
-                        onPaste={(event) => {
-                          const file = Array.from(event.clipboardData?.files || []).find((f) => f.type.startsWith("image/"));
-                          if (file) {
-                            event.preventDefault();
-                            appendImageToProjectDraft(file);
-                          }
-                        }}
-                        onDragOver={(event) => {
-                          if (Array.from(event.dataTransfer?.items || []).some((i) => i.kind === "file" && i.type.startsWith("image/"))) {
-                            event.preventDefault();
-                          }
-                        }}
-                        onDrop={(event) => {
-                          const file = Array.from(event.dataTransfer?.files || []).find((f) => f.type.startsWith("image/"));
-                          if (file) {
-                            event.preventDefault();
-                            appendImageToProjectDraft(file);
-                          }
-                        }}
+                        onChange={(next) => setProjectDraftDescription(next || "")}
+                        onImageTooLarge={() => setError("Изображение слишком большое (макс. ~1.5 МБ).")}
                       />
                       <Stack direction="row" spacing={1} justifyContent="flex-end">
                         <Button onClick={cancelProjectDescriptionEdit} disabled={projectSaving}>
@@ -1570,15 +1636,20 @@ export function ProjectDetailPage() {
                   ) : (
                     <Box
                       sx={{
-                        color: "text.secondary",
-                        "& p": { m: 0 },
+                        "& p": { m: 0, color: "#ffffff" },
                         "& p + p": { mt: 1 },
                         "& img": { maxWidth: "100%", height: "auto" },
-                        "& ul, & ol": { m: 0, pl: 2.5 },
+                        "& ul, & ol": { m: 0, pl: 2.5, color: "#ffffff" },
+                        "& li": { color: "#ffffff" },
+                        "& a": { color: "rgba(255,255,255,0.92)" },
+                        "& code": { color: "#ffffff", backgroundColor: "rgba(0,0,0,0.2)" },
+                        "& strong, & em": { color: "#ffffff" },
                       }}
                     >
                       {projectDescription?.trim() ? (
-                        <ReactMarkdown>{projectDescription}</ReactMarkdown>
+                        <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
+                          {normalizeMarkdownForRender(projectDescription)}
+                        </ReactMarkdown>
                       ) : (
                         <Typography color="text.secondary">Описание проекта не заполнено</Typography>
                       )}
@@ -1589,22 +1660,78 @@ export function ProjectDetailPage() {
             </Stack>
           )}
 
+          {selectedSection === "notes" && projectId && (
+            <ProjectNotesSection
+              projectId={projectId}
+              selectedNoteId={selectedNoteId}
+              onSelectNote={setSelectedNoteId}
+              onNotesChange={setProjectNotes}
+            />
+          )}
+
           {selectedSection === "hosts" && (
-            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
-              <CardContent>
-              <Stack spacing={1.2}>
-                {hosts.map((host) => (
-                    <Box
-                      key={host.id}
-                      sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.6, borderRadius: 0, cursor: "pointer", backgroundColor: "rgba(8,17,31,0.24)" }}
-                      onClick={() => navigate(`/projects/${projectId}/hosts/${host.id}`)}
-                    >
-                      <Typography>{host.hostname || host.ip_address || "unknown-host"}</Typography>
-                  </Box>
-                ))}
-              </Stack>
-            </CardContent>
-          </Card>
+            <Stack spacing={2}>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
+                <CardContent>
+                  <Typography variant="h6" fontWeight={700} mb={2}>
+                    Уязвимости по критичности (проект)
+                  </Typography>
+                  <Stack spacing={1.25}>
+                    {SEVERITY_ORDER.map((sev) => {
+                      const count = projectSeverityStats[sev];
+                      const total = SEVERITY_ORDER.reduce((sum, key) => sum + projectSeverityStats[key], 0);
+                      const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+                      const tone = severityChipSx[sev] as { bgcolor?: string };
+                      return (
+                        <Stack key={sev} spacing={0.5}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center">
+                            <Typography variant="body2" sx={{ color: "#ffffff" }}>
+                              {SEVERITY_LABELS_RU[sev]}
+                            </Typography>
+                            <Typography variant="body2" fontWeight={700} sx={{ color: "#ffffff" }}>
+                              {count}
+                            </Typography>
+                          </Stack>
+                          <Box sx={{ height: 10, backgroundColor: "rgba(126,224,255,0.08)", borderRadius: 0, overflow: "hidden" }}>
+                            <Box sx={{ height: "100%", width: `${pct}%`, backgroundColor: tone.bgcolor ?? "rgba(126,224,255,0.3)" }} />
+                          </Box>
+                        </Stack>
+                      );
+                    })}
+                  </Stack>
+                  {SEVERITY_ORDER.every((sev) => projectSeverityStats[sev] === 0) ? (
+                    <Typography color="text.secondary" variant="body2" sx={{ mt: 2 }}>
+                      Уязвимостей по проекту не найдено.
+                    </Typography>
+                  ) : null}
+                </CardContent>
+              </Card>
+              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
+                <CardContent>
+                  <Typography variant="subtitle1" fontWeight={700} mb={1}>
+                    Хосты
+                  </Typography>
+                  <Stack spacing={1.2}>
+                    {hosts.map((host) => (
+                      <Box
+                        key={host.id}
+                        sx={{
+                          border: "1px solid rgba(126,224,255,0.12)",
+                          p: 1.6,
+                          borderRadius: 0,
+                          cursor: "pointer",
+                          backgroundColor: "rgba(8,17,31,0.24)",
+                        }}
+                        onClick={() => navigate(`/projects/${projectId}/hosts/${host.id}`)}
+                      >
+                        <Typography sx={{ color: "#ffffff" }}>{host.hostname || host.ip_address || "unknown-host"}</Typography>
+                      </Box>
+                    ))}
+                    {hosts.length === 0 ? <Typography color="text.secondary">Хосты не добавлены.</Typography> : null}
+                  </Stack>
+                </CardContent>
+              </Card>
+            </Stack>
           )}
 
           {selectedSection === "ports" && (
@@ -1639,7 +1766,7 @@ export function ProjectDetailPage() {
                         <Chip size="small" label={endpoint.method || "ANY"} />
                         <Typography fontWeight={600}>{endpoint.path}</Typography>
                       </Stack>
-                      <Typography variant="body2" color="text.secondary" mt={0.8}>
+                      <Typography variant="body2" sx={{ mt: 0.8, color: endpoint.description?.trim() ? "#ffffff" : "rgba(148,163,184,0.85)" }}>
                         {endpoint.description || "Описание не указано"}
                       </Typography>
                     </Box>
@@ -1677,7 +1804,7 @@ export function ProjectDetailPage() {
                         <Chip label={item.severity} size="small" sx={severityChipSx[item.severity]} />
                         <Chip label={item.status} size="small" sx={vulnerabilityStatusChipSx[item.status]} />
                       </Stack>
-                      <Typography color="text.secondary" variant="body2">
+                      <Typography variant="body2" sx={{ color: item.impact?.trim() ? "#ffffff" : "rgba(148,163,184,0.85)" }}>
                         {item.impact || "Влияние не указано"}
                       </Typography>
                       <Box>
@@ -1713,7 +1840,12 @@ export function ProjectDetailPage() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="IP-адрес" value={hostIp} onChange={(e) => setHostIp(e.target.value)} />
             <TextField label="Hostname" value={hostName} onChange={(e) => setHostName(e.target.value)} />
-            <TextField label="Описание" multiline minRows={3} value={hostNotes} onChange={(e) => setHostNotes(e.target.value)} />
+            <MarkdownEditor
+              label="Описание"
+              minRows={3}
+              value={hostNotes}
+              onChange={(next) => setHostNotes(next || "")}
+            />
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -1962,13 +2094,11 @@ export function ProjectDetailPage() {
                 </Grid>
                 <Grid size={{ xs: 12 }}>
                   {vulnEditMode ? (
-                    <TextField
+                    <MarkdownEditor
                       label="Влияние"
-                      fullWidth
-                      multiline
                       minRows={2}
-                      value={activeVuln.impact || ""}
-                      onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, impact: e.target.value || null } : prev))}
+                      value={activeVuln.impact}
+                      onChange={(next) => setActiveVuln((prev) => (prev ? { ...prev, impact: next } : prev))}
                     />
                   ) : (
                     renderMarkdownPreview(activeVuln.impact, "Влияние не указано.", "Влияние")
@@ -1976,13 +2106,11 @@ export function ProjectDetailPage() {
                 </Grid>
                 <Grid size={{ xs: 12 }}>
                   {vulnEditMode ? (
-                    <TextField
+                    <MarkdownEditor
                       label="Рекомендации"
-                      fullWidth
-                      multiline
                       minRows={2}
-                      value={activeVuln.recommendations || ""}
-                      onChange={(e) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: e.target.value || null } : prev))}
+                      value={activeVuln.recommendations}
+                      onChange={(next) => setActiveVuln((prev) => (prev ? { ...prev, recommendations: next } : prev))}
                     />
                   ) : (
                     renderMarkdownPreview(activeVuln.recommendations, "Рекомендации не указаны.", "Рекомендации")
@@ -2016,17 +2144,16 @@ export function ProjectDetailPage() {
             Закрыть
           </Button>
           {!vulnEditMode && (
-            <Tooltip title="Редактировать">
-              <span>
-                <IconButton
-                  onClick={() => setVulnEditMode(true)}
-                  disabled={!activeVuln}
-                  sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
-                >
-                  <EditIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
+            <span>
+              <IconButton
+                aria-label="Редактировать"
+                onClick={() => setVulnEditMode(true)}
+                disabled={!activeVuln}
+                sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
+              >
+                <EditIcon fontSize="small" />
+              </IconButton>
+            </span>
           )}
         </DialogActions>
       </Dialog>
@@ -2038,7 +2165,7 @@ export function ProjectDetailPage() {
             fullWidth
             multiline
             minRows={4}
-            sx={{ mt: 1 }}
+            sx={{ mt: 1, "& .MuiInputBase-input": { color: "#ffffff" } }}
             label="Комментарий"
             value={editingCommentContent}
             onChange={(event) => setEditingCommentContent(event.target.value)}
@@ -2058,13 +2185,12 @@ export function ProjectDetailPage() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField
               select
-              label="Формат"
-              value={exportFormat}
-              onChange={(e) => setExportFormat(e.target.value as "md" | "pdf" | "docx")}
+              label="Тип отчёта"
+              value={exportReportKind}
+              onChange={(e) => setExportReportKind(e.target.value as "szi" | "pp")}
             >
-              <MenuItem value="md">Markdown (.md)</MenuItem>
-              <MenuItem value="pdf">PDF (.pdf)</MenuItem>
-              <MenuItem value="docx">DOCX (.docx)</MenuItem>
+              <MenuItem value="szi">СЗИ — сертификация (Word)</MenuItem>
+              <MenuItem value="pp">ПП — внутренняя приёмка (Word)</MenuItem>
             </TextField>
           </Stack>
         </DialogContent>
@@ -2073,8 +2199,8 @@ export function ProjectDetailPage() {
           <Button
             variant="contained"
             startIcon={<DownloadIcon />}
-            disabled={reportLoadingFormat !== null}
-            onClick={() => void downloadReport(exportFormat)}
+            disabled={reportLoadingKind !== null}
+            onClick={() => void downloadReport(exportReportKind)}
           >
             Скачать
           </Button>
@@ -2142,12 +2268,8 @@ export function ProjectDetailPage() {
                   label="Поиск по username"
                   value={memberSearchQuery}
                   onChange={(event) => setMemberSearchQuery(event.target.value)}
-                  placeholder="Например, alice"
                   fullWidth
                 />
-                <Typography variant="subtitle2" color="text.secondary">
-                  Отмеченные пользователи уже состоят в проекте
-                </Typography>
                 <List
                   dense
                   disablePadding

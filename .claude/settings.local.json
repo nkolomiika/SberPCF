@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_auth_cookies.py tests/test_security.py tests/test_dependencies.py -x --tb=short)",
+      "Bash(python -m pytest --tb=short)",
+      "Bash(git stash *)",
+      "Bash(python -m pytest tests/test_user_service_security.py --tb=line)",
+      "Bash(python -m pytest tests/test_security.py tests/test_auth_cookies.py tests/test_dependencies.py tests/test_pagination.py tests/test_schemas.py tests/test_additional_validations.py tests/test_project_service.py tests/test_asset_service.py tests/test_vulnerability_workflow.py tests/test_comment_service.py tests/test_import_service.py tests/test_report_service.py tests/test_project_note_service.py tests/test_word_builder.py --tb=short)",
+      "Read(//c/Users/mad_duck/Cursor Projects/**)",
+      "Bash(npx tsc *)",
+      "Bash(python -m pytest tests/test_security.py tests/test_dependencies.py tests/test_auth_cookies.py tests/test_schemas.py --tb=short)",
+      "Bash(xargs grep -l \"severityChipSx\\\\|severity.*color\\\\|SEVERITY_COLORS\")",
+      "Bash(python -m pytest tests/test_schemas.py tests/test_security.py tests/test_dependencies.py tests/test_auth_cookies.py tests/test_pagination.py --tb=short)",
+      "Bash(python -m pytest tests/ --tb=line -q)"
+    ]
+  }
+}

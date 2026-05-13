@@ -1,49 +1,54 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
-from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qsl, urlparse, urlsplit
 from uuid import UUID, uuid4
-from xml.sax.saxutils import escape
 
 import magic
+import httpx
 import yaml
 from cvss import CVSS4
-from docx import Document
-from docx.shared import Inches
 from fastapi import UploadFile
 from PIL import Image as PillowImage, ImageOps, UnidentifiedImageError
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import Image as PlatypusImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.audit_store import audit_store
 from app.config import get_settings
 from app.enums import AssetType, NotificationType, ProjectStatus, Severity, UserRole
+from app.reports import ReportKind, build_pp, build_szi
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError
 from app.models import (
+    AgentApiToken,
+    AgentApiTokenProjectGrant,
     AuditLog,
     Comment,
     CommentMention,
     Endpoint,
     File,
     Host,
+    HostIpAddress,
+    JiraInstance,
+    JiraIssueLink,
     MailJob,
     Notification,
     Port,
     Project,
     ProjectFolder,
+    ProjectJiraLink,
     ProjectMember,
+    ProjectNote,
+    ProjectNoteComment,
     RefreshToken,
     Service,
     User,
@@ -60,11 +65,13 @@ from app.schemas import (
     NotificationOut,
     OpenApiImportResult,
     PcfImportPayload,
+    ProjectNoteCommentOut,
 )
 from app.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    hash_agent_token,
     hash_password,
     hash_refresh_token,
     verify_password,
@@ -73,24 +80,6 @@ from app.storage.minio_client import MinioStorage
 from app.ws_manager import ws_manager
 
 settings = get_settings()
-DEBUG_LOG_PATH = Path("/workspace/debug-755228.log")
-
-
-def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    payload = {
-        "sessionId": "755228",
-        "runId": "workflow-title-debug",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(datetime.now(UTC).timestamp() * 1000),
-    }
-    try:
-        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
 MENTION_RE = re.compile(r"@([a-zA-Z0-9_.-]{1,100})")
 MAX_FILE_SIZE = 50 * 1024 * 1024
 MAX_OPENAPI_IMPORT_BYTES = 2 * 1024 * 1024
@@ -108,6 +97,18 @@ ALLOWED_MIME_TYPES = {
     "application/x-tar",
     "application/gzip",
 }
+
+
+def _sanitize_filename(raw: str | None, fallback: str = "file.bin") -> str:
+    """Удаляет path separators, null-bytes и control-chars из оригинального имени файла."""
+    if not raw:
+        return fallback
+    import os
+
+    name = os.path.basename(str(raw).replace("\\", "/")).strip()
+    name = "".join(ch for ch in name if ch.isprintable() and ch not in {"\x00"})
+    name = name.lstrip(".")  # запрещаем "../" и скрытые имена .git/.env
+    return name or fallback
 
 
 class AuditService:
@@ -155,6 +156,245 @@ class AuditService:
         )
 
 
+class AgentTokenService:
+    """Управляет bearer-токенами для AI agent API."""
+
+    DEFAULT_SCOPES = ["projects:read", "assets:read", "vulns:read", "notes:read"]
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+        self.audit = AuditService(db)
+
+    async def _project_ids_for_token(self, token_id: UUID) -> list[UUID]:
+        rows = await self.db.scalars(
+            select(AgentApiTokenProjectGrant.project_id).where(AgentApiTokenProjectGrant.token_id == token_id)
+        )
+        return list(rows.all())
+
+    @staticmethod
+    def _serialize_token(token: AgentApiToken, project_ids: list[UUID]) -> dict:
+        """Сериализует AgentApiToken в dict со всеми полями (включая nullable, отсутствующие в __dict__)."""
+        return {
+            "id": token.id,
+            "name": token.name,
+            "token_prefix": token.token_prefix,
+            "scopes": token.scopes or [],
+            "all_projects": token.all_projects,
+            "created_by": token.created_by,
+            "expires_at": token.expires_at,
+            "revoked_at": token.revoked_at,
+            "last_used_at": token.last_used_at,
+            "created_at": token.created_at,
+            "updated_at": token.updated_at,
+            "project_ids": project_ids,
+        }
+
+    async def list_tokens(self) -> list[dict]:
+        tokens = (await self.db.scalars(select(AgentApiToken).order_by(AgentApiToken.created_at.desc()))).all()
+        result: list[dict] = []
+        for token in tokens:
+            result.append(self._serialize_token(token, await self._project_ids_for_token(token.id)))
+        return result
+
+    async def create_token(self, payload: dict, actor_id: UUID) -> tuple[dict, str]:
+        raw_token = f"pcf_v2_{secrets.token_urlsafe(32)}"
+        token = AgentApiToken(
+            name=payload["name"],
+            token_hash=hash_agent_token(raw_token),
+            token_prefix=raw_token[:14],
+            scopes=payload.get("scopes") or self.DEFAULT_SCOPES,
+            all_projects=bool(payload.get("all_projects")),
+            created_by=actor_id,
+            expires_at=payload.get("expires_at"),
+        )
+        self.db.add(token)
+        await self.db.flush()
+        if not token.all_projects:
+            for project_id in payload.get("project_ids") or []:
+                self.db.add(AgentApiTokenProjectGrant(token_id=token.id, project_id=project_id))
+        await self.db.commit()
+        await self.db.refresh(token)
+        await self.audit.log("CREATE", user_id=actor_id, entity_type="agent_api_token", entity_id=token.id)
+        return self._serialize_token(token, await self._project_ids_for_token(token.id)), raw_token
+
+    async def revoke_token(self, token_id: UUID, actor_id: UUID) -> None:
+        token = await self.db.scalar(select(AgentApiToken).where(AgentApiToken.id == token_id))
+        if not token:
+            raise NotFoundError("Agent API token не найден")
+        token.revoked_at = datetime.now(UTC)
+        await self.db.commit()
+        await self.audit.log("UPDATE", user_id=actor_id, entity_type="agent_api_token", entity_id=token.id)
+
+
+class JiraIntegrationService:
+    """Backend-only интеграция с Jira REST API."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+        self.audit = AuditService(db)
+
+    @staticmethod
+    def _validate_external_url(raw_url: str) -> str:
+        """SSRF-защита: разрешаем только https и публичные хосты (запрет на localhost, RFC1918, link-local)."""
+        import ipaddress
+        import socket
+
+        if not raw_url or not raw_url.strip():
+            raise ValidationError("Jira base_url не может быть пустым")
+        parsed = urlparse(raw_url.strip())
+        if parsed.scheme not in {"https", "http"}:
+            raise ValidationError("Jira base_url должен использовать https:// или http://")
+        if parsed.scheme == "http" and not settings.debug:
+            raise ValidationError("Jira base_url в production должен использовать https://")
+        host = parsed.hostname
+        if not host:
+            raise ValidationError("Jira base_url не содержит host")
+        if host.lower() in {"localhost", "metadata.google.internal", "instance-data"}:
+            raise ValidationError("Jira base_url указывает на запрещённый хост")
+        try:
+            resolved = {info[4][0] for info in socket.getaddrinfo(host, None)}
+        except socket.gaierror as exc:
+            raise ValidationError(f"Не удалось разрешить host Jira: {exc}") from exc
+        for addr in resolved:
+            try:
+                ip_obj = ipaddress.ip_address(addr)
+            except ValueError:
+                continue
+            if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local or ip_obj.is_reserved or ip_obj.is_multicast:
+                raise ValidationError("Jira base_url указывает на внутренний/приватный IP — запрещено")
+        return raw_url.strip().rstrip("/")
+
+    @staticmethod
+    def _fernet():
+        from cryptography.fernet import Fernet
+
+        settings = get_settings()
+        key = base64.urlsafe_b64encode(hashlib.sha256(settings.jwt_secret_key.encode("utf-8")).digest())
+        return Fernet(key)
+
+    @classmethod
+    def _encrypt_secret(cls, value: str) -> str:
+        return cls._fernet().encrypt(value.encode("utf-8")).decode("utf-8")
+
+    @classmethod
+    def _decrypt_secret(cls, value: str) -> str:
+        return cls._fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+
+    async def get_config(self) -> JiraInstance | None:
+        return await self.db.scalar(select(JiraInstance).order_by(JiraInstance.created_at.desc()))
+
+    async def upsert_config(self, payload: dict, actor_id: UUID) -> JiraInstance:
+        config = await self.get_config()
+        token = payload.pop("api_token", None)
+        if not config:
+            if not token:
+                raise ValidationError("Для первой настройки Jira нужен api_token")
+            safe_base_url = self._validate_external_url(payload["base_url"])
+            config = JiraInstance(
+                name=payload["name"],
+                base_url=safe_base_url,
+                email=payload["email"],
+                api_token_encrypted=self._encrypt_secret(token),
+                default_issue_type=payload["default_issue_type"],
+                is_enabled=payload["is_enabled"],
+                created_by=actor_id,
+            )
+            self.db.add(config)
+        else:
+            for key, value in payload.items():
+                if key == "base_url" and value:
+                    value = self._validate_external_url(value)
+                if value is not None:
+                    setattr(config, key, value)
+            if token:
+                config.api_token_encrypted = self._encrypt_secret(token)
+        await self.db.commit()
+        await self.db.refresh(config)
+        await self.audit.log("UPDATE", user_id=actor_id, entity_type="jira_config", entity_id=config.id)
+        return config
+
+    async def upsert_project_link(self, project_id: UUID, jira_project_key: str, actor_id: UUID) -> ProjectJiraLink:
+        project = await self.db.scalar(select(Project).where(Project.id == project_id))
+        if not project:
+            raise NotFoundError("Проект не найден")
+        link = await self.db.scalar(select(ProjectJiraLink).where(ProjectJiraLink.project_id == project_id))
+        if not link:
+            link = ProjectJiraLink(project_id=project_id, jira_project_key=jira_project_key.upper(), created_by=actor_id)
+            self.db.add(link)
+        else:
+            link.jira_project_key = jira_project_key.upper()
+        await self.db.commit()
+        await self.db.refresh(link)
+        await self.audit.log("UPDATE", user_id=actor_id, entity_type="project_jira_link", entity_id=link.id)
+        return link
+
+    async def get_project_link(self, project_id: UUID) -> ProjectJiraLink | None:
+        return await self.db.scalar(select(ProjectJiraLink).where(ProjectJiraLink.project_id == project_id))
+
+    @staticmethod
+    def _jira_description(text: str) -> dict:
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": text[:30000]}]}],
+        }
+
+    async def get_issue_link(self, vulnerability_id: UUID) -> JiraIssueLink | None:
+        return await self.db.scalar(select(JiraIssueLink).where(JiraIssueLink.vulnerability_id == vulnerability_id))
+
+    async def export_vulnerability(self, project_id: UUID, vuln_id: UUID, actor_id: UUID) -> JiraIssueLink:
+        config = await self.get_config()
+        if not config or not config.is_enabled:
+            raise ValidationError("Jira не настроена или отключена")
+        project_link = await self.get_project_link(project_id)
+        if not project_link:
+            raise ValidationError("Проект не привязан к Jira project key")
+        existing = await self.get_issue_link(vuln_id)
+        if existing:
+            return existing
+        vuln_data = await VulnerabilityService(self.db).get(project_id, vuln_id)
+        vulnerability = vuln_data["vulnerability"]
+        description = "\n\n".join(
+            part
+            for part in [
+                vulnerability.description,
+                f"Severity: {vulnerability.severity.value}",
+                f"CVSS: {vulnerability.cvss_score or '-'} {vulnerability.cvss_vector or ''}".strip(),
+                vulnerability.impact,
+                vulnerability.recommendations,
+            ]
+            if part
+        )
+        payload = {
+            "fields": {
+                "project": {"key": project_link.jira_project_key},
+                "summary": vulnerability.title,
+                "issuetype": {"name": config.default_issue_type},
+                "description": self._jira_description(description or vulnerability.title),
+            }
+        }
+        safe_base_url = self._validate_external_url(config.base_url)
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            response = await client.post(
+                f"{safe_base_url}/rest/api/3/issue",
+                json=payload,
+                auth=(config.email, self._decrypt_secret(config.api_token_encrypted)),
+            )
+        if response.status_code >= 400:
+            raise ValidationError(f"Jira вернула ошибку {response.status_code}: {response.text[:500]}")
+        data = response.json()
+        issue_key = data.get("key")
+        if not issue_key:
+            raise ValidationError("Jira не вернула key созданной issue")
+        issue_url = f"{config.base_url.rstrip('/')}/browse/{issue_key}"
+        link = JiraIssueLink(vulnerability_id=vuln_id, jira_issue_key=issue_key, jira_issue_url=issue_url, status="linked")
+        self.db.add(link)
+        await self.db.commit()
+        await self.db.refresh(link)
+        await self.audit.log("CREATE", user_id=actor_id, entity_type="jira_issue_link", entity_id=link.id)
+        return link
+
+
 class AuthService:
     """Сервис аутентификации и управления JWT-cookie."""
 
@@ -180,28 +420,48 @@ class AuthService:
         await self.audit.log("LOGIN", user_id=user.id, ip_address=ip_address)
         return access_token, refresh_token, user
 
-    async def refresh(self, refresh_token: str | None, ip_address: str | None = None) -> tuple[str, bool]:
-        """Обновляет access-токен по валидному refresh-cookie."""
+    async def refresh(self, refresh_token: str | None, ip_address: str | None = None) -> tuple[str, str, bool]:
+        """Обновляет access-токен по валидному refresh-cookie с ротацией refresh-токена.
+
+        Возвращает (new_access_token, new_refresh_token, must_change_password).
+        Старый refresh-токен помечается как revoked. Если приходит уже отозванный токен —
+        отзываем все активные токены пользователя как защиту от token reuse / replay-атаки.
+        """
         if not refresh_token:
             raise UnauthorizedError("Refresh token отсутствует")
         user_id = decode_token(refresh_token, expected_type="refresh")
         token_hash = hash_refresh_token(refresh_token)
-        token_entry = await self.db.scalar(
+        existing = await self.db.scalar(
             select(RefreshToken).where(
                 and_(
                     RefreshToken.token_hash == token_hash,
                     RefreshToken.user_id == user_id,
-                    RefreshToken.revoked_at.is_(None),
-                    RefreshToken.expires_at > datetime.now(UTC),
                 )
             )
         )
-        if not token_entry:
+        now = datetime.now(UTC)
+        if existing and existing.revoked_at is not None:
+            # Replay attempt: revoke all active tokens for this user
+            await self.db.execute(
+                update(RefreshToken)
+                .where(and_(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None)))
+                .values(revoked_at=now)
+            )
+            await self.db.commit()
+            await self.audit.log("LOGOUT", user_id=user_id, ip_address=ip_address, details={"reason": "refresh_token_replay"})
+            raise UnauthorizedError("Refresh token уже использован")
+        if not existing or existing.expires_at <= now:
             raise UnauthorizedError("Refresh token недействителен")
         user = await self.db.scalar(select(User).where(User.id == user_id))
         if not user or not user.is_active:
             raise UnauthorizedError("Пользователь деактивирован")
-        return create_access_token(user_id), user.must_change_password
+        existing.revoked_at = now
+        new_access = create_access_token(user_id)
+        new_refresh = create_refresh_token(user_id)
+        new_expires_at = now + timedelta(days=settings.jwt_refresh_token_expire_days)
+        self.db.add(RefreshToken(user_id=user_id, token_hash=hash_refresh_token(new_refresh), expires_at=new_expires_at))
+        await self.db.commit()
+        return new_access, new_refresh, user.must_change_password
 
     async def logout(self, user_id: UUID, ip_address: str | None = None) -> None:
         """Отзывает все активные refresh-токены пользователя."""
@@ -333,13 +593,16 @@ class UserService:
                 admin_user.email = normalized_email
                 await self.db.commit()
             return
+        weak_default = settings.initial_admin_password.strip().lower() in {"admin", "password", "12345678"}
+        must_change = weak_default
         admin = User(
             username=settings.initial_admin_username,
             email=normalized_email,
             full_name="Administrator",
             tags=["admin"],
             password_hash=hash_password(settings.initial_admin_password),
-            password_changed_at=datetime.now(UTC),
+            must_change_password=must_change,
+            password_changed_at=None if must_change else datetime.now(UTC),
             role=UserRole.ADMIN,
             is_active=True,
         )
@@ -530,7 +793,8 @@ class UserService:
             raise ValidationError("Аватар должен быть изображением PNG, JPEG, WEBP или GIF")
         if user.avatar_minio_key:
             await asyncio.to_thread(self.storage.delete, user.avatar_minio_key)
-        object_key = await asyncio.to_thread(self.storage.upload_bytes, content, mime_type, upload.filename or "avatar.bin")
+        safe_name = _sanitize_filename(upload.filename, fallback="avatar.bin")
+        object_key = await asyncio.to_thread(self.storage.upload_bytes, content, mime_type, safe_name)
         user.avatar_minio_bucket = settings.minio_bucket_name
         user.avatar_minio_key = object_key
         user.avatar_content_type = mime_type
@@ -808,6 +1072,58 @@ class ProjectService:
         )
         return folder
 
+    async def delete_folder(self, folder_id: UUID, actor_id: UUID, ip_address: str | None = None) -> dict:
+        """Каскадно удаляет папку, все её подпапки и все проекты внутри.
+
+        Возвращает счётчики удалённых сущностей для аудита.
+        """
+        folder = await self.db.scalar(select(ProjectFolder).where(ProjectFolder.id == folder_id))
+        if not folder:
+            raise NotFoundError("Папка не найдена")
+        path = folder.path
+        subtree_project_ids = list(
+            (
+                await self.db.scalars(
+                    select(Project.id).where(or_(Project.folder == path, Project.folder.like(f"{path}/%")))
+                )
+            ).all()
+        )
+        subtree_folder_ids = list(
+            (
+                await self.db.scalars(
+                    select(ProjectFolder.id).where(
+                        or_(ProjectFolder.path == path, ProjectFolder.path.like(f"{path}/%"))
+                    )
+                )
+            ).all()
+        )
+        if subtree_project_ids:
+            await self.db.execute(delete(Project).where(Project.id.in_(subtree_project_ids)))
+        if subtree_folder_ids:
+            await self.db.execute(delete(ProjectFolder).where(ProjectFolder.id.in_(subtree_folder_ids)))
+        await self.db.commit()
+        summary = {
+            "path": path,
+            "deleted_folders": len(subtree_folder_ids),
+            "deleted_projects": len(subtree_project_ids),
+        }
+        await self.audit.log(
+            "DELETE",
+            user_id=actor_id,
+            entity_type="project_folder",
+            entity_id=folder_id,
+            details=summary,
+            ip_address=ip_address,
+        )
+        await ws_manager.broadcast_projects_index(
+            {
+                "event": "deleted",
+                "entity": "project_folder",
+                "data": {"id": str(folder_id), "path": path, **summary},
+            }
+        )
+        return summary
+
 
 class AssetService:
     """Сервис CRUD для host/port/service/endpoint."""
@@ -1019,10 +1335,71 @@ class AssetService:
             endpoint.request_headers = endpoint_payload["request_headers"]
 
     async def _get_host(self, project_id: UUID, host_id: UUID) -> Host:
-        host = await self.db.scalar(select(Host).where(and_(Host.id == host_id, Host.project_id == project_id)))
+        host = await self.db.scalar(
+            select(Host).options(selectinload(Host.ip_addresses)).where(and_(Host.id == host_id, Host.project_id == project_id))
+        )
         if not host:
             raise NotFoundError("Хост не найден")
         return host
+
+    @staticmethod
+    def _normalize_host_ip_entries(
+        primary_ip: str | None,
+        raw_entries: list[str | dict] | None,
+    ) -> list[dict]:
+        entries: list[dict] = []
+        seen: set[str] = set()
+
+        def add_entry(ip_address: str | None, label: str | None = None, is_primary: bool = False) -> None:
+            value = (ip_address or "").strip()
+            if not value or value in seen:
+                return
+            seen.add(value)
+            entries.append({"ip_address": value, "label": label, "is_primary": is_primary})
+
+        for raw in raw_entries or []:
+            if isinstance(raw, str):
+                add_entry(raw)
+            else:
+                add_entry(raw.get("ip_address"), raw.get("label"), bool(raw.get("is_primary")))
+
+        if primary_ip:
+            primary = primary_ip.strip()
+            matched = False
+            for entry in entries:
+                if entry["ip_address"] == primary:
+                    entry["is_primary"] = True
+                    matched = True
+                else:
+                    entry["is_primary"] = False
+            if not matched:
+                entries.insert(0, {"ip_address": primary, "label": None, "is_primary": True})
+
+        primary_seen = False
+        for entry in entries:
+            if entry["is_primary"] and not primary_seen:
+                primary_seen = True
+            else:
+                entry["is_primary"] = False
+        if entries and not primary_seen:
+            entries[0]["is_primary"] = True
+        return entries
+
+    async def _replace_host_ip_addresses(self, host: Host, entries: list[dict]) -> None:
+        await self.db.execute(delete(HostIpAddress).where(HostIpAddress.host_id == host.id))
+        rows = [
+            HostIpAddress(
+                host_id=host.id,
+                ip_address=entry["ip_address"],
+                label=entry.get("label"),
+                is_primary=bool(entry.get("is_primary")),
+            )
+            for entry in entries
+        ]
+        for row in rows:
+            self.db.add(row)
+        host.ip_address = next((row.ip_address for row in rows if row.is_primary), rows[0].ip_address if rows else None)
+        set_committed_value(host, "ip_addresses", rows)
 
     async def _get_port(self, host_id: UUID, port_id: UUID) -> Port:
         port = await self.db.scalar(select(Port).where(and_(Port.id == port_id, Port.host_id == host_id)))
@@ -1031,21 +1408,24 @@ class AssetService:
         return port
 
     async def list_hosts(self, project_id: UUID, page: int, size: int, status: str | None) -> tuple[list[Host], int]:
-        query = select(Host).where(Host.project_id == project_id)
+        base_query = select(Host).where(Host.project_id == project_id)
         if status:
-            query = query.where(Host.status == status)
-        total = await self.db.scalar(select(func.count()).select_from(query.subquery())) or 0
-        items = (await self.db.scalars(query.order_by(Host.created_at.desc()).offset((page - 1) * size).limit(size))).all()
+            base_query = base_query.where(Host.status == status)
+        total = await self.db.scalar(select(func.count()).select_from(base_query.subquery())) or 0
+        items_query = base_query.options(selectinload(Host.ip_addresses)).order_by(Host.created_at.desc()).offset((page - 1) * size).limit(size)
+        items = (await self.db.scalars(items_query)).all()
         return list(items), total
 
     async def create_host(self, project_id: UUID, payload: dict, actor_id: UUID) -> Host:
-        host = Host(project_id=project_id, **payload)
+        ip_entries = self._normalize_host_ip_entries(payload.pop("ip_address", None), payload.pop("ip_addresses", None))
+        host = Host(project_id=project_id, ip_address=ip_entries[0]["ip_address"] if ip_entries else None, **payload)
         self.db.add(host)
+        await self.db.flush()
+        await self._replace_host_ip_addresses(host, ip_entries)
         await self.db.commit()
-        await self.db.refresh(host)
         await self.audit.log("CREATE", user_id=actor_id, entity_type="host", entity_id=host.id)
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
-        return host
+        return await self._get_host(project_id, host.id)
 
     async def get_host(self, project_id: UUID, host_id: UUID) -> dict:
         host = await self._get_host(project_id, host_id)
@@ -1055,8 +1435,21 @@ class AssetService:
             "id": host.id,
             "project_id": host.project_id,
             "ip_address": host.ip_address,
+            "ip_addresses": [
+                {
+                    "id": ip.id,
+                    "host_id": ip.host_id,
+                    "ip_address": ip.ip_address,
+                    "label": ip.label,
+                    "is_primary": ip.is_primary,
+                    "created_at": ip.created_at,
+                    "updated_at": ip.updated_at,
+                }
+                for ip in host.ip_addresses
+            ],
             "hostname": host.hostname,
             "status": host.status,
+            "os_type": host.os_type,
             "notes": host.notes,
             "created_at": host.created_at,
             "updated_at": host.updated_at,
@@ -1092,14 +1485,21 @@ class AssetService:
 
     async def update_host(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Host:
         host = await self._get_host(project_id, host_id)
+        has_ip_payload = "ip_addresses" in payload or "ip_address" in payload
+        raw_ip_entries = payload.pop("ip_addresses", None)
+        primary_ip = payload.pop("ip_address", None)
         for key, value in payload.items():
             if value is not None:
                 setattr(host, key, value)
+        if has_ip_payload:
+            ip_entries = self._normalize_host_ip_entries(primary_ip, raw_ip_entries)
+            if not ip_entries and not host.hostname:
+                raise ValidationError("Нужно указать хотя бы один IP-адрес или hostname")
+            await self._replace_host_ip_addresses(host, ip_entries)
         await self.db.commit()
-        await self.db.refresh(host)
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="host", entity_id=host.id)
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
-        return host
+        return await self._get_host(project_id, host.id)
 
     async def delete_host(self, project_id: UUID, host_id: UUID, actor_id: UUID) -> None:
         host = await self._get_host(project_id, host_id)
@@ -1316,18 +1716,6 @@ class VulnerabilityService:
     def _normalize_workflow_steps(steps: list[dict] | None) -> list[dict]:
         normalized: list[dict] = []
         raw_steps = steps or []
-        # #region agent log
-        _debug_log(
-            "H3",
-            "backend/app/services.py:_normalize_workflow_steps:start",
-            "Normalizing workflow steps",
-            {
-                "raw_count": len(raw_steps),
-                "raw_with_legacy_title_count": sum(1 for step in raw_steps if str(step.get("title", "")).strip()),
-                "raw_has_description_count": sum(1 for step in raw_steps if str(step.get("description", "")).strip()),
-            },
-        )
-        # #endregion
         for raw_step in raw_steps:
             description = str(raw_step.get("description", "")).strip()
             endpoint_request_raw = str(raw_step.get("endpoint_request_raw", "")).strip()
@@ -1344,17 +1732,6 @@ class VulnerabilityService:
                     "endpoint_request_raw": endpoint_request_raw or None,
                 }
             )
-        # #region agent log
-        _debug_log(
-            "H3",
-            "backend/app/services.py:_normalize_workflow_steps:end",
-            "Workflow steps normalized",
-            {
-                "normalized_count": len(normalized),
-                "normalized_with_title_count": sum(1 for step in normalized if str(step.get("title", "")).strip()),
-            },
-        )
-        # #endregion
         return normalized
 
     @staticmethod
@@ -1756,10 +2133,11 @@ class FileService:
         mime_type = magic.from_buffer(content, mime=True)
         if mime_type not in ALLOWED_MIME_TYPES:
             raise ValidationError("Неподдерживаемый тип файла")
-        object_key = await asyncio.to_thread(self.storage.upload_bytes, content, mime_type, upload.filename or "file.bin")
+        safe_name = _sanitize_filename(upload.filename, fallback="file.bin")
+        object_key = await asyncio.to_thread(self.storage.upload_bytes, content, mime_type, safe_name)
         file_meta = File(
             vulnerability_id=vuln_id,
-            original_name=upload.filename or "file.bin",
+            original_name=safe_name,
             content_type=mime_type,
             size_bytes=len(content),
             minio_bucket=settings.minio_bucket_name,
@@ -1958,6 +2336,339 @@ class CommentService:
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor.id, entity_type="comment", entity_id=comment.id)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "comment", "project_id": str(project_id), "data": {"id": str(comment.id)}})
+
+
+class ProjectNoteService:
+    """Сервис управления страницами заметок проекта и их комментариями."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+        self.audit = AuditService(db)
+
+    async def _ensure_project(self, project_id: UUID) -> Project:
+        project = await self.db.scalar(select(Project).where(Project.id == project_id))
+        if not project:
+            raise NotFoundError("Проект не найден")
+        return project
+
+    async def _get_note(self, project_id: UUID, note_id: UUID) -> ProjectNote:
+        note = await self.db.scalar(select(ProjectNote).where(and_(ProjectNote.id == note_id, ProjectNote.project_id == project_id)))
+        if not note:
+            raise NotFoundError("Страница заметки не найдена")
+        return note
+
+    async def _ensure_parent(self, project_id: UUID, parent_id: UUID | None) -> ProjectNote | None:
+        if not parent_id:
+            return None
+        parent = await self.db.scalar(
+            select(ProjectNote).where(and_(ProjectNote.id == parent_id, ProjectNote.project_id == project_id))
+        )
+        if not parent:
+            raise NotFoundError("Родительская страница не найдена")
+        return parent
+
+    async def _ensure_unique_title(
+        self,
+        project_id: UUID,
+        parent_id: UUID | None,
+        title: str,
+        *,
+        exclude_note_id: UUID | None = None,
+    ) -> None:
+        query = select(ProjectNote).where(
+            and_(
+                ProjectNote.project_id == project_id,
+                ProjectNote.title == title,
+                ProjectNote.parent_id.is_(None) if parent_id is None else ProjectNote.parent_id == parent_id,
+            )
+        )
+        if exclude_note_id:
+            query = query.where(ProjectNote.id != exclude_note_id)
+        duplicate = await self.db.scalar(query)
+        if duplicate:
+            raise ConflictError("В этом разделе уже есть страница с таким названием")
+
+    async def _next_sort_order(self, project_id: UUID, parent_id: UUID | None) -> int:
+        max_sort = await self.db.scalar(
+            select(func.max(ProjectNote.sort_order)).where(
+                and_(
+                    ProjectNote.project_id == project_id,
+                    ProjectNote.parent_id.is_(None) if parent_id is None else ProjectNote.parent_id == parent_id,
+                )
+            )
+        )
+        return int(max_sort or 0) + 1
+
+    async def _ensure_not_descendant_move(self, project_id: UUID, note_id: UUID, new_parent_id: UUID | None) -> None:
+        cursor = new_parent_id
+        visited: set[UUID] = set()
+        while cursor is not None:
+            if cursor == note_id:
+                raise ValidationError("Нельзя переместить страницу в её дочернюю страницу")
+            if cursor in visited:
+                raise ValidationError("Обнаружен цикл в дереве заметок")
+            visited.add(cursor)
+            parent = await self.db.scalar(
+                select(ProjectNote.parent_id).where(and_(ProjectNote.id == cursor, ProjectNote.project_id == project_id))
+            )
+            cursor = parent
+
+    async def list_notes(self, project_id: UUID) -> list[ProjectNote]:
+        await self._ensure_project(project_id)
+        rows = await self.db.scalars(
+            select(ProjectNote)
+            .where(ProjectNote.project_id == project_id)
+            .order_by(ProjectNote.parent_id.asc().nullsfirst(), ProjectNote.sort_order.asc(), ProjectNote.title.asc())
+        )
+        return list(rows.all())
+
+    async def get_note(self, project_id: UUID, note_id: UUID) -> ProjectNote:
+        return await self._get_note(project_id, note_id)
+
+    async def create_note(self, project_id: UUID, payload: dict, actor_id: UUID) -> ProjectNote:
+        await self._ensure_project(project_id)
+        title = str(payload["title"]).strip()
+        parent_id = payload.get("parent_id")
+        content = payload.get("content")
+        await self._ensure_parent(project_id, parent_id)
+        await self._ensure_unique_title(project_id, parent_id, title)
+        note = ProjectNote(
+            project_id=project_id,
+            parent_id=parent_id,
+            title=title,
+            content=content,
+            sort_order=await self._next_sort_order(project_id, parent_id),
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self.db.add(note)
+        await self.db.commit()
+        await self.db.refresh(note)
+        await self.audit.log("CREATE", user_id=actor_id, entity_type="project_note", entity_id=note.id)
+        await ws_manager.broadcast(
+            project_id,
+            {"event": "created", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note.id)}},
+        )
+        return note
+
+    async def update_note(self, project_id: UUID, note_id: UUID, payload: dict, actor_id: UUID) -> ProjectNote:
+        note = await self._get_note(project_id, note_id)
+        next_title = payload.get("title")
+        if next_title is not None:
+            normalized_title = str(next_title).strip()
+            if normalized_title != note.title:
+                await self._ensure_unique_title(project_id, note.parent_id, normalized_title, exclude_note_id=note.id)
+                note.title = normalized_title
+        if "content" in payload:
+            note.content = payload.get("content")
+        note.updated_by = actor_id
+        await self.db.commit()
+        await self.db.refresh(note)
+        await self.audit.log("UPDATE", user_id=actor_id, entity_type="project_note", entity_id=note.id)
+        await ws_manager.broadcast(
+            project_id,
+            {"event": "updated", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note.id)}},
+        )
+        return note
+
+    async def move_note(self, project_id: UUID, note_id: UUID, parent_id: UUID | None, actor_id: UUID) -> ProjectNote:
+        note = await self._get_note(project_id, note_id)
+        if parent_id == note.id:
+            raise ValidationError("Нельзя переместить страницу в саму себя")
+        await self._ensure_parent(project_id, parent_id)
+        await self._ensure_not_descendant_move(project_id, note.id, parent_id)
+        await self._ensure_unique_title(project_id, parent_id, note.title, exclude_note_id=note.id)
+        note.parent_id = parent_id
+        note.sort_order = await self._next_sort_order(project_id, parent_id)
+        note.updated_by = actor_id
+        await self.db.commit()
+        await self.db.refresh(note)
+        await self.audit.log("UPDATE", user_id=actor_id, entity_type="project_note", entity_id=note.id, details={"action": "move"})
+        await ws_manager.broadcast(
+            project_id,
+            {"event": "updated", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note.id)}},
+        )
+        return note
+
+    async def reorder_notes(self, project_id: UUID, parent_id: UUID | None, items: list[dict], actor_id: UUID) -> list[ProjectNote]:
+        await self._ensure_parent(project_id, parent_id)
+        siblings = (
+            await self.db.scalars(
+                select(ProjectNote).where(
+                    and_(
+                        ProjectNote.project_id == project_id,
+                        ProjectNote.parent_id.is_(None) if parent_id is None else ProjectNote.parent_id == parent_id,
+                    )
+                )
+            )
+        ).all()
+        sibling_map = {item.id: item for item in siblings}
+        item_ids = {entry["id"] for entry in items}
+        if item_ids != set(sibling_map.keys()):
+            raise ValidationError("Для ручной сортировки нужно передать полный набор sibling-страниц")
+        for entry in items:
+            note = sibling_map[entry["id"]]
+            note.sort_order = int(entry["sort_order"])
+            note.updated_by = actor_id
+        await self.db.commit()
+        await self.audit.log(
+            "UPDATE",
+            user_id=actor_id,
+            entity_type="project_note",
+            details={"action": "reorder", "parent_id": str(parent_id) if parent_id else None},
+        )
+        await ws_manager.broadcast(project_id, {"event": "updated", "entity": "project_note", "project_id": str(project_id)})
+        updated = (
+            await self.db.scalars(
+                select(ProjectNote).where(
+                    and_(
+                        ProjectNote.project_id == project_id,
+                        ProjectNote.parent_id.is_(None) if parent_id is None else ProjectNote.parent_id == parent_id,
+                    )
+                ).order_by(ProjectNote.sort_order.asc(), ProjectNote.title.asc())
+            )
+        ).all()
+        return list(updated)
+
+    async def delete_note(self, project_id: UUID, note_id: UUID, actor_id: UUID) -> None:
+        note = await self._get_note(project_id, note_id)
+        await self.db.delete(note)
+        await self.db.commit()
+        await self.audit.log("DELETE", user_id=actor_id, entity_type="project_note", entity_id=note_id)
+        await ws_manager.broadcast(
+            project_id,
+            {"event": "deleted", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note_id)}},
+        )
+
+    async def _get_comment(self, project_id: UUID, note_id: UUID, comment_id: UUID) -> ProjectNoteComment:
+        comment = await self.db.scalar(
+            select(ProjectNoteComment).where(
+                and_(
+                    ProjectNoteComment.id == comment_id,
+                    ProjectNoteComment.note_id == note_id,
+                    ProjectNoteComment.project_id == project_id,
+                )
+            )
+        )
+        if not comment:
+            raise NotFoundError("Комментарий не найден")
+        return comment
+
+    async def list_comments(self, project_id: UUID, note_id: UUID, page: int, size: int) -> tuple[list[ProjectNoteCommentOut], int]:
+        await self._get_note(project_id, note_id)
+        total = await self.db.scalar(
+            select(func.count()).select_from(ProjectNoteComment).where(
+                and_(ProjectNoteComment.project_id == project_id, ProjectNoteComment.note_id == note_id)
+            )
+        ) or 0
+        rows = (
+            await self.db.execute(
+                select(ProjectNoteComment, User)
+                .join(User, User.id == ProjectNoteComment.user_id)
+                .where(and_(ProjectNoteComment.project_id == project_id, ProjectNoteComment.note_id == note_id))
+                .order_by(ProjectNoteComment.created_at.asc())
+                .offset((page - 1) * size)
+                .limit(size)
+            )
+        ).all()
+        return (
+            [
+                ProjectNoteCommentOut(
+                    id=comment.id,
+                    project_id=comment.project_id,
+                    note_id=comment.note_id,
+                    user_id=comment.user_id,
+                    username=user.username,
+                    avatar_url=user.avatar_url,
+                    content=comment.content,
+                    created_at=comment.created_at,
+                    updated_at=comment.updated_at,
+                )
+                for comment, user in rows
+            ],
+            int(total),
+        )
+
+    async def create_comment(self, project_id: UUID, note_id: UUID, content: str, actor: User) -> ProjectNoteCommentOut:
+        note = await self._get_note(project_id, note_id)
+        comment = ProjectNoteComment(project_id=project_id, note_id=note.id, user_id=actor.id, content=content)
+        self.db.add(comment)
+        await self.db.commit()
+        await self.db.refresh(comment)
+        await self.audit.log("CREATE", user_id=actor.id, entity_type="project_note_comment", entity_id=comment.id)
+        await ws_manager.broadcast(
+            project_id,
+            {
+                "event": "created",
+                "entity": "project_note_comment",
+                "project_id": str(project_id),
+                "data": {"id": str(comment.id), "note_id": str(note.id)},
+            },
+        )
+        return ProjectNoteCommentOut(
+            id=comment.id,
+            project_id=comment.project_id,
+            note_id=comment.note_id,
+            user_id=comment.user_id,
+            username=actor.username,
+            avatar_url=actor.avatar_url,
+            content=comment.content,
+            created_at=comment.created_at,
+            updated_at=comment.updated_at,
+        )
+
+    async def update_comment(
+        self,
+        project_id: UUID,
+        note_id: UUID,
+        comment_id: UUID,
+        content: str,
+        actor: User,
+    ) -> ProjectNoteCommentOut:
+        comment = await self._get_comment(project_id, note_id, comment_id)
+        if comment.user_id != actor.id:
+            raise ForbiddenError("Можно редактировать только свой комментарий")
+        comment.content = content
+        await self.db.commit()
+        await self.db.refresh(comment)
+        await self.audit.log("UPDATE", user_id=actor.id, entity_type="project_note_comment", entity_id=comment.id)
+        await ws_manager.broadcast(
+            project_id,
+            {
+                "event": "updated",
+                "entity": "project_note_comment",
+                "project_id": str(project_id),
+                "data": {"id": str(comment.id), "note_id": str(note_id)},
+            },
+        )
+        return ProjectNoteCommentOut(
+            id=comment.id,
+            project_id=comment.project_id,
+            note_id=comment.note_id,
+            user_id=comment.user_id,
+            username=actor.username,
+            avatar_url=actor.avatar_url,
+            content=comment.content,
+            created_at=comment.created_at,
+            updated_at=comment.updated_at,
+        )
+
+    async def delete_comment(self, project_id: UUID, note_id: UUID, comment_id: UUID, actor: User) -> None:
+        comment = await self._get_comment(project_id, note_id, comment_id)
+        if comment.user_id != actor.id:
+            raise ForbiddenError("Можно удалить только свой комментарий")
+        await self.db.delete(comment)
+        await self.db.commit()
+        await self.audit.log("DELETE", user_id=actor.id, entity_type="project_note_comment", entity_id=comment.id)
+        await ws_manager.broadcast(
+            project_id,
+            {
+                "event": "deleted",
+                "entity": "project_note_comment",
+                "project_id": str(project_id),
+                "data": {"id": str(comment.id), "note_id": str(note_id)},
+            },
+        )
 
 
 class NotificationService:
@@ -2878,7 +3589,7 @@ class ImportService:
 
 
 class ReportService:
-    """Сервис генерации отчётов в форматах md/pdf/docx."""
+    """Сервис генерации Word-отчётов СЗИ и ПП по предзагруженным шаблонам."""
 
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
@@ -2957,37 +3668,6 @@ class ReportService:
         }
 
     @staticmethod
-    def _report_text(value: object | None, fallback: str = "-") -> str:
-        text = str(value).strip() if value is not None else ""
-        return text or fallback
-
-    @staticmethod
-    def _report_paragraph(value: object | None, fallback: str = "-") -> str:
-        return escape(ReportService._report_text(value, fallback)).replace("\n", "<br/>")
-
-    @staticmethod
-    def _host_label(host: Host | None, fallback: object) -> str:
-        if not host:
-            return str(fallback)
-        return host.hostname or host.ip_address or str(host.id)
-
-    @staticmethod
-    def _ports_summary(host_ports: list[Port]) -> str:
-        return ", ".join(
-            f"{port.port_number}/{port.protocol.value if hasattr(port.protocol, 'value') else port.protocol}" for port in host_ports
-        ) or "-"
-
-    @staticmethod
-    def _linked_assets_for_vuln(vuln: Vulnerability, indexes: dict) -> list[str]:
-        linked_assets: list[str] = []
-        for asset in indexes["assets_by_vuln_id"].get(vuln.id, []):
-            if asset.asset_type == AssetType.HOST:
-                linked_assets.append(ReportService._host_label(indexes["host_by_id"].get(asset.asset_id), f"host:{asset.asset_id}"))
-            else:
-                linked_assets.append(f"{asset.asset_type.value}:{asset.asset_id}")
-        return linked_assets
-
-    @staticmethod
     def _resolve_step_files(step: dict, files_by_id: dict[UUID, File]) -> list[File]:
         resolved: list[File] = []
         for raw_file_id in step.get("image_file_ids", []):
@@ -3035,277 +3715,17 @@ class ReportService:
                 image_bytes[file_meta.id] = normalized_bytes
         return image_bytes
 
-    def _render_markdown_from_data(self, data: dict) -> bytes:
-        project: Project = data["project"]
-        vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
-        hosts: list[Host] = data["hosts"]
-        ports: list[Port] = data["ports"]
-        indexes = self._build_report_indexes(data)
+    async def generate(self, project_id: UUID, kind: Literal["szi", "pp"]) -> bytes:
+        """Генерирует Word-отчёт указанного типа.
 
-        lines = [
-            f"# Отчёт по проекту {project.name}",
-            "",
-            "## Общая информация",
-            f"- Статус: {project.status.value}",
-            f"- Даты: {project.start_date} - {project.end_date}",
-            f"- Участники: {', '.join(data['members']) if data['members'] else 'нет'}",
-            "",
-            "## Статистика уязвимостей по критичности",
-        ]
-        for key, value in indexes["severity_stats"].items():
-            lines.append(f"- {key}: {value}")
-        lines += ["", "## Статистика уязвимостей по статусу"]
-        for key, value in indexes["status_stats"].items():
-            lines.append(f"- {key}: {value}")
-        lines += ["", "## Активы", f"- Хосты: {len(hosts)}", f"- Порты: {len(ports)}", ""]
-        if hosts:
-            lines += ["### Сводка по хостам", "", "| Хост | IP/Hostname | Порты |", "| --- | --- | --- |"]
-            for host in hosts:
-                lines.append(
-                    f"| {self._host_label(host, host.id)} | {host.ip_address or host.hostname or '-'} | {self._ports_summary(indexes['ports_by_host_id'].get(host.id, []))} |"
-                )
-        lines += ["", "## Уязвимости"]
-        for vuln in vulnerabilities:
-            VulnerabilityService._hydrate_workflow_steps(vuln)
-            attachment_names = [file_meta.original_name for file_meta in indexes["files_by_vuln_id"].get(vuln.id, [])]
-            workflow_lines: list[str] = []
-            for index, step in enumerate(vuln.workflow_steps or [], start=1):
-                title = self._report_text(step.get("title"), f"Этап {index}")
-                description = self._report_text(step.get("description"), "")
-                workflow_lines.append(f"{index}. {title}")
-                if description:
-                    workflow_lines.append(f"   {description}")
-                image_names = [file_meta.original_name for file_meta in self._resolve_step_files(step, indexes["files_by_id"])]
-                if image_names:
-                    workflow_lines.append(f"   Скриншоты: {', '.join(image_names)}")
-            workflow_text = "\n".join(workflow_lines) if workflow_lines else (vuln.steps_to_reproduce or "-")
-            lines += [
-                f"### {vuln.title}",
-                f"- Severity: {vuln.severity.value}",
-                f"- Status: {vuln.status.value}",
-                f"- CVSS: {vuln.cvss_version.value if vuln.cvss_version else '-'} {vuln.cvss_score if vuln.cvss_score else '-'}",
-                f"- CVSS Vector: {vuln.cvss_vector or '-'}",
-                f"- CWE: {vuln.cwe_id or '-'}",
-                f"- Активы: {', '.join(self._linked_assets_for_vuln(vuln, indexes)) or '-'}",
-                f"- Вложения: {', '.join(attachment_names) if attachment_names else '-'}",
-                "",
-                "**Описание**",
-                vuln.description or "-",
-                "",
-                "**Шаги воспроизведения**",
-                workflow_text,
-                "",
-                "**Влияние**",
-                vuln.impact or "-",
-                "",
-                "**Рекомендации**",
-                vuln.recommendations or "-",
-                "",
-            ]
-        return "\n".join(lines).encode("utf-8")
-
-    @staticmethod
-    def _build_pdf(data: dict, indexes: dict, image_bytes_by_id: dict[UUID, bytes]) -> bytes:
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
-        styles = getSampleStyleSheet()
-        story: list = []
-        project: Project = data["project"]
-        vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
-        hosts: list[Host] = data["hosts"]
-        project_dates = f"{project.start_date} - {project.end_date}"
-
-        story.append(Paragraph(ReportService._report_paragraph(f"Отчёт по проекту {project.name}"), styles["Title"]))
-        story.append(Spacer(1, 12))
-        story.append(Paragraph("Общая информация", styles["Heading2"]))
-        story.append(Paragraph(f"<b>Статус:</b> {ReportService._report_paragraph(project.status.value)}", styles["BodyText"]))
-        story.append(Paragraph(f"<b>Даты:</b> {ReportService._report_paragraph(project_dates)}", styles["BodyText"]))
-        story.append(
-            Paragraph(
-                f"<b>Участники:</b> {ReportService._report_paragraph(', '.join(data['members']) if data['members'] else 'нет')}",
-                styles["BodyText"],
-            )
-        )
-        story.append(Spacer(1, 12))
-        story.append(Paragraph("Статистика уязвимостей по критичности", styles["Heading2"]))
-        for key, value in indexes["severity_stats"].items():
-            story.append(Paragraph(f"• {escape(key)}: {value}", styles["BodyText"]))
-        story.append(Spacer(1, 8))
-        story.append(Paragraph("Статистика уязвимостей по статусу", styles["Heading2"]))
-        for key, value in indexes["status_stats"].items():
-            story.append(Paragraph(f"• {escape(key)}: {value}", styles["BodyText"]))
-        story.append(Spacer(1, 12))
-        if hosts:
-            story.append(Paragraph("Сводка по хостам", styles["Heading2"]))
-            table_data = [["Хост", "IP/Hostname", "Порты"]]
-            for host in hosts:
-                table_data.append(
-                    [
-                        ReportService._host_label(host, host.id),
-                        host.ip_address or host.hostname or "-",
-                        ReportService._ports_summary(indexes["ports_by_host_id"].get(host.id, [])),
-                    ]
-                )
-            table = Table(table_data, colWidths=[150, 160, 170])
-            table.setStyle(
-                TableStyle(
-                    [
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ]
-                )
-            )
-            story.extend([table, Spacer(1, 12)])
-
-        story.append(Paragraph("Уязвимости", styles["Heading2"]))
-        for vuln in vulnerabilities:
-            VulnerabilityService._hydrate_workflow_steps(vuln)
-            cvss_text = f"{vuln.cvss_version.value if vuln.cvss_version else '-'} {vuln.cvss_score if vuln.cvss_score else '-'}"
-            story.append(Paragraph(ReportService._report_paragraph(vuln.title), styles["Heading3"]))
-            story.append(Paragraph(f"<b>Severity:</b> {escape(vuln.severity.value)}", styles["BodyText"]))
-            story.append(Paragraph(f"<b>Status:</b> {escape(vuln.status.value)}", styles["BodyText"]))
-            story.append(
-                Paragraph(
-                    f"<b>CVSS:</b> {ReportService._report_paragraph(cvss_text)}",
-                    styles["BodyText"],
-                )
-            )
-            story.append(Paragraph(f"<b>CWE:</b> {ReportService._report_paragraph(vuln.cwe_id)}", styles["BodyText"]))
-            story.append(
-                Paragraph(
-                    f"<b>Активы:</b> {ReportService._report_paragraph(', '.join(ReportService._linked_assets_for_vuln(vuln, indexes)) or '-')}",
-                    styles["BodyText"],
-                )
-            )
-            story.append(Paragraph(f"<b>Описание:</b> {ReportService._report_paragraph(vuln.description)}", styles["BodyText"]))
-            story.append(Paragraph(f"<b>Влияние:</b> {ReportService._report_paragraph(vuln.impact)}", styles["BodyText"]))
-            story.append(Paragraph(f"<b>Рекомендации:</b> {ReportService._report_paragraph(vuln.recommendations)}", styles["BodyText"]))
-            story.append(Paragraph("<b>Шаги воспроизведения:</b>", styles["BodyText"]))
-            rendered_image_ids: set[UUID] = set()
-            if vuln.workflow_steps:
-                for index, step in enumerate(vuln.workflow_steps, start=1):
-                    story.append(Paragraph(f"{index}. {ReportService._report_paragraph(step.get('title'), f'Этап {index}')}", styles["BodyText"]))
-                    if step.get("description"):
-                        story.append(Paragraph(ReportService._report_paragraph(step.get("description")), styles["BodyText"]))
-                    for file_meta in ReportService._resolve_step_files(step, indexes["files_by_id"]):
-                        story.append(Paragraph(f"Скриншот: {ReportService._report_paragraph(file_meta.original_name)}", styles["BodyText"]))
-                        image_bytes = image_bytes_by_id.get(file_meta.id)
-                        if image_bytes:
-                            pdf_image = PlatypusImage(BytesIO(image_bytes))
-                            pdf_image._restrictSize(5.5 * inch, 4.5 * inch)
-                            story.append(pdf_image)
-                            rendered_image_ids.add(file_meta.id)
-                        story.append(Spacer(1, 6))
-            else:
-                story.append(Paragraph(ReportService._report_paragraph(vuln.steps_to_reproduce), styles["BodyText"]))
-            additional_images = [
-                file_meta
-                for file_meta in indexes["files_by_vuln_id"].get(vuln.id, [])
-                if ReportService._is_image_file(file_meta) and file_meta.id not in rendered_image_ids
-            ]
-            if additional_images:
-                story.append(Paragraph("<b>Дополнительные скриншоты:</b>", styles["BodyText"]))
-                for file_meta in additional_images:
-                    story.append(Paragraph(ReportService._report_paragraph(file_meta.original_name), styles["BodyText"]))
-                    image_bytes = image_bytes_by_id.get(file_meta.id)
-                    if image_bytes:
-                        pdf_image = PlatypusImage(BytesIO(image_bytes))
-                        pdf_image._restrictSize(5.5 * inch, 4.5 * inch)
-                        story.append(pdf_image)
-                    story.append(Spacer(1, 6))
-            attachment_names = [file_meta.original_name for file_meta in indexes["files_by_vuln_id"].get(vuln.id, []) if not ReportService._is_image_file(file_meta)]
-            story.append(Paragraph(f"<b>Прочие вложения:</b> {ReportService._report_paragraph(', '.join(attachment_names) if attachment_names else '-')}", styles["BodyText"]))
-            story.append(Spacer(1, 12))
-        doc.build(story)
-        return buffer.getvalue()
-
-    @staticmethod
-    def _build_docx(data: dict, indexes: dict, image_bytes_by_id: dict[UUID, bytes]) -> bytes:
-        doc = Document()
-        project: Project = data["project"]
-        vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
-        hosts: list[Host] = data["hosts"]
-        doc.add_heading(f"Отчёт по проекту {project.name}", level=0)
-        doc.add_heading("Общая информация", level=1)
-        doc.add_paragraph(f"Статус: {project.status.value}")
-        doc.add_paragraph(f"Даты: {project.start_date} - {project.end_date}")
-        doc.add_paragraph(f"Участники: {', '.join(data['members']) if data['members'] else 'нет'}")
-        doc.add_heading("Статистика уязвимостей по критичности", level=1)
-        for key, value in indexes["severity_stats"].items():
-            doc.add_paragraph(f"{key}: {value}", style="List Bullet")
-        doc.add_heading("Статистика уязвимостей по статусу", level=1)
-        for key, value in indexes["status_stats"].items():
-            doc.add_paragraph(f"{key}: {value}", style="List Bullet")
-        if hosts:
-            doc.add_heading("Сводка по хостам", level=1)
-            table = doc.add_table(rows=1, cols=3)
-            table.rows[0].cells[0].text = "Хост"
-            table.rows[0].cells[1].text = "IP/Hostname"
-            table.rows[0].cells[2].text = "Порты"
-            for host in hosts:
-                row = table.add_row().cells
-                row[0].text = ReportService._host_label(host, host.id)
-                row[1].text = host.ip_address or host.hostname or "-"
-                row[2].text = ReportService._ports_summary(indexes["ports_by_host_id"].get(host.id, []))
-        doc.add_heading("Уязвимости", level=1)
-        for vuln in vulnerabilities:
-            VulnerabilityService._hydrate_workflow_steps(vuln)
-            doc.add_heading(vuln.title, level=2)
-            doc.add_paragraph(f"Severity: {vuln.severity.value}")
-            doc.add_paragraph(f"Status: {vuln.status.value}")
-            doc.add_paragraph(f"CVSS: {vuln.cvss_version.value if vuln.cvss_version else '-'} {vuln.cvss_score if vuln.cvss_score else '-'}")
-            doc.add_paragraph(f"CWE: {vuln.cwe_id or '-'}")
-            doc.add_paragraph(f"Активы: {', '.join(ReportService._linked_assets_for_vuln(vuln, indexes)) or '-'}")
-            doc.add_paragraph(f"Описание: {ReportService._report_text(vuln.description)}")
-            doc.add_paragraph(f"Влияние: {ReportService._report_text(vuln.impact)}")
-            doc.add_paragraph(f"Рекомендации: {ReportService._report_text(vuln.recommendations)}")
-            doc.add_paragraph("Шаги воспроизведения:")
-            rendered_image_ids: set[UUID] = set()
-            if vuln.workflow_steps:
-                for index, step in enumerate(vuln.workflow_steps, start=1):
-                    doc.add_paragraph(f"{index}. {ReportService._report_text(step.get('title'), f'Этап {index}')}", style="List Number")
-                    if step.get("description"):
-                        doc.add_paragraph(ReportService._report_text(step.get("description")))
-                    for file_meta in ReportService._resolve_step_files(step, indexes["files_by_id"]):
-                        doc.add_paragraph(f"Скриншот: {file_meta.original_name}")
-                        image_bytes = image_bytes_by_id.get(file_meta.id)
-                        if image_bytes:
-                            doc.add_picture(BytesIO(image_bytes), width=Inches(5.5))
-                            rendered_image_ids.add(file_meta.id)
-            else:
-                doc.add_paragraph(ReportService._report_text(vuln.steps_to_reproduce))
-            additional_images = [
-                file_meta
-                for file_meta in indexes["files_by_vuln_id"].get(vuln.id, [])
-                if ReportService._is_image_file(file_meta) and file_meta.id not in rendered_image_ids
-            ]
-            if additional_images:
-                doc.add_paragraph("Дополнительные скриншоты:")
-                for file_meta in additional_images:
-                    doc.add_paragraph(file_meta.original_name)
-                    image_bytes = image_bytes_by_id.get(file_meta.id)
-                    if image_bytes:
-                        doc.add_picture(BytesIO(image_bytes), width=Inches(5.5))
-            attachments = [file_meta.original_name for file_meta in indexes["files_by_vuln_id"].get(vuln.id, []) if not ReportService._is_image_file(file_meta)]
-            doc.add_paragraph(f"Прочие вложения: {', '.join(attachments) if attachments else '-'}")
-        buffer = BytesIO()
-        doc.save(buffer)
-        return buffer.getvalue()
-
-    async def generate_markdown(self, project_id: UUID) -> bytes:
+        ``kind`` — `szi` (отчёт на сертификацию) или `pp` (внутренняя приёмка).
+        """
+        if kind not in ("szi", "pp"):
+            raise ValidationError("Неподдерживаемый тип отчёта")
         data = await self._collect_project_data(project_id)
-        return self._render_markdown_from_data(data)
-
-    async def generate(self, project_id: UUID, output_format: str) -> bytes:
-        """Генерирует отчёт в запрошенном формате."""
-        data = await self._collect_project_data(project_id)
-        if output_format == "md":
-            return self._render_markdown_from_data(data)
+        for vuln in data["vulnerabilities"]:
+            VulnerabilityService._hydrate_workflow_steps(vuln)
         indexes = self._build_report_indexes(data)
         image_bytes_by_id = await self._download_report_images(data["files"])
-        if output_format == "pdf":
-            return await asyncio.to_thread(self._build_pdf, data, indexes, image_bytes_by_id)
-        if output_format == "docx":
-            return await asyncio.to_thread(self._build_docx, data, indexes, image_bytes_by_id)
-        raise ValidationError("Неподдерживаемый формат отчёта")
+        builder = build_szi if kind == "szi" else build_pp
+        return await asyncio.to_thread(builder, data, indexes, image_bytes_by_id)

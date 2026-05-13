@@ -27,6 +27,11 @@ def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def hash_agent_token(token: str) -> str:
+    """Возвращает SHA-256 хэш agent API token."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def _encode_token(subject: UUID, token_type: str, expires_delta: timedelta) -> str:
     expire_at = datetime.now(UTC) + expires_delta
     payload = {

@@ -1,4 +1,6 @@
 from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import Cookie, Depends, Header, Request
@@ -9,8 +11,8 @@ from app.config import get_settings
 from app.database import get_db
 from app.enums import UserRole
 from app.exceptions import ForbiddenError, UnauthorizedError
-from app.models import Project, ProjectMember, User
-from app.security import decode_token
+from app.models import AgentApiToken, AgentApiTokenProjectGrant, Project, ProjectMember, User
+from app.security import decode_token, hash_agent_token
 
 settings = get_settings()
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -20,6 +22,16 @@ PASSWORD_CHANGE_ALLOWED_ROUTES = {
     ("GET", "/api/v1/users/me"),
     ("GET", "/api/v1/users/me/profile"),
 }
+
+
+@dataclass(frozen=True)
+class AgentTokenContext:
+    token_id: UUID
+    created_by: UUID
+    name: str
+    scopes: set[str]
+    all_projects: bool
+    project_ids: set[UUID]
 
 
 def get_client_ip(request: Request) -> str | None:
@@ -94,3 +106,62 @@ async def require_project_access(
 def role_in(user: User, allowed: Iterable[UserRole]) -> bool:
     """Проверяет принадлежность роли пользователя допустимому набору."""
     return user.role in allowed
+
+
+async def get_agent_token_context(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    db: AsyncSession = Depends(get_db),
+) -> AgentTokenContext:
+    """Проверяет Bearer-токен `/api/v2` и возвращает его scopes/project grants."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise UnauthorizedError("Требуется Bearer token")
+    raw_token = authorization.removeprefix("Bearer ").strip()
+    token = await db.scalar(select(AgentApiToken).where(AgentApiToken.token_hash == hash_agent_token(raw_token)))
+    if not token or token.revoked_at is not None:
+        raise UnauthorizedError("Agent API token недействителен")
+    if token.expires_at and token.expires_at <= datetime.now(UTC):
+        raise UnauthorizedError("Agent API token истёк")
+    token_id = token.id
+    created_by = token.created_by
+    token_name = token.name
+    scopes = set(token.scopes or [])
+    all_projects = token.all_projects
+    project_ids = set(
+        (
+            await db.scalars(
+                select(AgentApiTokenProjectGrant.project_id).where(AgentApiTokenProjectGrant.token_id == token_id)
+            )
+        ).all()
+    )
+    token.last_used_at = datetime.now(UTC)
+    await db.commit()
+    return AgentTokenContext(
+        token_id=token_id,
+        created_by=created_by,
+        name=token_name,
+        scopes=scopes,
+        all_projects=all_projects,
+        project_ids=project_ids,
+    )
+
+
+def require_agent_scope(scope: str):
+    async def dependency(context: AgentTokenContext = Depends(get_agent_token_context)) -> AgentTokenContext:
+        if scope not in context.scopes:
+            raise ForbiddenError(f"Недостаточно прав agent token: требуется {scope}")
+        return context
+
+    return dependency
+
+
+async def require_agent_project_access(
+    project_id: UUID,
+    context: AgentTokenContext = Depends(get_agent_token_context),
+    db: AsyncSession = Depends(get_db),
+) -> Project:
+    project = await db.scalar(select(Project).where(Project.id == project_id))
+    if not project:
+        raise ForbiddenError("Проект не найден или недоступен")
+    if not context.all_projects and project_id not in context.project_ids:
+        raise ForbiddenError("Agent token не имеет доступа к проекту")
+    return project

@@ -1,6 +1,19 @@
+"""Сброс демо-данных и пересид БД (пользователей сохраняет).
+
+Запуск из каталога backend:
+    PYTHONPATH=/app python scripts/reset_and_seed.py   # Docker
+    python scripts/reset_and_seed.py                   # локально, если backend в PYTHONPATH
+"""
 import asyncio
 import base64
+import sys
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+
+# Позволяет выполнять файл напрямую без предварительного export PYTHONPATH=/app
+_backend_root = Path(__file__).resolve().parent.parent
+if str(_backend_root) not in sys.path:
+    sys.path.insert(0, str(_backend_root))
 
 from sqlalchemy import text, select
 

@@ -75,12 +75,70 @@ export interface ProjectMember {
   added_at: string;
 }
 
+export interface ProjectNote {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  title: string;
+  content: string | null;
+  sort_order: number;
+  created_by: string;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectNoteComment {
+  id: string;
+  project_id: string;
+  note_id: string;
+  user_id: string;
+  username: string;
+  avatar_url: string | null;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HostIpAddress {
+  id: string;
+  host_id: string;
+  ip_address: string;
+  label: string | null;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type OsType =
+  | "windows"
+  | "linux"
+  | "macos"
+  | "freebsd"
+  | "android"
+  | "ios"
+  | "other"
+  | "unknown";
+
+export const OS_TYPE_OPTIONS: { value: OsType; label: string }[] = [
+  { value: "windows", label: "Windows" },
+  { value: "linux", label: "Linux" },
+  { value: "macos", label: "macOS" },
+  { value: "freebsd", label: "FreeBSD" },
+  { value: "android", label: "Android" },
+  { value: "ios", label: "iOS" },
+  { value: "other", label: "Другая" },
+  { value: "unknown", label: "Неизвестно" },
+];
+
 export interface Host {
   id: string;
   project_id: string;
   ip_address: string | null;
+  ip_addresses: HostIpAddress[];
   hostname: string | null;
   status: "up" | "down" | "unknown";
+  os_type: OsType;
   notes: string | null;
   created_at: string;
   updated_at: string;
@@ -239,6 +297,21 @@ export interface Notification {
     host_id: string | null;
     commenter_username: string | null;
   } | null;
+}
+
+export interface AgentApiToken {
+  id: string;
+  name: string;
+  token_prefix: string;
+  scopes: string[];
+  all_projects: boolean;
+  created_by: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+  project_ids: string[];
 }
 
 export interface AuditLog {
