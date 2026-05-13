@@ -31,17 +31,19 @@ const PATHS: Partial<Record<OsType, { path: string; color: string }>> = {
 
 type Props = SvgIconProps & {
   os_type: OsType | null | undefined;
+  /** Использовать брендовые цвета (Windows синий и т.п.). По умолчанию иконка наследует цвет из контекста. */
   withColor?: boolean;
 };
 
-/** Иконка ОС хоста (Windows/Linux/macOS/FreeBSD/Android/iOS) — inline SVG без сторонних библиотек. */
-export function HostOsIcon({ os_type, withColor = true, sx, ...rest }: Props) {
+/** Иконка ОС хоста (Windows/Linux/macOS/FreeBSD/Android/iOS) — inline SVG, без сторонних библиотек.
+ *  По умолчанию рендерится в текущем цвете (currentColor), без брендовой заливки. */
+export function HostOsIcon({ os_type, withColor = false, sx, ...rest }: Props) {
   const entry = os_type ? PATHS[os_type] : undefined;
   if (!entry) {
-    return <ComputerIcon sx={{ color: withColor ? "text.secondary" : "inherit", ...sx }} {...rest} />;
+    return <ComputerIcon sx={{ color: "inherit", ...sx }} {...rest} />;
   }
   return (
-    <SvgIcon viewBox="0 0 24 24" sx={{ color: withColor ? entry.color : "inherit", ...sx }} {...rest}>
+    <SvgIcon viewBox="0 0 24 24" sx={withColor ? { color: entry.color, ...sx } : { color: "inherit", ...sx }} {...rest}>
       <path d={entry.path} />
     </SvgIcon>
   );

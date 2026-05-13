@@ -50,12 +50,6 @@ interface ProjectTreeNavProps {
   onOpenHost?: (hostId: string, section: DetailSection) => void;
 }
 
-const STATUS_COLOR: Record<Host["status"], string> = {
-  up: "rgba(76,175,80,0.85)",
-  down: "rgba(244,67,54,0.85)",
-  unknown: "rgba(160,160,160,0.55)",
-};
-
 export function ProjectTreeNav({
   hosts,
   selectedHostId,
@@ -73,8 +67,6 @@ export function ProjectTreeNav({
   onSelectSection,
   onSelectNote,
   onCreateNote,
-  onRenameNote,
-  onDeleteNote,
   onMoveNote,
   onReorderNotes,
   onSelectHost,
@@ -150,41 +142,44 @@ export function ProjectTreeNav({
         <Divider sx={{ my: 0.5 }} />
 
         {/* === Раздел Заметки === */}
-        <Box sx={{ display: "flex", alignItems: "stretch" }}>
-          <ListItemButton
-            selected={selectedSection === "notes"}
-            onClick={handleNotesLabelClick}
-            sx={{ flex: 1, minWidth: 0 }}
-          >
-            <DescriptionIcon fontSize="small" />
-            {!isCollapsed && (
-              <ListItemText
-                sx={{ ml: 1 }}
-                primary={notesCount > 0 ? `Заметки (${notesCount})` : "Заметки"}
-              />
-            )}
-          </ListItemButton>
+        <ListItemButton
+          selected={selectedSection === "notes"}
+          onClick={handleNotesLabelClick}
+          sx={{ pr: 1 }}
+        >
+          <DescriptionIcon fontSize="small" />
           {!isCollapsed && (
-            <IconButton
-              size="small"
+            <ListItemText
+              sx={{ ml: 1 }}
+              primary={notesCount > 0 ? `Заметки (${notesCount})` : "Заметки"}
+            />
+          )}
+          {!isCollapsed && (
+            <Box
+              role="button"
               aria-label={notesExpanded ? "Свернуть заметки" : "Развернуть заметки"}
               onClick={(event) => {
                 event.stopPropagation();
                 setNotesExpanded((v) => !v);
               }}
               sx={{
-                alignSelf: "center",
-                mr: 0.5,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                ml: 0.5,
+                cursor: "pointer",
+                color: "inherit",
                 transform: notesExpanded ? "rotate(0deg)" : "rotate(-90deg)",
-                transition: "transform .15s ease",
+                transition: "transform .2s ease",
+                "&:hover": { backgroundColor: "transparent" },
               }}
             >
               <ExpandMoreIcon fontSize="small" />
-            </IconButton>
+            </Box>
           )}
-        </Box>
+        </ListItemButton>
         {!isCollapsed && (
-          <Collapse in={notesExpanded} unmountOnExit>
+          <Collapse in={notesExpanded} timeout={260} unmountOnExit>
             <NotesTreeInline
               notes={notes}
               selectedNoteId={selectedNoteId}
@@ -192,10 +187,7 @@ export function ProjectTreeNav({
                 onSelectSection("notes");
                 if (onSelectNote) onSelectNote(noteId);
               }}
-              onCreateRoot={onCreateNote ? () => onCreateNote(null) : undefined}
               onCreateChild={onCreateNote}
-              onRename={onRenameNote}
-              onDelete={onDeleteNote}
               onMove={onMoveNote}
               onReorder={onReorderNotes}
             />
@@ -205,42 +197,45 @@ export function ProjectTreeNav({
         <Divider sx={{ my: 0.5 }} />
 
         {/* === Раздел Хосты === */}
-        <Box sx={{ display: "flex", alignItems: "stretch" }}>
-          <ListItemButton
-            selected={selectedSection === "hosts"}
-            onClick={handleHostsLabelClick}
-            sx={{ flex: 1, minWidth: 0 }}
-          >
-            <DnsIcon fontSize="small" />
-            {!isCollapsed && (
-              <ListItemText
-                sx={{ ml: 1 }}
-                primary={hosts.length > 0 ? `Хосты (${hosts.length})` : "Хосты"}
-              />
-            )}
-          </ListItemButton>
+        <ListItemButton
+          selected={selectedSection === "hosts"}
+          onClick={handleHostsLabelClick}
+          sx={{ pr: 1 }}
+        >
+          <DnsIcon fontSize="small" />
           {!isCollapsed && (
-            <IconButton
-              size="small"
+            <ListItemText
+              sx={{ ml: 1 }}
+              primary={hosts.length > 0 ? `Хосты (${hosts.length})` : "Хосты"}
+            />
+          )}
+          {!isCollapsed && (
+            <Box
+              role="button"
               aria-label={hostsExpanded ? "Свернуть хосты" : "Развернуть хосты"}
               onClick={(event) => {
                 event.stopPropagation();
                 setHostsExpanded((v) => !v);
               }}
               sx={{
-                alignSelf: "center",
-                mr: 0.5,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                ml: 0.5,
+                cursor: "pointer",
+                color: "inherit",
                 transform: hostsExpanded ? "rotate(0deg)" : "rotate(-90deg)",
-                transition: "transform .15s ease",
+                transition: "transform .2s ease",
+                "&:hover": { backgroundColor: "transparent" },
               }}
             >
               <ExpandMoreIcon fontSize="small" />
-            </IconButton>
+            </Box>
           )}
-        </Box>
+        </ListItemButton>
 
         {!isCollapsed && (
-          <Collapse in={hostsExpanded} unmountOnExit>
+          <Collapse in={hostsExpanded} timeout={260} unmountOnExit>
             {hosts.map((host) => {
               const label = host.hostname || host.ip_address || "unknown-host";
               const isActiveHost = selectedHostId === host.id;
@@ -251,41 +246,36 @@ export function ProjectTreeNav({
               const hostVulnerabilitiesCount = hostStats?.vulnerabilitiesCount ?? (isActiveHost ? vulnerabilitiesCount : 0);
               return (
                 <Box key={host.id}>
-                  <Box sx={{ display: "flex", alignItems: "stretch" }}>
-                    <ListItemButton
-                      selected={isActiveHost && selectedSection === "overview"}
-                      onClick={() => selectHostAndSection(host.id, "overview")}
-                      sx={{ flex: 1, minWidth: 0, pl: 2 }}
-                    >
-                      <HostOsIcon
-                        os_type={host.os_type}
-                        fontSize="small"
-                        sx={{
-                          borderRadius: "50%",
-                          outline: `1px solid ${STATUS_COLOR[host.status]}`,
-                          outlineOffset: 1,
-                        }}
-                      />
-                      <ListItemText sx={{ ml: 1 }} primary={label} primaryTypographyProps={{ noWrap: true }} />
-                    </ListItemButton>
-                    <IconButton
-                      size="small"
+                  <ListItemButton
+                    selected={isActiveHost && selectedSection === "overview"}
+                    onClick={() => selectHostAndSection(host.id, "overview")}
+                    sx={{ pl: 2, pr: 1 }}
+                  >
+                    <HostOsIcon os_type={host.os_type} fontSize="small" />
+                    <ListItemText sx={{ ml: 1 }} primary={label} primaryTypographyProps={{ noWrap: true }} />
+                    <Box
+                      role="button"
                       aria-label={isHostExpanded ? "Свернуть хост" : "Развернуть хост"}
                       onClick={(event) => {
                         event.stopPropagation();
                         toggleHostExpanded(host.id);
                       }}
                       sx={{
-                        alignSelf: "center",
-                        mr: 0.5,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        ml: 0.5,
+                        cursor: "pointer",
+                        color: "inherit",
                         transform: isHostExpanded ? "rotate(0deg)" : "rotate(-90deg)",
-                        transition: "transform .15s ease",
+                        transition: "transform .2s ease",
+                        "&:hover": { backgroundColor: "transparent" },
                       }}
                     >
                       <ExpandMoreIcon fontSize="small" />
-                    </IconButton>
-                  </Box>
-                  <Collapse in={isHostExpanded} unmountOnExit>
+                    </Box>
+                  </ListItemButton>
+                  <Collapse in={isHostExpanded} timeout={260} unmountOnExit>
                     <Stack sx={{ pl: 5, pr: 1, pb: 1 }} spacing={0.5}>
                       <ListItemButton
                         sx={{ borderRadius: 0 }}

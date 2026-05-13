@@ -55,11 +55,13 @@ import { MarkdownOutlinedReadonlyField } from "../components/MarkdownOutlinedRea
 import { markdownUrlTransform, normalizeMarkdownForRender } from "../markdownUrlTransform";
 import {
   createHost,
+  createProjectNote,
   createVulnerabilityComment,
   createEndpoint,
   createPort,
   createService,
   createVulnerability,
+  deleteProjectNote,
   deleteVulnerabilityComment,
   deleteEndpoint,
   deleteHost,
@@ -74,10 +76,14 @@ import {
   getHostVulnerabilities,
   exportOpenApiFile,
   importOpenApiFile,
+  listProjectNotes,
   listVulnerabilityComments,
+  moveProjectNote,
+  reorderProjectNotes,
   updateEndpoint,
   updateHost,
   updatePort,
+  updateProjectNote,
   updateService,
   updateVulnerabilityComment,
   updateVulnerability,
@@ -98,6 +104,7 @@ import type {
   HostTreeStats,
   OsType,
   Port,
+  ProjectNote,
   Service,
   Vulnerability,
   VulnerabilityComment,
@@ -522,6 +529,7 @@ export function HostDetailPage() {
 
   const [host, setHost] = useState<HostDetails | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
+  const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);

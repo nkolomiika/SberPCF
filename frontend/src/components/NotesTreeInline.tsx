@@ -1,11 +1,8 @@
 import AddIcon from "@mui/icons-material/Add";
-import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
-import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowRightIcon from "@mui/icons-material/KeyboardArrowRight";
-import SubdirectoryArrowRightIcon from "@mui/icons-material/SubdirectoryArrowRight";
-import { Box, IconButton, ListItemButton, ListItemText, Stack, Typography } from "@mui/material";
+import { Box, IconButton, ListItemButton, ListItemText, Typography } from "@mui/material";
 import { useMemo, useRef, useState, type DragEvent } from "react";
 
 import type { ProjectNote } from "../types";
@@ -14,11 +11,9 @@ type Props = {
   notes: ProjectNote[];
   selectedNoteId: string | null;
   onSelect: (noteId: string) => void;
-  onCreateRoot?: () => void;
+  /** Создать подстраницу (parentId === null означает создать корневую страницу). */
   onCreateChild?: (parentId: string | null) => void;
-  onRename?: (noteId: string) => void;
-  onDelete?: (noteId: string) => void;
-  /** Перемещение заметки в другого родителя (drop на узле или на root). */
+  /** Перемещение заметки в другого родителя (drop на узле). */
   onMove?: (noteId: string, newParentId: string | null) => Promise<void> | void;
   /** Изменение порядка соседей (drop на drop-line между siblings). */
   onReorder?: (parentId: string | null, orderedIds: string[]) => Promise<void> | void;
@@ -32,22 +27,20 @@ const DRAG_MIME = "application/x-pcf-note";
  * Inline-дерево заметок для боковой панели проекта. Поддерживает:
  *  - expand/collapse узлов
  *  - HTML5 DnD: drop на узел меняет parent, drop на drop-line между siblings меняет sort_order
- *  - CRUD-кнопки (create child / rename / delete)
+ *  - кнопка «+» появляется при наведении на узел (создание подстраницы)
+ *
+ * Rename/delete вынесены в страницу самой заметки и здесь не отображаются.
  */
 export function NotesTreeInline({
   notes,
   selectedNoteId,
   onSelect,
-  onCreateRoot,
   onCreateChild,
-  onRename,
-  onDelete,
   onMove,
   onReorder,
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dragNoteId, setDragNoteId] = useState<string | null>(null);
-  const [dragOverNodeId, setDragOverNodeId] = useState<string | null>(null);
   const [dropLineKey, setDropLineKey] = useState<string | null>(null);
   const noteById = useMemo(() => new Map(notes.map((n) => [n.id, n])), [notes]);
 
@@ -90,8 +83,7 @@ export function NotesTreeInline({
   const ensureDragImage = (): HTMLImageElement => {
     if (transparentDragImage.current) return transparentDragImage.current;
     const img = new Image();
-    img.src =
-      "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    img.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
     transparentDragImage.current = img;
     return img;
   };
@@ -127,18 +119,15 @@ export function NotesTreeInline({
   };
 
   const canDrop = (sourceId: string, targetParentId: string | null): boolean => {
-    if (!targetParentId) return true; // root всегда можно
+    if (!targetParentId) return true;
     if (sourceId === targetParentId) return false;
-    return !ancestorsOf(targetParentId).has(sourceId) || targetParentId === sourceId
-      ? !ancestorsOf(targetParentId).has(sourceId)
-      : false;
+    return !ancestorsOf(targetParentId).has(sourceId);
   };
 
   const handleDropOnNode = async (event: DragEvent, targetNoteId: string) => {
     event.preventDefault();
     event.stopPropagation();
     const payload = readPayload(event);
-    setDragOverNodeId(null);
     setDropLineKey(null);
     setDragNoteId(null);
     if (!payload || payload.id === targetNoteId) return;
@@ -154,7 +143,6 @@ export function NotesTreeInline({
     event.preventDefault();
     event.stopPropagation();
     const payload = readPayload(event);
-    setDragOverNodeId(null);
     setDropLineKey(null);
     setDragNoteId(null);
     if (!payload) return;
@@ -164,10 +152,8 @@ export function NotesTreeInline({
 
     if (source.parent_id !== parentId) {
       if (onMove) await onMove(payload.id, parentId);
-      // После перемещения порядок установит backend (в конец), без явного reorder
       return;
     }
-    // Reorder внутри одного parent
     const siblings = (notesByParent.get(parentId) ?? []).filter((n) => n.id !== payload.id);
     const insertIdx = insertBefore ? siblings.findIndex((n) => n.id === insertBefore) : siblings.length;
     const orderedIds: string[] = [];
@@ -181,15 +167,14 @@ export function NotesTreeInline({
 
   const renderDropLine = (parentId: string | null, insertBefore: string | null, depth: number) => {
     const key = `${parentId ?? "root"}->${insertBefore ?? "end"}`;
-    const isActive = dropLineKey === key && dragNoteId !== null;
     return (
       <Box
         key={key}
         onDragOver={(event) => {
+          if (!dragNoteId) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "move";
           setDropLineKey(key);
-          setDragOverNodeId(null);
         }}
         onDragLeave={() => {
           if (dropLineKey === key) setDropLineKey(null);
@@ -198,18 +183,8 @@ export function NotesTreeInline({
         sx={{
           ml: 1 + depth * 1.5,
           mr: 1,
-          height: 8,
-          opacity: dragNoteId ? 1 : 0,
+          height: 6,
           pointerEvents: dragNoteId ? "auto" : "none",
-          transition: "opacity .15s ease",
-          "&::before": {
-            content: '""',
-            display: "block",
-            height: isActive ? "2px" : "1px",
-            backgroundColor: isActive ? "rgba(126,224,255,0.9)" : "rgba(126,224,255,0.25)",
-            borderRadius: 1,
-            marginTop: "3px",
-          },
         }}
       />
     );
@@ -222,9 +197,8 @@ export function NotesTreeInline({
     children.forEach((note, idx) => {
       const nested = notesByParent.get(note.id) ?? [];
       const isExpanded = expanded.has(note.id);
-      const isDragOver = dragOverNodeId === note.id;
       out.push(
-        <Box key={note.id}>
+        <Box key={note.id} sx={{ "&:hover .note-tree-add-btn": { opacity: 1 } }}>
           <ListItemButton
             selected={selectedNoteId === note.id}
             draggable
@@ -234,7 +208,6 @@ export function NotesTreeInline({
             }}
             onDragEnd={() => {
               setDragNoteId(null);
-              setDragOverNodeId(null);
               setDropLineKey(null);
             }}
             onDragOver={(event) => {
@@ -242,88 +215,59 @@ export function NotesTreeInline({
               if (!canDrop(dragNoteId, note.id)) return;
               event.preventDefault();
               event.dataTransfer.dropEffect = "move";
-              setDragOverNodeId(note.id);
-              setDropLineKey(null);
-            }}
-            onDragLeave={() => {
-              if (dragOverNodeId === note.id) setDragOverNodeId(null);
             }}
             onDrop={(event) => void handleDropOnNode(event, note.id)}
             onClick={() => onSelect(note.id)}
-            sx={{
-              pl: 1 + depth * 1.5,
-              pr: 0.5,
-              py: 0.5,
-              ...(isDragOver
-                ? {
-                    backgroundColor: "rgba(126,224,255,0.14)",
-                    outline: "1px dashed rgba(126,224,255,0.55)",
-                    outlineOffset: "-1px",
-                  }
-                : {}),
-            }}
+            sx={{ pl: 1 + depth * 1.5, pr: 0.5, py: 0.5, color: "inherit" }}
           >
             {nested.length > 0 ? (
               <IconButton
                 size="small"
                 edge="start"
+                disableRipple
                 onClick={(event) => {
                   event.stopPropagation();
                   toggleExpanded(note.id);
                 }}
-                sx={{ mr: 0.25 }}
+                sx={{ mr: 0.25, color: "inherit", "&:hover": { backgroundColor: "transparent" } }}
               >
                 {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
               </IconButton>
             ) : (
               <Box sx={{ width: 28 }} />
             )}
-            <InsertDriveFileOutlinedIcon fontSize="small" sx={{ color: "rgba(126,224,255,0.55)" }} />
+            <InsertDriveFileOutlinedIcon fontSize="small" sx={{ color: "inherit" }} />
             <ListItemText
               primary={note.title}
               primaryTypographyProps={{ noWrap: true, fontSize: "0.82rem" }}
               sx={{ ml: 0.75, mr: 0.5 }}
             />
-            <Stack direction="row" spacing={0} sx={{ opacity: 0.55, "&:hover": { opacity: 1 } }}>
-              {onCreateChild && (
-                <IconButton
-                  size="small"
-                  aria-label="Добавить подстраницу"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onCreateChild(note.id);
-                  }}
-                >
-                  <SubdirectoryArrowRightIcon fontSize="small" />
-                </IconButton>
-              )}
-              {onRename && (
-                <IconButton
-                  size="small"
-                  aria-label="Переименовать"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onRename(note.id);
-                  }}
-                >
-                  <EditOutlinedIcon fontSize="small" />
-                </IconButton>
-              )}
-              {onDelete && (
-                <IconButton
-                  size="small"
-                  aria-label="Удалить"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onDelete(note.id);
-                  }}
-                >
-                  <DeleteOutlineIcon fontSize="small" />
-                </IconButton>
-              )}
-            </Stack>
+            {onCreateChild && (
+              <IconButton
+                size="small"
+                aria-label="Добавить подстраницу"
+                className="note-tree-add-btn"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCreateChild(note.id);
+                }}
+                sx={{ opacity: 0, transition: "opacity .15s ease", color: "inherit" }}
+              >
+                <AddIcon fontSize="small" />
+              </IconButton>
+            )}
           </ListItemButton>
-          {isExpanded && nested.length > 0 && <Box>{renderTree(note.id, depth + 1)}</Box>}
+          {nested.length > 0 && (
+            <Box
+              sx={{
+                maxHeight: isExpanded ? 4000 : 0,
+                overflow: "hidden",
+                transition: "max-height .26s ease",
+              }}
+            >
+              {renderTree(note.id, depth + 1)}
+            </Box>
+          )}
         </Box>,
       );
       out.push(renderDropLine(parentId, children[idx + 1]?.id ?? null, depth));
@@ -333,16 +277,6 @@ export function NotesTreeInline({
 
   return (
     <Box>
-      {onCreateRoot && (
-        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ px: 1.25, py: 0.5 }}>
-          <Typography variant="caption" sx={{ opacity: 0.7 }}>
-            Дерево заметок
-          </Typography>
-          <IconButton size="small" aria-label="Создать корневую страницу" onClick={onCreateRoot}>
-            <AddIcon fontSize="small" />
-          </IconButton>
-        </Stack>
-      )}
       {notes.length === 0 ? (
         <Box sx={{ px: 1.5, py: 1 }}>
           <Typography variant="body2" color="text.secondary">
