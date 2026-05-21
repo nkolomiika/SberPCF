@@ -12,6 +12,9 @@ from typing import Literal
 from urllib.parse import parse_qsl, urlparse, urlsplit
 from uuid import UUID, uuid4
 
+import ipaddress
+import socket
+
 import magic
 import httpx
 import yaml
@@ -19,11 +22,11 @@ from cvss import CVSS4
 from fastapi import UploadFile
 from PIL import Image as PillowImage, ImageOps, UnidentifiedImageError
 from sqlalchemy import Select, and_, delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
-from app.audit_store import audit_store
 from app.config import get_settings
 from app.enums import AssetType, NotificationType, ProjectStatus, Severity, UserRole
 from app.reports import ReportKind, build_pp, build_szi
@@ -127,10 +130,7 @@ class AuditService:
         details: dict | None = None,
         ip_address: str | None = None,
     ) -> None:
-        """Создаёт запись аудита."""
-        username: str | None = None
-        if user_id:
-            username = await self.db.scalar(select(User.username).where(User.id == user_id))
+        """Создаёт запись аудита (хранится в Postgres-таблице audit_logs)."""
         created_at = datetime.now(UTC)
         self.db.add(
             AuditLog(
@@ -144,16 +144,6 @@ class AuditService:
             )
         )
         await self.db.commit()
-        await audit_store.insert(
-            user_id=user_id,
-            username=username,
-            action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            details=details,
-            ip_address=ip_address,
-            created_at=created_at,
-        )
 
 
 class AgentTokenService:
@@ -221,9 +211,40 @@ class AgentTokenService:
         token = await self.db.scalar(select(AgentApiToken).where(AgentApiToken.id == token_id))
         if not token:
             raise NotFoundError("Agent API token не найден")
-        token.revoked_at = datetime.now(UTC)
+        # Физически удаляем токен: пользователь нажимает «удалить» и ожидает,
+        # что запись исчезнет из списка. Grants подчищаются по ON DELETE CASCADE.
+        await self.db.delete(token)
         await self.db.commit()
-        await self.audit.log("UPDATE", user_id=actor_id, entity_type="agent_api_token", entity_id=token.id)
+        await self.audit.log("DELETE", user_id=actor_id, entity_type="agent_api_token", entity_id=token_id)
+
+
+class _SafeJiraTransport(httpx.AsyncHTTPTransport):
+    """httpx transport с защитой от DNS rebinding.
+
+    Между нашей валидацией Jira base_url (в момент save config) и реальным
+    HTTP-запросом проходит время, за которое атакующий с контролем DNS
+    жертвы мог бы сменить запись с публичного IP на 127.0.0.1 / RFC1918
+    (короткий TTL). Этот transport повторно резолвит host прямо перед
+    отправкой и валит запрос, если в свежем DNS-ответе есть запрещённый IP.
+
+    NB: это не «pin-by-IP» в чистом виде — между нашим getaddrinfo и
+    getaddrinfo внутри httpcore остаётся миллисекундное окно. Но оно сводит
+    практическую атаку к нулю и не требует ломать SNI / TLS verification.
+    """
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host:
+            try:
+                resolved = {info[4][0] for info in socket.getaddrinfo(host, None)}
+            except socket.gaierror as exc:
+                raise httpx.ConnectError(f"DNS не разрешает {host}: {exc}") from exc
+            for addr in resolved:
+                if JiraIntegrationService._is_disallowed_ip(addr):
+                    raise httpx.ConnectError(
+                        f"DNS вернул запрещённый IP {addr} для {host} — отклонено защитой SSRF"
+                    )
+        return await super().handle_async_request(request)
 
 
 class JiraIntegrationService:
@@ -234,11 +255,24 @@ class JiraIntegrationService:
         self.audit = AuditService(db)
 
     @staticmethod
-    def _validate_external_url(raw_url: str) -> str:
-        """SSRF-защита: разрешаем только https и публичные хосты (запрет на localhost, RFC1918, link-local)."""
-        import ipaddress
-        import socket
+    def _is_disallowed_ip(addr: str) -> bool:
+        """True, если IP-адрес внутренний/приватный/системный — для SSRF-защиты."""
+        try:
+            ip_obj = ipaddress.ip_address(addr)
+        except ValueError:
+            return True
+        return (
+            ip_obj.is_loopback
+            or ip_obj.is_private
+            or ip_obj.is_link_local
+            or ip_obj.is_reserved
+            or ip_obj.is_multicast
+            or ip_obj.is_unspecified
+        )
 
+    @classmethod
+    def _validate_external_url(cls, raw_url: str) -> str:
+        """SSRF-защита: разрешаем только https и публичные хосты (запрет на localhost, RFC1918, link-local)."""
         if not raw_url or not raw_url.strip():
             raise ValidationError("Jira base_url не может быть пустым")
         parsed = urlparse(raw_url.strip())
@@ -256,11 +290,7 @@ class JiraIntegrationService:
         except socket.gaierror as exc:
             raise ValidationError(f"Не удалось разрешить host Jira: {exc}") from exc
         for addr in resolved:
-            try:
-                ip_obj = ipaddress.ip_address(addr)
-            except ValueError:
-                continue
-            if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local or ip_obj.is_reserved or ip_obj.is_multicast:
+            if cls._is_disallowed_ip(addr):
                 raise ValidationError("Jira base_url указывает на внутренний/приватный IP — запрещено")
         return raw_url.strip().rstrip("/")
 
@@ -342,6 +372,40 @@ class JiraIntegrationService:
     async def get_issue_link(self, vulnerability_id: UUID) -> JiraIssueLink | None:
         return await self.db.scalar(select(JiraIssueLink).where(JiraIssueLink.vulnerability_id == vulnerability_id))
 
+    async def _claim_issue_link(self, vuln_id: UUID) -> tuple[JiraIssueLink, bool]:
+        """Бронирует JiraIssueLink с status='pending' перед HTTP-вызовом.
+
+        Возвращает (link, created). Если параллельный запрос уже забронировал
+        запись — отдаём существующую и created=False. UNIQUE constraint на
+        vulnerability_id гарантирует, что один из конкурентов проиграет
+        IntegrityError'ом — это и есть точка сериализации.
+        """
+        link = JiraIssueLink(
+            vulnerability_id=vuln_id,
+            jira_issue_key="",
+            jira_issue_url="",
+            status="pending",
+        )
+        self.db.add(link)
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            await self.db.rollback()
+            existing = await self.get_issue_link(vuln_id)
+            if existing is None:
+                # Теоретически возможно, если race-конкурент откатился после
+                # нашего fail'а — сообщаем явно, чтобы клиент повторил.
+                raise ValidationError("Не удалось создать связь с Jira, повторите попытку")
+            return existing, False
+        await self.db.refresh(link)
+        return link, True
+
+    async def _mark_link_error(self, link: JiraIssueLink, error: str) -> None:
+        """Отмечает связь как «error» и сохраняет последнюю ошибку для UI."""
+        link.status = "error"
+        link.last_error = error[:500]
+        await self.db.commit()
+
     async def export_vulnerability(self, project_id: UUID, vuln_id: UUID, actor_id: UUID) -> JiraIssueLink:
         config = await self.get_config()
         if not config or not config.is_enabled:
@@ -349,9 +413,26 @@ class JiraIntegrationService:
         project_link = await self.get_project_link(project_id)
         if not project_link:
             raise ValidationError("Проект не привязан к Jira project key")
+
+        # 1) Проверяем готовый линк — если он уже «linked», возвращаем как есть.
         existing = await self.get_issue_link(vuln_id)
-        if existing:
+        if existing and existing.status == "linked":
             return existing
+
+        # 2) Бронируем запись (claim-row) ДО HTTP-вызова. Защита от race:
+        #    два параллельных POST не смогут оба создать issue в Jira —
+        #    один проиграет на UNIQUE constraint и получит существующий линк.
+        if existing is None:
+            link, created = await self._claim_issue_link(vuln_id)
+            if not created and link.status == "linked":
+                return link
+        else:
+            # Линк был в pending/error — переиспользуем для retry.
+            link = existing
+            link.status = "pending"
+            link.last_error = None
+            await self.db.commit()
+
         vuln_data = await VulnerabilityService(self.db).get(project_id, vuln_id)
         vulnerability = vuln_data["vulnerability"]
         description = "\n\n".join(
@@ -374,21 +455,43 @@ class JiraIntegrationService:
             }
         }
         safe_base_url = self._validate_external_url(config.base_url)
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
-            response = await client.post(
-                f"{safe_base_url}/rest/api/3/issue",
-                json=payload,
-                auth=(config.email, self._decrypt_secret(config.api_token_encrypted)),
-            )
+
+        # 3) Сетевой вызов с обёрткой ошибок и DNS-rebind защитой.
+        try:
+            async with httpx.AsyncClient(
+                timeout=20.0,
+                follow_redirects=False,
+                transport=_SafeJiraTransport(),
+            ) as client:
+                response = await client.post(
+                    f"{safe_base_url}/rest/api/3/issue",
+                    json=payload,
+                    auth=(config.email, self._decrypt_secret(config.api_token_encrypted)),
+                )
+        except httpx.HTTPError as exc:
+            await self._mark_link_error(link, f"Jira недоступна: {exc.__class__.__name__}: {exc}")
+            raise ValidationError(f"Jira недоступна: {exc}") from exc
+
         if response.status_code >= 400:
-            raise ValidationError(f"Jira вернула ошибку {response.status_code}: {response.text[:500]}")
-        data = response.json()
+            error_text = response.text[:500]
+            await self._mark_link_error(link, f"HTTP {response.status_code}: {error_text}")
+            raise ValidationError(f"Jira вернула ошибку {response.status_code}: {error_text}")
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            await self._mark_link_error(link, "Jira вернула не-JSON ответ")
+            raise ValidationError("Jira вернула не-JSON ответ") from exc
+
         issue_key = data.get("key")
         if not issue_key:
+            await self._mark_link_error(link, "Jira не вернула key созданной issue")
             raise ValidationError("Jira не вернула key созданной issue")
-        issue_url = f"{config.base_url.rstrip('/')}/browse/{issue_key}"
-        link = JiraIssueLink(vulnerability_id=vuln_id, jira_issue_key=issue_key, jira_issue_url=issue_url, status="linked")
-        self.db.add(link)
+
+        link.jira_issue_key = issue_key
+        link.jira_issue_url = f"{safe_base_url}/browse/{issue_key}"
+        link.status = "linked"
+        link.last_error = None
         await self.db.commit()
         await self.db.refresh(link)
         await self.audit.log("CREATE", user_id=actor_id, entity_type="jira_issue_link", entity_id=link.id)
@@ -491,21 +594,6 @@ class UserService:
         return "admin@example.com"
 
     @staticmethod
-    def _normalize_tags(tags: list[str] | None) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for tag in tags or []:
-            cleaned = tag.strip()
-            if not cleaned:
-                continue
-            lowered = cleaned.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            normalized.append(cleaned)
-        return normalized
-
-    @staticmethod
     def _generate_temporary_password() -> str:
         return secrets.token_urlsafe(12)
 
@@ -599,7 +687,6 @@ class UserService:
             username=settings.initial_admin_username,
             email=normalized_email,
             full_name="Administrator",
-            tags=["admin"],
             password_hash=hash_password(settings.initial_admin_password),
             must_change_password=must_change,
             password_changed_at=None if must_change else datetime.now(UTC),
@@ -642,7 +729,6 @@ class UserService:
             username=payload["username"],
             email=payload["email"],
             full_name=payload.get("full_name"),
-            tags=self._normalize_tags(payload.get("tags")),
             password_hash=hash_password(temporary_password),
             must_change_password=must_change_password,
             password_changed_at=None if must_change_password else datetime.now(UTC),
@@ -676,8 +762,6 @@ class UserService:
             raise ValidationError("Администратор не может менять email пользователя. Пользователь должен изменить его сам.")
         username = payload.get("username", user.username)
         await self._ensure_unique_identity(username=username, email=user.email, exclude_user_id=user.id)
-        if "tags" in payload:
-            payload["tags"] = self._normalize_tags(payload.get("tags"))
         for key, value in payload.items():
             if value is not None:
                 setattr(user, key, value)
@@ -691,8 +775,6 @@ class UserService:
         username = payload.get("username", user.username)
         email = payload.get("email", user.email)
         await self._ensure_unique_identity(username=username, email=email, exclude_user_id=user.id)
-        if "tags" in payload:
-            payload["tags"] = self._normalize_tags(payload.get("tags"))
         for key, value in payload.items():
             if value is not None:
                 setattr(user, key, value)
@@ -1336,7 +1418,9 @@ class AssetService:
 
     async def _get_host(self, project_id: UUID, host_id: UUID) -> Host:
         host = await self.db.scalar(
-            select(Host).options(selectinload(Host.ip_addresses)).where(and_(Host.id == host_id, Host.project_id == project_id))
+            select(Host)
+            .options(selectinload(Host.ip_addresses).selectinload(HostIpAddress.ports))
+            .where(and_(Host.id == host_id, Host.project_id == project_id))
         )
         if not host:
             raise NotFoundError("Хост не найден")
@@ -1386,20 +1470,40 @@ class AssetService:
         return entries
 
     async def _replace_host_ip_addresses(self, host: Host, entries: list[dict]) -> None:
-        await self.db.execute(delete(HostIpAddress).where(HostIpAddress.host_id == host.id))
-        rows = [
-            HostIpAddress(
-                host_id=host.id,
-                ip_address=entry["ip_address"],
-                label=entry.get("label"),
-                is_primary=bool(entry.get("is_primary")),
-            )
-            for entry in entries
-        ]
-        for row in rows:
-            self.db.add(row)
-        host.ip_address = next((row.ip_address for row in rows if row.is_primary), rows[0].ip_address if rows else None)
-        set_committed_value(host, "ip_addresses", rows)
+        # Инкрементально обновляем список IP, чтобы не каскадно сносить порты при
+        # сохранении хоста: совпадающие по ip_address записи переиспользуем,
+        # отсутствующие — удаляем (порты на них уйдут каскадом).
+        existing: dict[str, HostIpAddress] = {
+            row.ip_address: row for row in list(host.ip_addresses)
+        }
+        desired_values: set[str] = {entry["ip_address"] for entry in entries}
+
+        for old_ip, row in list(existing.items()):
+            if old_ip not in desired_values:
+                await self.db.delete(row)
+
+        result_rows: list[HostIpAddress] = []
+        for entry in entries:
+            value = entry["ip_address"]
+            row = existing.get(value)
+            if row is None:
+                row = HostIpAddress(
+                    host_id=host.id,
+                    ip_address=value,
+                    label=entry.get("label"),
+                    is_primary=bool(entry.get("is_primary")),
+                )
+                self.db.add(row)
+            else:
+                row.label = entry.get("label")
+                row.is_primary = bool(entry.get("is_primary"))
+            result_rows.append(row)
+
+        host.ip_address = next(
+            (row.ip_address for row in result_rows if row.is_primary),
+            result_rows[0].ip_address if result_rows else None,
+        )
+        set_committed_value(host, "ip_addresses", result_rows)
 
     async def _get_port(self, host_id: UUID, port_id: UUID) -> Port:
         port = await self.db.scalar(select(Port).where(and_(Port.id == port_id, Port.host_id == host_id)))
@@ -1412,7 +1516,12 @@ class AssetService:
         if status:
             base_query = base_query.where(Host.status == status)
         total = await self.db.scalar(select(func.count()).select_from(base_query.subquery())) or 0
-        items_query = base_query.options(selectinload(Host.ip_addresses)).order_by(Host.created_at.desc()).offset((page - 1) * size).limit(size)
+        items_query = (
+            base_query.options(selectinload(Host.ip_addresses).selectinload(HostIpAddress.ports))
+            .order_by(Host.created_at.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )
         items = (await self.db.scalars(items_query)).all()
         return list(items), total
 
@@ -1429,7 +1538,6 @@ class AssetService:
 
     async def get_host(self, project_id: UUID, host_id: UUID) -> dict:
         host = await self._get_host(project_id, host_id)
-        ports = (await self.db.scalars(select(Port).where(Port.host_id == host.id))).all()
         endpoints = (await self.db.scalars(select(Endpoint).where(Endpoint.host_id == host.id))).all()
         return {
             "id": host.id,
@@ -1442,6 +1550,19 @@ class AssetService:
                     "ip_address": ip.ip_address,
                     "label": ip.label,
                     "is_primary": ip.is_primary,
+                    "ports": [
+                        {
+                            "id": port.id,
+                            "host_id": port.host_id,
+                            "ip_address_id": port.ip_address_id,
+                            "port_number": port.port_number,
+                            "protocol": port.protocol,
+                            "state": port.state,
+                            "created_at": port.created_at,
+                            "updated_at": port.updated_at,
+                        }
+                        for port in sorted(ip.ports, key=lambda p: p.port_number)
+                    ],
                     "created_at": ip.created_at,
                     "updated_at": ip.updated_at,
                 }
@@ -1453,18 +1574,6 @@ class AssetService:
             "notes": host.notes,
             "created_at": host.created_at,
             "updated_at": host.updated_at,
-            "ports": [
-                {
-                    "id": port.id,
-                    "host_id": port.host_id,
-                    "port_number": port.port_number,
-                    "protocol": port.protocol,
-                    "state": port.state,
-                    "created_at": port.created_at,
-                    "updated_at": port.updated_at,
-                }
-                for port in ports
-            ],
             "endpoints": [
                 {
                     "id": endpoint.id,
@@ -1508,22 +1617,37 @@ class AssetService:
         await self.audit.log("DELETE", user_id=actor_id, entity_type="host", entity_id=host.id)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
 
-    async def list_ports(self, host_id: UUID) -> list[Port]:
-        return list((await self.db.scalars(select(Port).where(Port.host_id == host_id).order_by(Port.port_number))).all())
+    async def list_ports(self, host_id: UUID, ip_address_id: UUID | None = None) -> list[Port]:
+        query = select(Port).where(Port.host_id == host_id).order_by(Port.port_number)
+        if ip_address_id is not None:
+            query = query.where(Port.ip_address_id == ip_address_id)
+        return list((await self.db.scalars(query)).all())
+
+    async def _get_host_ip(self, host_id: UUID, ip_address_id: UUID) -> HostIpAddress:
+        ip = await self.db.scalar(
+            select(HostIpAddress).where(
+                and_(HostIpAddress.id == ip_address_id, HostIpAddress.host_id == host_id)
+            )
+        )
+        if not ip:
+            raise ValidationError("IP-адрес не принадлежит указанному хосту")
+        return ip
 
     async def create_port(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Port:
         await self._get_host(project_id, host_id)
+        ip_address_id = payload["ip_address_id"]
+        await self._get_host_ip(host_id, ip_address_id)
         duplicate = await self.db.scalar(
             select(Port).where(
                 and_(
-                    Port.host_id == host_id,
+                    Port.ip_address_id == ip_address_id,
                     Port.port_number == payload["port_number"],
                     Port.protocol == payload["protocol"],
                 )
             )
         )
         if duplicate:
-            raise ConflictError("Порт с таким номером и протоколом уже существует")
+            raise ConflictError("Порт с таким номером и протоколом уже существует на этом IP")
         port = Port(host_id=host_id, **payload)
         self.db.add(port)
         await self.db.commit()
@@ -1539,10 +1663,13 @@ class AssetService:
         port = await self._get_port(host_id, port_id)
         next_port_number = payload.get("port_number", port.port_number)
         next_protocol = payload.get("protocol", port.protocol)
+        next_ip_address_id = payload.get("ip_address_id", port.ip_address_id)
+        if next_ip_address_id != port.ip_address_id:
+            await self._get_host_ip(host_id, next_ip_address_id)
         duplicate = await self.db.scalar(
             select(Port).where(
                 and_(
-                    Port.host_id == host_id,
+                    Port.ip_address_id == next_ip_address_id,
                     Port.id != port.id,
                     Port.port_number == next_port_number,
                     Port.protocol == next_protocol,
@@ -1550,7 +1677,7 @@ class AssetService:
             )
         )
         if duplicate:
-            raise ConflictError("Порт с таким номером и протоколом уже существует")
+            raise ConflictError("Порт с таким номером и протоколом уже существует на этом IP")
         for key, value in payload.items():
             if value is not None:
                 setattr(port, key, value)
@@ -1833,13 +1960,23 @@ class VulnerabilityService:
                 endpoint = await self.db.scalar(
                     select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id))
                 )
-                if not endpoint:
-                    raise ValidationError("Выбранный endpoint не принадлежит текущему хосту")
-                next_step["endpoint_id"] = str(endpoint.id)
+                if endpoint:
+                    next_step["endpoint_id"] = str(endpoint.id)
+                else:
+                    # Endpoint указывать необязательно — невалидную привязку просто сбрасываем,
+                    # вместо того чтобы возвращать 400.
+                    next_step["endpoint_id"] = None
+                    endpoint_id = None
             if endpoint_request_raw:
-                endpoint_payload = AssetService._apply_structured_request_payload(
-                    AssetService._apply_raw_request_payload({"request_raw": endpoint_request_raw})
-                )
+                try:
+                    endpoint_payload = AssetService._apply_structured_request_payload(
+                        AssetService._apply_raw_request_payload({"request_raw": endpoint_request_raw})
+                    )
+                except ValidationError:
+                    # Невалидный raw-запрос не должен ронять сохранение этапа — endpoint опционален.
+                    next_step["endpoint_request_raw"] = None
+                    resolved_steps.append(next_step)
+                    continue
                 existing_endpoint = await self.db.scalar(
                     select(Endpoint).where(
                         and_(
@@ -2200,11 +2337,22 @@ class CommentService:
         usernames = set(MENTION_RE.findall(content))
         if not usernames:
             return []
+        # Принимаем упоминание, если юзер либо участник проекта, либо админ
+        # (админы имеют доступ ко всем проектам без явного членства, поэтому
+        # упоминание их в комментарии тоже должно создавать уведомление).
+        # В outer-join'е на пару (user, project) каждая уникальная связь даёт
+        # ровно одну строку из-за UNIQUE constraint ProjectMember(project_id, user_id),
+        # а юзеры без membership дают по одной строке с NULL membership.
         rows = (
             await self.db.scalars(
                 select(User)
-                .join(ProjectMember, ProjectMember.user_id == User.id)
-                .where(and_(ProjectMember.project_id == project_id, User.username.in_(list(usernames))))
+                .outerjoin(ProjectMember, and_(ProjectMember.user_id == User.id, ProjectMember.project_id == project_id))
+                .where(
+                    and_(
+                        User.username.in_(list(usernames)),
+                        or_(ProjectMember.user_id.is_not(None), User.role == UserRole.ADMIN),
+                    )
+                )
             )
         ).all()
         return list(rows)
@@ -2422,6 +2570,56 @@ class ProjectNoteService:
         )
         return list(rows.all())
 
+    async def list_activity(self, project_id: UUID, limit: int = 30) -> list[dict]:
+        """Журнал CREATE/UPDATE/DELETE действий с заметками этого проекта.
+
+        Подцепляем audit-записи двумя путями, чтобы покрыть и новые, и старые
+        записи журнала:
+          1) details.project_id == project_id — новый формат (после миграции UI):
+             единственный надёжный способ узнать проект для DELETE-записей,
+             где самой заметки уже нет в БД.
+          2) entity_id IN (заметки этого проекта) — fallback для старых
+             CREATE/UPDATE записей без project_id в details.
+        Title берём из details или из самой заметки (если она ещё жива).
+        Username — через outer join к users (может быть NULL для удалённых).
+        """
+        await self._ensure_project(project_id)
+        # Подзапрос ID заметок текущего проекта — для fallback по entity_id.
+        project_note_ids = select(ProjectNote.id).where(ProjectNote.project_id == project_id)
+        stmt = (
+            select(AuditLog, User.username, ProjectNote.title)
+            .outerjoin(User, User.id == AuditLog.user_id)
+            .outerjoin(ProjectNote, ProjectNote.id == AuditLog.entity_id)
+            .where(AuditLog.entity_type == "project_note")
+            .where(AuditLog.action.in_(("CREATE", "UPDATE", "DELETE")))
+            .where(
+                or_(
+                    AuditLog.details["project_id"].as_string() == str(project_id),
+                    AuditLog.entity_id.in_(project_note_ids),
+                )
+            )
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+        )
+        rows = (await self.db.execute(stmt)).all()
+        out: list[dict] = []
+        for entry, username, note_title in rows:
+            details = entry.details or {}
+            # Приоритет: title из details (сохранён при удалении) → текущий title из БД.
+            title = details.get("title") or note_title
+            out.append(
+                {
+                    "id": str(entry.id),
+                    "action": entry.action,
+                    "note_id": str(entry.entity_id) if entry.entity_id else None,
+                    "note_title": title,
+                    "user_id": str(entry.user_id) if entry.user_id else None,
+                    "username": username,
+                    "created_at": entry.created_at.isoformat() if entry.created_at else None,
+                }
+            )
+        return out
+
     async def get_note(self, project_id: UUID, note_id: UUID) -> ProjectNote:
         return await self._get_note(project_id, note_id)
 
@@ -2444,7 +2642,15 @@ class ProjectNoteService:
         self.db.add(note)
         await self.db.commit()
         await self.db.refresh(note)
-        await self.audit.log("CREATE", user_id=actor_id, entity_type="project_note", entity_id=note.id)
+        # project_id и title в details — нужны для post-факта журнала активности
+        # уровня проекта (DELETE-записи без них нельзя было бы связать с проектом).
+        await self.audit.log(
+            "CREATE",
+            user_id=actor_id,
+            entity_type="project_note",
+            entity_id=note.id,
+            details={"project_id": str(project_id), "title": note.title},
+        )
         await ws_manager.broadcast(
             project_id,
             {"event": "created", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note.id)}},
@@ -2464,7 +2670,13 @@ class ProjectNoteService:
         note.updated_by = actor_id
         await self.db.commit()
         await self.db.refresh(note)
-        await self.audit.log("UPDATE", user_id=actor_id, entity_type="project_note", entity_id=note.id)
+        await self.audit.log(
+            "UPDATE",
+            user_id=actor_id,
+            entity_type="project_note",
+            entity_id=note.id,
+            details={"project_id": str(project_id), "title": note.title},
+        )
         await ws_manager.broadcast(
             project_id,
             {"event": "updated", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note.id)}},
@@ -2532,9 +2744,16 @@ class ProjectNoteService:
 
     async def delete_note(self, project_id: UUID, note_id: UUID, actor_id: UUID) -> None:
         note = await self._get_note(project_id, note_id)
+        deleted_title = note.title  # запоминаем заголовок ДО удаления для журнала
         await self.db.delete(note)
         await self.db.commit()
-        await self.audit.log("DELETE", user_id=actor_id, entity_type="project_note", entity_id=note_id)
+        await self.audit.log(
+            "DELETE",
+            user_id=actor_id,
+            entity_type="project_note",
+            entity_id=note_id,
+            details={"project_id": str(project_id), "title": deleted_title},
+        )
         await ws_manager.broadcast(
             project_id,
             {"event": "deleted", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note_id)}},
@@ -2593,8 +2812,41 @@ class ProjectNoteService:
         note = await self._get_note(project_id, note_id)
         comment = ProjectNoteComment(project_id=project_id, note_id=note.id, user_id=actor.id, content=content)
         self.db.add(comment)
+        await self.db.flush()
+        # Уведомления @username (упоминания) — тот же экстрактор, что у уязвимостей.
+        # Создаём Notification с note_comment_id (а не comment_id), чтобы NotificationService
+        # знал, что это упоминание в заметке и подгрузил соответствующий контекст.
+        # Самоупоминания тоже отправляем (как в vuln-комментариях) — это полезно
+        # для проверки и закладок.
+        mentioned_users = await CommentService(self.db)._extract_mentions(project_id, content)
+        for user in mentioned_users:
+            self.db.add(
+                Notification(
+                    user_id=user.id,
+                    type=NotificationType.MENTION,
+                    note_comment_id=comment.id,
+                    is_read=False,
+                )
+            )
         await self.db.commit()
         await self.db.refresh(comment)
+        for user in mentioned_users:
+            await ws_manager.notify_user(
+                user.id,
+                {
+                    "event": "notification",
+                    "entity": "notification",
+                    "data": {
+                        "type": NotificationType.MENTION.value,
+                        "is_read": False,
+                        "note_comment_id": str(comment.id),
+                        "note_id": str(note.id),
+                        "note_title": note.title,
+                        "project_id": str(project_id),
+                        "commenter_username": actor.username,
+                    },
+                },
+            )
         await self.audit.log("CREATE", user_id=actor.id, entity_type="project_note_comment", entity_id=comment.id)
         await ws_manager.broadcast(
             project_id,
@@ -2717,11 +2969,30 @@ class NotificationService:
                         host_id=host_id,
                         commenter_username=commenter.username,
                     )
+            elif item.note_comment_id:
+                # Контекст для упоминания в комментарии заметки: подгружаем сам комментарий,
+                # заметку (для названия) и автора (для commenter_username).
+                row = await self.db.execute(
+                    select(ProjectNoteComment, ProjectNote, User)
+                    .join(ProjectNote, ProjectNote.id == ProjectNoteComment.note_id)
+                    .join(User, User.id == ProjectNoteComment.user_id)
+                    .where(ProjectNoteComment.id == item.note_comment_id)
+                )
+                data = row.first()
+                if data:
+                    note_comment, note, commenter = data
+                    context = NotificationContext(
+                        note_id=note.id,
+                        note_title=note.title,
+                        project_id=note.project_id,
+                        commenter_username=commenter.username,
+                    )
             result.append(
                 NotificationOut(
                     id=item.id,
                     type=item.type.value,
                     comment_id=item.comment_id,
+                    note_comment_id=item.note_comment_id,
                     is_read=item.is_read,
                     created_at=item.created_at,
                     context=context,
@@ -3492,11 +3763,26 @@ class ImportService:
                 else:
                     self._merge_host_fields(host, host_data)
 
+                host_ips = list(
+                    (
+                        await self.db.scalars(
+                            select(HostIpAddress).where(HostIpAddress.host_id == host.id)
+                        )
+                    ).all()
+                )
+                primary_ip = next(
+                    (ip for ip in host_ips if ip.is_primary), host_ips[0] if host_ips else None
+                )
+                if primary_ip is None:
+                    raise ValidationError(
+                        "Невозможно импортировать порты: у хоста нет IP-адресов"
+                    )
+
                 for port_data in host_data.ports:
                     port = await self.db.scalar(
                         select(Port).where(
                             and_(
-                                Port.host_id == host.id,
+                                Port.ip_address_id == primary_ip.id,
                                 Port.port_number == port_data.port_number,
                                 Port.protocol == port_data.protocol,
                             )
@@ -3505,6 +3791,7 @@ class ImportService:
                     if port is None:
                         port = Port(
                             host_id=host.id,
+                            ip_address_id=primary_ip.id,
                             port_number=port_data.port_number,
                             protocol=port_data.protocol,
                             state=port_data.state,

@@ -141,8 +141,7 @@
 
 ## Эпик 12. Audit log
 
-- [x] Запись действий в PostgreSQL (`audit_logs`)
-- [x] Дублирующая запись/чтение из ClickHouse (если включён)
+- [x] Запись действий в PostgreSQL (`audit_logs`) — единый источник правды
 - [x] Эндпоинт `GET /api/v1/audit-logs` (admin) с фильтрами
 - [x] Фильтры: `user_id`, `username`, `action`, `entity_type`, `entity_id`, `ip_address`, `query`, период
 - [x] Скрытие шумных `LOGIN` от refresh
@@ -207,7 +206,6 @@
 - [x] PostgreSQL — основное хранилище
 - [x] MinIO — файлы и аватары
 - [x] RabbitMQ — очередь писем
-- [x] ClickHouse — опциональный sink аудита
 - [x] Docker / docker-compose для backend/frontend/инфры
 - [x] Pytest-тесты сервисов и роутеров
 - [ ] CI/CD пайплайн (GitHub Actions)

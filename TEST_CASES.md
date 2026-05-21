@@ -20,7 +20,7 @@
 | Backend (схемы Pydantic) | `pytest`, `pydantic.ValidationError` | `pytest tests/test_schemas.py` |
 | Backend (Word-отчёты) | `pytest`, `python-docx` (чтение результата) | `pytest tests/test_word_builder.py` |
 | Frontend (компоненты/страницы) | `vitest`, `@testing-library/react`, `userEvent`, `vi.mock`, `vi.hoisted` | `cd frontend && npm run test` |
-| Тестовая БД | In-memory SQLite (fallback) или PostgreSQL test DB; внешние зависимости (MinIO, ClickHouse, SMTP, Jira) — мокаются через `monkeypatch` | — |
+| Тестовая БД | In-memory SQLite (fallback) или PostgreSQL test DB; внешние зависимости (MinIO, SMTP, Jira) — мокаются через `monkeypatch` | — |
 
 ### 1.3 Стратегия
 - Сервисный слой — основной объект юнит-тестирования (`AssetService`, `VulnerabilityService`, `ProjectService`, `ProjectNoteService`, `CommentService`, `ImportService`, `JiraIntegrationService`, `UserService`, `ReportService`).
@@ -290,14 +290,14 @@
 
 ### 2.14 Audit logs (TC-AUDIT-NNN)
 
-Связано с: `app/services.AuditService`, `audit_store` (ClickHouse), `app/routers/audit_logs.py`.
+Связано с: `app/services.AuditService`, `app/routers/audit_logs.py` (хранилище — PostgreSQL).
 
 | ID | Название | Предусловия | Шаги | Ожидаемый результат | Статус |
 |---|---|---|---|---|---|
-| TC-AUDIT-001 | log() пишет AuditLog в БД и в audit_store | — | `AuditService.log("CREATE", user_id, entity_type=...)` | `db.add(AuditLog)`, `db.commit()`, `audit_store.insert(...)` вызваны | Запланирован |
-| TC-AUDIT-002 | ClickHouse fallback: при недоступности БД-запись остаётся | `audit_store.insert` бросает | `AuditService.log(...)` | Запись в основной БД сохранена; ошибка ClickHouse не валит запрос | Запланирован |
+| TC-AUDIT-001 | log() пишет AuditLog в БД | — | `AuditService.log("CREATE", user_id, entity_type=...)` | `db.add(AuditLog)` + `db.commit()` выполнены, запись доступна для чтения | Запланирован |
 | TC-AUDIT-003 | GET /audit-logs только для admin | Pentester | GET `/api/v1/audit-logs` | 403 | Запланирован |
 | TC-AUDIT-004 | Фильтрация audit logs по entity_type | Логи разных типов | GET `/audit-logs?entity_type=project` | Только records с `entity_type=project` | Запланирован |
+| TC-AUDIT-005 | Поиск по `query` затрагивает username и details | Логи с разными username/details | GET `/audit-logs?query=foo` | Возвращены записи, где `foo` встречается в action / entity_type / ip / username / cast(details::text) | Запланирован |
 
 ### 2.15 Pagination (TC-PAG-NNN)
 

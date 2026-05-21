@@ -1,7 +1,9 @@
 import DeleteIcon from "@mui/icons-material/Delete";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditIcon from "@mui/icons-material/Edit";
 import KeyIcon from "@mui/icons-material/Key";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
+import PersonAddAlt1Icon from "@mui/icons-material/PersonAddAlt1";
 import {
   Avatar,
   Box,
@@ -32,7 +34,6 @@ import { useErrorToast, useToastMessage } from "../useErrorToast";
 const ROLE_OPTIONS: Array<{ value: UserRole; label: string }> = [
   { value: "admin", label: "Администратор" },
   { value: "pentester", label: "Пентестер" },
-  { value: "developer", label: "Разработчик" },
 ];
 
 function roleLabel(role: UserRole): string {
@@ -55,17 +56,18 @@ export function UsersAdminPage() {
   const [createUsername, setCreateUsername] = useState("");
   const [createEmail, setCreateEmail] = useState("");
   const [createFullName, setCreateFullName] = useState("");
-  const [createTagsText, setCreateTagsText] = useState("");
   const [createPassword, setCreatePassword] = useState("");
   const [createRole, setCreateRole] = useState<UserRole>("pentester");
   const [createSendInviteEmail, setCreateSendInviteEmail] = useState(true);
 
   const [editUsername, setEditUsername] = useState("");
   const [editFullName, setEditFullName] = useState("");
-  const [editTagsText, setEditTagsText] = useState("");
   const [editRole, setEditRole] = useState<UserRole>("pentester");
   const [editIsActive, setEditIsActive] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
+  const [userBulkDeleteMode, setUserBulkDeleteMode] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeletingUsers, setBulkDeletingUsers] = useState(false);
 
   useErrorToast(error);
   useToastMessage(infoMessage, "success");
@@ -103,7 +105,7 @@ export function UsersAdminPage() {
       return users;
     }
     return users.filter((user) =>
-      [user.username, user.full_name || "", user.email, roleLabel(user.role), ...user.tags].some((value) => value.toLowerCase().includes(query))
+      [user.username, user.full_name || "", user.email, roleLabel(user.role)].some((value) => value.toLowerCase().includes(query))
     );
   }, [searchQuery, users]);
 
@@ -112,7 +114,6 @@ export function UsersAdminPage() {
     setCreateUsername("");
     setCreateEmail("");
     setCreateFullName("");
-    setCreateTagsText("");
     setCreatePassword("");
     setCreateRole("pentester");
     setCreateSendInviteEmail(true);
@@ -131,17 +132,10 @@ export function UsersAdminPage() {
   const closePageActions = () => setPageActionsAnchorEl(null);
   const closeUserActions = () => setUserActionsAnchorEl(null);
 
-  const parseTags = (value: string) =>
-    value
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-
   const openEditDialog = (user: User) => {
     setActiveUser(user);
     setEditUsername(user.username);
     setEditFullName(user.full_name ?? "");
-    setEditTagsText(user.tags.join(", "));
     setEditRole(user.role);
     setEditIsActive(user.is_active);
     setEditOpen(true);
@@ -158,7 +152,6 @@ export function UsersAdminPage() {
         username: createUsername.trim(),
         email: createEmail.trim(),
         full_name: createFullName.trim() || undefined,
-        tags: parseTags(createTagsText),
         password: createPassword || undefined,
         role: createRole,
         send_invite_email: createSendInviteEmail,
@@ -179,7 +172,6 @@ export function UsersAdminPage() {
       await updateUser(activeUser.id, {
         username: editUsername.trim(),
         full_name: editFullName.trim() || undefined,
-        tags: parseTags(editTagsText),
         role: editRole,
         is_active: editIsActive,
       });
@@ -222,6 +214,54 @@ export function UsersAdminPage() {
     }
   };
 
+  const toggleUserSelection = (id: string) => {
+    setSelectedUserIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const cancelUserBulkDelete = () => {
+    setUserBulkDeleteMode(false);
+    setSelectedUserIds(new Set());
+  };
+
+  const handleBulkDeleteUsers = async () => {
+    if (selectedUserIds.size === 0) {
+      return;
+    }
+    if (!window.confirm(`Удалить выбранных пользователей (${selectedUserIds.size})?`)) {
+      return;
+    }
+    setBulkDeletingUsers(true);
+    setError(null);
+    const failures: string[] = [];
+    try {
+      for (const userId of Array.from(selectedUserIds)) {
+        try {
+          await deleteUser(userId);
+        } catch (deleteError) {
+          failures.push(getApiErrorMessage(deleteError, "Не удалось удалить пользователя."));
+        }
+      }
+      setSelectedUserIds(new Set());
+      setUserBulkDeleteMode(false);
+      await loadUsers();
+      if (failures.length) {
+        setError(failures.join("\n"));
+      } else {
+        setInfoMessage("Выбранные пользователи удалены.");
+      }
+    } finally {
+      setBulkDeletingUsers(false);
+    }
+  };
+
   if (loading) {
     return (
       <Box display="flex" justifyContent="center" py={6}>
@@ -243,11 +283,30 @@ export function UsersAdminPage() {
             <Chip label={`Показано: ${filteredUsers.length}`} variant="outlined" />
           </Stack>
         </Stack>
-        <Tooltip title="Действия">
-          <IconButton onClick={(event) => setPageActionsAnchorEl(event.currentTarget)} sx={{ border: "1px solid rgba(126,224,255,0.18)" }}>
-            <MoreVertIcon />
-          </IconButton>
-        </Tooltip>
+        <Stack direction="row" spacing={1} alignItems="center">
+          {userBulkDeleteMode ? (
+            <>
+              <Button
+                size="small"
+                color="error"
+                variant="outlined"
+                startIcon={<DeleteIcon fontSize="small" />}
+                disabled={bulkDeletingUsers || selectedUserIds.size === 0}
+                onClick={() => void handleBulkDeleteUsers()}
+              >
+                Удалить ({selectedUserIds.size})
+              </Button>
+              <Button size="small" variant="outlined" onClick={cancelUserBulkDelete} disabled={bulkDeletingUsers}>
+                Отменить
+              </Button>
+            </>
+          ) : null}
+          <Tooltip title="Действия">
+            <IconButton onClick={(event) => setPageActionsAnchorEl(event.currentTarget)} sx={{ border: "1px solid rgba(126,224,255,0.18)" }}>
+              <MoreVertIcon />
+            </IconButton>
+          </Tooltip>
+        </Stack>
       </Stack>
 
       <Menu
@@ -263,7 +322,19 @@ export function UsersAdminPage() {
             setCreateOpen(true);
           }}
         >
+          <PersonAddAlt1Icon fontSize="small" sx={{ mr: 1 }} />
           Создать пользователя
+        </MenuItem>
+        <MenuItem
+          disabled={!users.length}
+          onClick={() => {
+            closePageActions();
+            setSelectedUserIds(new Set());
+            setUserBulkDeleteMode(true);
+          }}
+        >
+          <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+          Выбрать пользователей для удаления
         </MenuItem>
       </Menu>
 
@@ -274,7 +345,7 @@ export function UsersAdminPage() {
         fullWidth
       />
 
-      <Stack spacing={1.5}>
+      <Stack spacing={0.75}>
         {filteredUsers.map((user) => (
           <Card
             key={user.id}
@@ -292,43 +363,41 @@ export function UsersAdminPage() {
               },
             }}
           >
-            <CardContent sx={{ p: 1.25 }}>
-              <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={1}>
-                <Stack spacing={0.45} sx={{ minWidth: 0 }}>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Avatar src={user.avatar_url ?? undefined} sx={{ width: 32, height: 32, fontSize: 14 }}>
-                      {(user.full_name || user.username)[0]?.toUpperCase()}
-                    </Avatar>
-                    <Stack spacing={0.15} sx={{ minWidth: 0 }}>
-                      <Typography variant="body1" fontWeight={600} noWrap>
-                        {user.full_name || user.username}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary" noWrap>
-                        @{user.username}
-                      </Typography>
-                    </Stack>
-                  </Stack>
-                  <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
-                    <Chip size="small" label={roleLabel(user.role)} />
-                    <Chip
-                      size="small"
-                      label={user.is_active ? "Активен" : "Отключен"}
-                      color={user.is_active ? "success" : "default"}
-                      variant={user.is_active ? "filled" : "outlined"}
-                    />
-                    {user.must_change_password && <Chip size="small" color="warning" label="Требуется смена пароля" />}
-                    {user.tags.map((tag) => (
-                      <Chip key={`${user.id}-${tag}`} size="small" variant="outlined" label={tag} />
-                    ))}
-                  </Stack>
-                  <Typography variant="body2" color="text.secondary" noWrap>
-                    {user.email}
+            <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+              <Stack direction="row" spacing={1.25} alignItems="center">
+                {userBulkDeleteMode ? (
+                  <Checkbox
+                    size="small"
+                    checked={selectedUserIds.has(user.id)}
+                    onChange={() => toggleUserSelection(user.id)}
+                    sx={{ p: 0.25 }}
+                  />
+                ) : null}
+                <Tooltip title={`Создан: ${new Date(user.created_at).toLocaleString()} · ${user.email}`}>
+                  <Avatar src={user.avatar_url ?? undefined} sx={{ width: 36, height: 36, fontSize: 15 }}>
+                    {(user.full_name || user.username)[0]?.toUpperCase()}
+                  </Avatar>
+                </Tooltip>
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1, flexWrap: "wrap", rowGap: 0.5 }}>
+                  <Typography variant="body2" fontWeight={600} noWrap>
+                    {user.full_name || user.username}
                   </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Создан: {new Date(user.created_at).toLocaleString()}
+                  <Typography variant="caption" color="text.secondary" noWrap>
+                    @{user.username}
                   </Typography>
+                  <Chip size="small" label={roleLabel(user.role)} sx={{ height: 20 }} />
+                  <Chip
+                    size="small"
+                    label={user.is_active ? "Активен" : "Отключен"}
+                    color={user.is_active ? "success" : "default"}
+                    variant={user.is_active ? "filled" : "outlined"}
+                    sx={{ height: 20 }}
+                  />
+                  {user.must_change_password && (
+                    <Chip size="small" color="warning" label="Смена пароля" sx={{ height: 20 }} />
+                  )}
                 </Stack>
-                <Stack direction="row" spacing={0.5} alignItems="flex-start">
+                {userBulkDeleteMode ? null : (
                   <IconButton
                     className="user-actions-trigger"
                     size="small"
@@ -339,7 +408,7 @@ export function UsersAdminPage() {
                   >
                     <MoreVertIcon fontSize="small" />
                   </IconButton>
-                </Stack>
+                )}
               </Stack>
             </CardContent>
           </Card>
@@ -396,13 +465,6 @@ export function UsersAdminPage() {
           <TextField label="Email" value={createEmail} onChange={(event) => setCreateEmail(event.target.value)} fullWidth />
           <TextField label="Имя" value={createFullName} onChange={(event) => setCreateFullName(event.target.value)} fullWidth />
           <TextField
-            label="Теги"
-            value={createTagsText}
-            onChange={(event) => setCreateTagsText(event.target.value)}
-            helperText="Через запятую"
-            fullWidth
-          />
-          <TextField
             label="Пароль"
             type="password"
             value={createPassword}
@@ -440,7 +502,6 @@ export function UsersAdminPage() {
           <TextField label="Логин" value={editUsername} onChange={(event) => setEditUsername(event.target.value)} fullWidth />
           <TextField label="Email" value={activeUser?.email ?? ""} fullWidth disabled helperText="Email может изменить только сам пользователь в профиле." />
           <TextField label="Имя" value={editFullName} onChange={(event) => setEditFullName(event.target.value)} fullWidth />
-          <TextField label="Теги" value={editTagsText} onChange={(event) => setEditTagsText(event.target.value)} helperText="Через запятую" fullWidth />
           <TextField select label="Роль" value={editRole} onChange={(event) => setEditRole(event.target.value as UserRole)} fullWidth>
             {ROLE_OPTIONS.map((option) => (
               <MenuItem key={option.value} value={option.value}>

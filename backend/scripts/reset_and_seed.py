@@ -17,7 +17,6 @@ if str(_backend_root) not in sys.path:
 
 from sqlalchemy import text, select
 
-from app.audit_store import audit_store
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.enums import (
@@ -34,23 +33,28 @@ from app.enums import (
     VulnerabilityStatus,
 )
 from app.models import (
+    AgentApiToken,
+    AgentApiTokenProjectGrant,
     AuditLog,
     Comment,
     CommentMention,
     Endpoint,
     File,
     Host,
+    HostIpAddress,
     Notification,
     Port,
     Project,
     ProjectFolder,
     ProjectMember,
+    ProjectNote,
+    ProjectNoteComment,
     Service,
     User,
     Vulnerability,
     VulnerabilityAsset,
 )
-from app.security import hash_password
+from app.security import hash_agent_token, hash_password
 from app.services import UserService
 from app.storage.minio_client import MinioStorage
 
@@ -77,18 +81,6 @@ def reset_minio(minio_keys: list[str]) -> None:
             pass
 
 
-async def reset_clickhouse() -> None:
-    await audit_store.ensure_table()
-    if not audit_store.enabled:
-        return
-    try:
-        client = audit_store._get_client()
-        client.command(f"CREATE DATABASE IF NOT EXISTS {get_settings().clickhouse_database}")
-        client.command("TRUNCATE TABLE audit_logs")
-    except Exception:
-        pass
-
-
 async def create_users() -> dict[str, User]:
     settings = get_settings()
     users: dict[str, User] = {}
@@ -103,8 +95,8 @@ async def create_users() -> dict[str, User]:
             ("alice", "alice@example.com", UserRole.PENTESTER),
             ("bob", "bob@example.com", UserRole.PENTESTER),
             ("charlie", "charlie@example.com", UserRole.PENTESTER),
-            ("diana", "diana@example.com", UserRole.DEVELOPER),
-            ("eve", "eve@example.com", UserRole.DEVELOPER),
+            ("diana", "diana@example.com", UserRole.PENTESTER),
+            ("eve", "eve@example.com", UserRole.PENTESTER),
         ]
         for username, email, role in demo_users:
             user = await db.scalar(select(User).where(User.username == username))
@@ -135,14 +127,19 @@ async def clear_domain_data_preserve_users() -> list[str]:
                     comment_mentions,
                     notifications,
                     comments,
+                    project_note_comments,
+                    project_notes,
                     vulnerability_assets,
                     files,
                     vulnerabilities,
                     services,
                     ports,
                     endpoints,
+                    host_ip_addresses,
                     hosts,
                     project_members,
+                    agent_api_token_project_grants,
+                    agent_api_tokens,
                     projects,
                     project_folders,
                     mail_jobs,
@@ -244,10 +241,109 @@ async def seed_demo_data() -> None:
                 }
             )
 
+            # === Заметки проекта (вложенное дерево из 3 уровней) ===
+            note_root = ProjectNote(
+                project_id=project.id,
+                title=f"Главная страница «{project_name}»",
+                content=(
+                    f"# Обзор проекта «{project_name}»\n\n"
+                    "Это корневая заметка проекта со ссылками на ключевые разделы:\n\n"
+                    "- Цели и скоуп\n"
+                    "- План работ\n"
+                    "- Контактные лица заказчика\n\n"
+                    f"Команда: @{members[0].username if members else admin.username}, "
+                    f"@{members[-1].username if len(members) > 1 else admin.username}.\n"
+                ),
+                sort_order=0,
+                created_by=admin.id,
+                updated_by=admin.id,
+            )
+            db.add(note_root)
+            await db.flush()
+
+            note_methodology = ProjectNote(
+                project_id=project.id,
+                parent_id=note_root.id,
+                title="Методология",
+                content=(
+                    "## Подход\n\n"
+                    "1. Сбор информации (OSINT, поддомены, сертификаты)\n"
+                    "2. Активная разведка (Nmap, DirBuster)\n"
+                    "3. Анализ уязвимостей (SAST/DAST)\n"
+                    "4. Эксплуатация (ручная и автоматизированная)\n"
+                    "5. Подготовка отчёта\n"
+                ),
+                sort_order=1,
+                created_by=admin.id,
+                updated_by=members[0].id if members else admin.id,
+            )
+            db.add(note_methodology)
+            await db.flush()
+
+            note_findings = ProjectNote(
+                project_id=project.id,
+                parent_id=note_root.id,
+                title="Ключевые находки",
+                content=(
+                    "## Top-3\n\n"
+                    "- **SSRF** в loadbalancer (см. уязвимость #1 в overview)\n"
+                    "- **Слабые пароли** на staging\n"
+                    "- **Утечка JWT-секрета** через debug endpoint\n\n"
+                    f"Подробности у @{members[0].username if members else admin.username}.\n"
+                ),
+                sort_order=2,
+                created_by=members[0].id if members else admin.id,
+                updated_by=members[0].id if members else admin.id,
+            )
+            db.add(note_findings)
+            await db.flush()
+
+            note_subpage = ProjectNote(
+                project_id=project.id,
+                parent_id=note_methodology.id,
+                title="Чек-лист инструментов",
+                content=(
+                    "- nmap 7.94\n- gobuster 3.6\n- sqlmap 1.7\n- Burp Suite Pro\n- ZAP\n"
+                ),
+                sort_order=0,
+                created_by=members[0].id if members else admin.id,
+                updated_by=members[0].id if members else admin.id,
+            )
+            db.add(note_subpage)
+            await db.flush()
+
+            # === Комментарии к заметкам, с упоминанием → уведомление ===
+            commenter_note = members[1] if len(members) > 1 else admin
+            mentioned_note = members[0] if members else admin
+            note_comment = ProjectNoteComment(
+                project_id=project.id,
+                note_id=note_findings.id,
+                user_id=commenter_note.id,
+                content=f"@{mentioned_note.username} обрати внимание на SSRF — нужна повторная проверка после фикса.",
+            )
+            db.add(note_comment)
+            await db.flush()
+            db.add(
+                Notification(
+                    user_id=mentioned_note.id,
+                    type=NotificationType.MENTION,
+                    note_comment_id=note_comment.id,
+                    is_read=False,
+                )
+            )
+            note_comment_extra = ProjectNoteComment(
+                project_id=project.id,
+                note_id=note_root.id,
+                user_id=admin.id,
+                content="Скоуп подтверждён. Можно стартовать активную фазу.",
+            )
+            db.add(note_comment_extra)
+
             for host_index in range(1, 4):
+                primary_ip = f"10.{project_index}.{host_index}.10"
                 host = Host(
                     project_id=project.id,
-                    ip_address=f"10.{project_index}.{host_index}.10",
+                    ip_address=primary_ip,
                     hostname=f"{project_name.lower().replace(' ', '-')}-host-{host_index}.demo.local",
                     status=HostStatus.UP if host_index != 2 else HostStatus.UNKNOWN,
                     notes=f"Описание тестового хоста {host_index} для проекта {project_name}.",
@@ -255,14 +351,38 @@ async def seed_demo_data() -> None:
                 db.add(host)
                 await db.flush()
 
-                ports_for_host: list[Port] = []
-                for port_number, protocol, state, service_name, version in [
-                    (22, Protocol.TCP, PortState.OPEN, "ssh", "OpenSSH_9.6"),
-                    (80, Protocol.TCP, PortState.OPEN, "http", "nginx/1.25"),
-                    (443, Protocol.TCP, PortState.OPEN, "https", "nginx/1.25"),
-                    (8080, Protocol.TCP, PortState.FILTERED if host_index == 3 else PortState.OPEN, "tomcat", "10.1"),
+                # Несколько IP у хоста (внутренний/внешний/management) — проверка таблицы host_ip_addresses.
+                host_ip_rows: dict[str, HostIpAddress] = {}
+                for ip_suffix, label, is_primary in [
+                    (primary_ip, "external", True),
+                    (f"10.{project_index}.{host_index}.20", "internal", False),
+                    (f"172.16.{project_index}.{host_index}", "mgmt", False),
                 ]:
-                    port = Port(host_id=host.id, port_number=port_number, protocol=protocol, state=state)
+                    ip_row = HostIpAddress(
+                        host_id=host.id,
+                        ip_address=ip_suffix,
+                        label=label,
+                        is_primary=is_primary,
+                    )
+                    db.add(ip_row)
+                    host_ip_rows[label] = ip_row
+                await db.flush()
+
+                ports_for_host: list[Port] = []
+                for port_number, protocol, state, service_name, version, ip_label in [
+                    (22, Protocol.TCP, PortState.OPEN, "ssh", "OpenSSH_9.6", "mgmt"),
+                    (80, Protocol.TCP, PortState.OPEN, "http", "nginx/1.25", "external"),
+                    (443, Protocol.TCP, PortState.OPEN, "https", "nginx/1.25", "external"),
+                    (8080, Protocol.TCP, PortState.FILTERED if host_index == 3 else PortState.OPEN, "tomcat", "10.1", "internal"),
+                ]:
+                    target_ip = host_ip_rows[ip_label]
+                    port = Port(
+                        host_id=host.id,
+                        ip_address_id=target_ip.id,
+                        port_number=port_number,
+                        protocol=protocol,
+                        state=state,
+                    )
                     db.add(port)
                     await db.flush()
                     ports_for_host.append(port)
@@ -374,6 +494,33 @@ async def seed_demo_data() -> None:
                         }
                     )
 
+        # === API-токены агента: 2 шт. — один на все проекты, один на конкретный ===
+        all_proj_token_raw = "demo-agent-token-allprojects-0001"
+        all_proj_token = AgentApiToken(
+            name="Demo: все проекты",
+            token_hash=hash_agent_token(all_proj_token_raw),
+            token_prefix=all_proj_token_raw[:8],
+            scopes=["projects:read", "assets:read", "notes:read", "vulns:read"],
+            all_projects=True,
+            created_by=admin.id,
+        )
+        db.add(all_proj_token)
+
+        first_project = await db.scalar(select(Project).order_by(Project.created_at.asc()))
+        scoped_token_raw = "demo-agent-token-scoped-0002"
+        scoped_token = AgentApiToken(
+            name="Demo: один проект (read-only)",
+            token_hash=hash_agent_token(scoped_token_raw),
+            token_prefix=scoped_token_raw[:8],
+            scopes=["projects:read", "vulns:read", "notes:read"],
+            all_projects=False,
+            created_by=admin.id,
+        )
+        db.add(scoped_token)
+        await db.flush()
+        if first_project:
+            db.add(AgentApiTokenProjectGrant(token_id=scoped_token.id, project_id=first_project.id))
+
         for row in audit_rows:
             db.add(
                 AuditLog(
@@ -389,24 +536,11 @@ async def seed_demo_data() -> None:
 
         await db.commit()
 
-    for row in audit_rows:
-        await audit_store.insert(
-            user_id=row["user_id"],
-            username=row["username"],
-            action=row["action"],
-            entity_type=row["entity_type"],
-            entity_id=row["entity_id"],
-            details=row["details"],
-            ip_address=row["ip_address"],
-            created_at=row["created_at"],
-        )
-
 
 async def main() -> None:
     await ensure_schema()
     minio_keys = await clear_domain_data_preserve_users()
     reset_minio(minio_keys)
-    await reset_clickhouse()
     await seed_demo_data()
     print("Database reseed complete. Existing users were preserved; demo data for projects/assets/vulnerabilities was refreshed.")
 

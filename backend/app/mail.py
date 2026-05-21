@@ -1,4 +1,5 @@
 from email.message import EmailMessage
+from email.utils import formataddr
 
 import aiosmtplib
 
@@ -21,12 +22,13 @@ def build_temporary_password_email(*, username: str, temporary_password: str) ->
 
 async def send_plain_text_email(*, recipient_email: str, subject: str, body: str) -> None:
     message = EmailMessage()
-    message["From"] = f"{settings.smtp_from_name} <{settings.smtp_from_email}>"
+    # formataddr корректно кодирует кириллицу и спец-символы в display name
+    # (RFC 2047/5322). Прямая f-string «{name} <{email}>» ломалась бы на запятых.
+    message["From"] = formataddr((settings.smtp_from_name, settings.smtp_from_email))
     message["To"] = recipient_email
     message["Subject"] = subject
     message.set_content(body, charset="utf-8")
-    # For port 465 use implicit TLS (use_tls=True, start_tls=False).
-    # For STARTTLS-enabled servers (e.g. 587), use start_tls=True.
+    # Порт 465 → implicit TLS (use_tls=True). Порт 587 → STARTTLS (start_tls=True).
     use_tls = bool(settings.smtp_use_ssl)
     start_tls = bool(settings.smtp_use_tls) and not use_tls
     await aiosmtplib.send(

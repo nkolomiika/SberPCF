@@ -32,6 +32,20 @@ async def list_project_notes(
     return [ProjectNoteOut.model_validate(item) for item in items]
 
 
+@router.get("/projects/{project_id}/notes-activity", response_model=list[dict])
+async def list_project_notes_activity(
+    project_id: UUID,
+    limit: int = Query(30, ge=1, le=200),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Журнал действий с заметками проекта (CREATE/UPDATE/DELETE)
+    с никнеймами авторов. Видим всем, у кого есть доступ к проекту,
+    в отличие от глобального /audit-logs (только для админов)."""
+    items = await ProjectNoteService(db).list_activity(project_id, limit=limit)
+    return items
+
+
 @router.post("/projects/{project_id}/notes", response_model=ProjectNoteOut, status_code=status.HTTP_201_CREATED)
 async def create_project_note(
     project_id: UUID,

@@ -14,7 +14,6 @@ const { navigate, forceChangePassword, setUser, signOut, authState } = vi.hoiste
       username: "temp-user",
       email: "temp@example.com",
       full_name: null,
-      tags: [],
       avatar_url: null,
       role: "pentester" as const,
       is_active: true,

@@ -25,7 +25,9 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 @router.get("", response_model=dict)
 async def list_projects(
     page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=200),
+    # Лимит до 1000 — нужен для select-всех в UI (например, диалог токенов API),
+    # где админу удобно один раз подтянуть весь каталог проектов и фильтровать локально.
+    size: int = Query(20, ge=1, le=1000),
     status_filter: str | None = Query(None, alias="status"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

@@ -12,7 +12,6 @@ services:
     depends_on:
       - db
       - minio
-      - clickhouse
       - rabbitmq
     volumes:
       - ./backend:/app
@@ -73,17 +72,6 @@ services:
     volumes:
       - miniodata:/data
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    environment:
-      CLICKHOUSE_DB: pcf
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: clickhouse_dev_password
-    ports:
-      - "8123:8123"
-    volumes:
-      - clickhousedata:/var/lib/clickhouse
-
   rabbitmq:
     image: rabbitmq:3-management
     environment:
@@ -106,4 +94,3 @@ services:
 volumes:
   pgdata:
   miniodata:
-  clickhousedata:

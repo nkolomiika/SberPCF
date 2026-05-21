@@ -81,7 +81,14 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config;
     const requestUrl = String(originalRequest?.url ?? "");
-    const shouldSkipRefresh = requestUrl.includes("/auth/refresh") || requestUrl.includes("/users/me");
+    // /auth/login и /auth/refresh — сами по себе попытки аутентификации;
+    // 401 здесь = «неверные креды / refresh-токен», а не «сессия истекла»,
+    // повторный refresh замаскирует настоящую ошибку.
+    // /users/me на старте — проверка наличия сессии: 401 ожидаем, без авторефреша.
+    const shouldSkipRefresh =
+      requestUrl.includes("/auth/login") ||
+      requestUrl.includes("/auth/refresh") ||
+      requestUrl.includes("/users/me");
     if (error.response?.status === 401 && !originalRequest?._retry && !shouldSkipRefresh) {
       originalRequest._retry = true;
       if (isRefreshing) {
@@ -130,7 +137,6 @@ export async function createUser(payload: {
   username: string;
   email: string;
   full_name?: string;
-  tags?: string[];
   password?: string;
   role: User["role"];
   send_invite_email?: boolean;
@@ -146,7 +152,6 @@ export async function updateUser(
   payload: {
     username?: string;
     full_name?: string;
-    tags?: string[];
     role?: User["role"];
     is_active?: boolean;
   }
@@ -168,7 +173,6 @@ export async function updateMyProfile(payload: {
   username?: string;
   email?: string;
   full_name?: string;
-  tags?: string[];
 }): Promise<User> {
   const { data } = await api.patch<User>("/users/me", payload);
   return data;
@@ -281,6 +285,27 @@ export async function removeProjectMember(projectId: string, userId: string): Pr
 
 export async function listProjectNotes(projectId: string): Promise<ProjectNote[]> {
   const { data } = await api.get<ProjectNote[]>(`/projects/${projectId}/notes`);
+  return data;
+}
+
+export type ProjectNoteActivity = {
+  id: string;
+  action: "CREATE" | "UPDATE" | "DELETE";
+  note_id: string | null;
+  note_title: string | null;
+  user_id: string | null;
+  username: string | null;
+  created_at: string;
+};
+
+export async function listProjectNotesActivity(
+  projectId: string,
+  limit = 30,
+): Promise<ProjectNoteActivity[]> {
+  const { data } = await api.get<ProjectNoteActivity[]>(
+    `/projects/${projectId}/notes-activity`,
+    { params: { limit } },
+  );
   return data;
 }
 
@@ -406,7 +431,7 @@ export async function updateHost(
     ip_address?: string;
     ip_addresses?: Array<{ ip_address: string; label?: string | null; is_primary?: boolean }>;
     hostname?: string;
-    notes?: string;
+    notes?: string | null;
     status?: "up" | "down" | "unknown";
   }
 ): Promise<Host> {
@@ -427,6 +452,7 @@ export async function createPort(
   projectId: string,
   hostId: string,
   payload: {
+    ip_address_id: string;
     port_number: number;
     protocol?: "tcp" | "udp";
     state?: "open" | "closed" | "filtered";
@@ -434,6 +460,9 @@ export async function createPort(
 ): Promise<Port> {
   if (!Number.isFinite(payload.port_number)) {
     throw new Error("Порт должен быть числом");
+  }
+  if (!payload.ip_address_id) {
+    throw new Error("Не выбран IP-адрес");
   }
   const { data } = await api.post<Port>(`/projects/${projectId}/hosts/${hostId}/ports`, payload);
   return data;
@@ -444,6 +473,7 @@ export async function updatePort(
   hostId: string,
   portId: string,
   payload: {
+    ip_address_id?: string;
     port_number?: number;
     protocol?: "tcp" | "udp";
     state?: "open" | "closed" | "filtered";

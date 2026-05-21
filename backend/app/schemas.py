@@ -59,7 +59,9 @@ class RefreshResponse(BaseModel):
 
 
 class AgentTokenCreate(InputBaseModel):
-    name: str = Field(min_length=1, max_length=255)
+    # Длину названия не ограничиваем — колонка в БД переведена в TEXT, юзеры
+    # часто описывают токен длинным расшифровывающим именем (для какого скрипта/CI/команды).
+    name: str = Field(min_length=1)
     scopes: list[str] = Field(default_factory=list)
     project_ids: list[UUID] = Field(default_factory=list)
     all_projects: bool = False
@@ -89,7 +91,6 @@ class UserCreate(InputBaseModel):
     username: str = Field(min_length=1, max_length=100)
     email: EmailStr
     full_name: str | None = Field(default=None, max_length=255)
-    tags: list[str] = Field(default_factory=list)
     password: str | None = Field(default=None, min_length=8, max_length=128)
     role: UserRole = UserRole.PENTESTER
     send_invite_email: bool = False
@@ -99,7 +100,6 @@ class UserUpdate(InputBaseModel):
     username: str | None = Field(default=None, min_length=1, max_length=100)
     email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=255)
-    tags: list[str] | None = None
     role: UserRole | None = None
     is_active: bool | None = None
 
@@ -108,7 +108,6 @@ class UserProfileUpdate(InputBaseModel):
     username: str | None = Field(default=None, min_length=1, max_length=100)
     email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=255)
-    tags: list[str] | None = None
 
 
 class OwnPasswordChangeRequest(InputBaseModel):
@@ -132,7 +131,6 @@ class UserOut(ORMBase):
     username: str
     email: EmailStr
     full_name: str | None = None
-    tags: list[str] = Field(default_factory=list)
     avatar_url: str | None = None
     role: UserRole
     is_active: bool
@@ -316,6 +314,7 @@ class HostIpAddressOut(ORMBase):
     ip_address: str
     label: str | None
     is_primary: bool
+    ports: list["PortOut"] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -372,12 +371,14 @@ class HostOut(ORMBase):
 
 
 class PortCreate(InputBaseModel):
+    ip_address_id: UUID
     port_number: int = Field(ge=1, le=65535)
     protocol: Protocol = Protocol.TCP
     state: PortState = PortState.OPEN
 
 
 class PortUpdate(InputBaseModel):
+    ip_address_id: UUID | None = None
     port_number: int | None = Field(default=None, ge=1, le=65535)
     protocol: Protocol | None = None
     state: PortState | None = None
@@ -386,11 +387,15 @@ class PortUpdate(InputBaseModel):
 class PortOut(ORMBase):
     id: UUID
     host_id: UUID
+    ip_address_id: UUID
     port_number: int
     protocol: Protocol
     state: PortState
     created_at: datetime
     updated_at: datetime
+
+
+HostIpAddressOut.model_rebuild()
 
 
 class ServiceCreate(InputBaseModel):
@@ -416,14 +421,16 @@ class ServiceOut(ORMBase):
 
 
 class EndpointQueryParam(InputBaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    # Длину имени параметра не ограничиваем — у некоторых API названия параметров
+    # довольно длинные (полные имена флагов/фич). Минимум 1 — нужен непустой ключ.
+    name: str = Field(min_length=1)
     value: str | None = None
     required: bool = False
     description: str | None = None
 
 
 class EndpointRequestHeader(InputBaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1)
     value: str = ""
 
 
@@ -620,6 +627,9 @@ class ProjectNoteCommentOut(ORMBase):
 class NotificationContext(BaseModel):
     vulnerability_id: UUID | None = None
     vulnerability_title: str | None = None
+    # Поля для упоминаний в комментариях заметок (вместо уязвимостей).
+    note_id: UUID | None = None
+    note_title: str | None = None
     project_id: UUID | None = None
     host_id: UUID | None = None
     commenter_username: str | None = None
@@ -629,6 +639,8 @@ class NotificationOut(ORMBase):
     id: UUID
     type: str
     comment_id: UUID | None
+    # ID комментария заметки — для упоминаний в обсуждениях заметок.
+    note_comment_id: UUID | None = None
     is_read: bool
     created_at: datetime
     context: NotificationContext | None = None

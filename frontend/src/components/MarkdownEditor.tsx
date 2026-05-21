@@ -94,7 +94,22 @@ export function MarkdownEditor({
         if (!src) {
           return;
         }
-        editorRef.current?.chain().focus().setImage({ src, alt }).run();
+        // setImage() в одиночку оставляет селекшен как NodeSelection на картинке —
+        // если юзер начинает печатать, ProseMirror замещает выделенный узел текстом
+        // и картинка пропадает. Поэтому вставляем картинку и пустой параграф
+        // одной операцией, а потом ставим курсор в конец вставленного — туда же,
+        // где образовался пустой параграф.
+        const editor = editorRef.current;
+        if (!editor) return;
+        editor
+          .chain()
+          .focus()
+          .insertContent([
+            { type: "image", attrs: { src, alt } },
+            { type: "paragraph" },
+          ])
+          .focus("end")
+          .run();
       } catch {
         /* noop */
       }

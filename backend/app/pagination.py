@@ -7,10 +7,16 @@ T = TypeVar("T")
 
 
 class PageParams(BaseModel):
-    """Параметры offset-пагинации."""
+    """Параметры offset-пагинации.
+
+    Верхняя граница совпадает с самой большой `le=` в роутах
+    (например, `GET /projects` отдаёт до 1000 для admin-диалогов выбора всех
+    проектов в API-токенах). Раньше тут стоял `le=200`, из-за чего роут с
+    `le=1000` отдавал 500 при `size>200` на этапе сборки PaginatedResponse.
+    """
 
     page: int = Field(default=1, ge=1)
-    size: int = Field(default=20, ge=1, le=200)
+    size: int = Field(default=20, ge=1, le=1000)
 
     @property
     def offset(self) -> int:

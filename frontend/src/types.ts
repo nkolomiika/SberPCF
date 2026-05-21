@@ -1,11 +1,10 @@
-export type UserRole = "admin" | "pentester" | "developer";
+export type UserRole = "admin" | "pentester";
 
 export interface User {
   id: string;
   username: string;
   email: string;
   full_name: string | null;
-  tags: string[];
   avatar_url: string | null;
   role: UserRole;
   is_active: boolean;
@@ -106,6 +105,7 @@ export interface HostIpAddress {
   ip_address: string;
   label: string | null;
   is_primary: boolean;
+  ports: Port[];
   created_at: string;
   updated_at: string;
 }
@@ -128,7 +128,6 @@ export const OS_TYPE_OPTIONS: { value: OsType; label: string }[] = [
   { value: "android", label: "Android" },
   { value: "ios", label: "iOS" },
   { value: "other", label: "Другая" },
-  { value: "unknown", label: "Неизвестно" },
 ];
 
 export interface Host {
@@ -145,12 +144,12 @@ export interface Host {
 }
 
 export interface HostDetails extends Host {
-  ports: Port[];
   endpoints: Endpoint[];
 }
 
 export interface HostTreeStats {
   portsCount: number;
+  ipAddressesCount: number;
   endpointsCount: number;
   vulnerabilitiesCount: number;
 }
@@ -158,6 +157,7 @@ export interface HostTreeStats {
 export interface Port {
   id: string;
   host_id: string;
+  ip_address_id: string;
   port_number: number;
   protocol: "tcp" | "udp";
   state: "open" | "closed" | "filtered";
@@ -288,11 +288,14 @@ export interface Notification {
   id: string;
   type: string;
   comment_id: string | null;
+  note_comment_id: string | null;
   is_read: boolean;
   created_at: string;
   context: {
     vulnerability_id: string | null;
     vulnerability_title: string | null;
+    note_id: string | null;
+    note_title: string | null;
     project_id: string | null;
     host_id: string | null;
     commenter_username: string | null;

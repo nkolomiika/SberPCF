@@ -34,14 +34,6 @@ class Settings(BaseSettings):
     initial_admin_email: str = "admin@example.com"
     initial_admin_password: str = "admin"
 
-    audit_log_backend: str = "clickhouse"
-    clickhouse_host: str = "clickhouse"
-    clickhouse_port: int = 8123
-    clickhouse_database: str = "pcf"
-    clickhouse_username: str = "default"
-    clickhouse_password: str = ""
-    clickhouse_secure: bool = False
-
     rabbitmq_url: str = "amqp://guest:guest@rabbitmq/"
     mail_queue_name: str = "pcf.mail"
     mail_enabled: bool = True

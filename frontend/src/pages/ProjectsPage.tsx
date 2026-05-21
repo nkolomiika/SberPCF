@@ -12,13 +12,12 @@ import {
   Box,
   Button,
   Chip,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
   List,
-  ListItemButton,
   ListItemIcon,
   ListItemText,
   Menu,
@@ -28,7 +27,7 @@ import {
   Typography,
   IconButton,
 } from "@mui/material";
-import { type DragEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type DragEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   addProjectMember,
@@ -224,7 +223,7 @@ export function ProjectsPage() {
       node.children.forEach(sortTree);
     };
     sortTree(root);
-    return root.children;
+    return { rootProjects: root.projects, topFolders: root.children };
   }, [folderPaths, folders, visibleProjects]);
 
   const folderPathById = useMemo(() => {
@@ -667,6 +666,78 @@ export function ProjectsPage() {
     return node.projects.length + node.children.reduce((total, child) => total + getNestedProjectsCount(child), 0);
   };
 
+  const renderProjectRow = (project: Project, depth: number, parentNode: FolderTreeNode): JSX.Element => (
+    <Fragment key={project.id}>
+      {renderDropLine(parentNode, `before-project:${project.id}`, depth)}
+      <Stack
+        direction="row"
+        alignItems="center"
+        justifyContent="space-between"
+        draggable={user?.role === "admin"}
+        onDragStart={(event) => {
+          setDraggingFolderId(null);
+          setDraggingFolderPath(null);
+          setDraggingProjectId(project.id);
+          prepareDragPayload(event, "project", project.id);
+        }}
+        onDragEnd={() => {
+          setDraggingProjectId(null);
+          setDragOverFolderPath(null);
+          setDropLineTarget(null);
+          setDraggingType(null);
+          stopAutoScroll();
+          stopAutoExpand();
+        }}
+        onClick={() => navigate(`/projects/${project.id}`)}
+        sx={{
+          px: 1.2,
+          py: 0.75,
+          pl: 1.2 + depth * 2.1,
+          cursor: "pointer",
+          borderRadius: 0,
+          "& .project-actions": {
+            opacity: 0,
+            pointerEvents: "none",
+            transition: "opacity 0.15s ease-in-out",
+          },
+          "&:hover": {
+            backgroundColor: "rgba(126,224,255,0.06)",
+          },
+          "&:hover .project-actions": {
+            opacity: 1,
+            pointerEvents: "auto",
+          },
+        }}
+      >
+        <Stack direction="row" spacing={0.8} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
+          <DescriptionOutlinedIcon fontSize="small" sx={{ color: "text.secondary" }} />
+          <Typography fontWeight={500} noWrap>
+            {project.name}
+          </Typography>
+          <Chip size="small" label={PROJECT_STATUS_LABELS[project.status]} sx={PROJECT_STATUS_CHIP_SX[project.status]} />
+          <Typography variant="caption" color="text.secondary" noWrap>
+            {project.start_date || "дата не задана"}
+          </Typography>
+        </Stack>
+        {user?.role === "admin" && (
+          <Stack direction="row" alignItems="center" className="project-actions">
+            <IconButton
+              size="small"
+              aria-label="Действия проекта"
+              onClick={(event) => {
+                event.stopPropagation();
+                openProjectActions(event, project);
+              }}
+              sx={{ width: 28, height: 28, "&:hover": { backgroundColor: "transparent" } }}
+            >
+              <MoreVertIcon fontSize="small" />
+            </IconButton>
+          </Stack>
+        )}
+      </Stack>
+    </Fragment>
+  );
+
   const renderFolderNode = (node: FolderTreeNode, depth = 0, parentNode: FolderTreeNode = ROOT_FOLDER_NODE): JSX.Element => (
     <Box key={node.path}>
       {renderDropLine(parentNode, `before-folder:${node.path}`, depth)}
@@ -755,17 +826,15 @@ export function ProjectsPage() {
           px: 1.2,
           py: 0.75,
           pl: 1.2 + depth * 2.1,
-          backgroundColor:
-            isFolderDropActive
-              ? "rgba(126,224,255,0.14)"
-              : depth === 0
-                ? "rgba(126,224,255,0.06)"
-                : "transparent",
+          backgroundColor: isFolderDropActive ? "rgba(126,224,255,0.14)" : "transparent",
           borderRadius: 0,
           "& .folder-actions": {
             opacity: 0,
             pointerEvents: "none",
             transition: "opacity 0.15s ease-in-out",
+          },
+          "&:hover": {
+            backgroundColor: isFolderDropActive ? "rgba(126,224,255,0.14)" : "rgba(126,224,255,0.06)",
           },
           "&:hover .folder-actions": {
             opacity: 1,
@@ -787,11 +856,16 @@ export function ProjectsPage() {
           }}
         >
           {hasNestedContent ? (
-            isExpanded ? (
-              <ExpandMoreIcon fontSize="small" sx={{ color: "text.secondary" }} />
-            ) : (
-              <ChevronRightIcon fontSize="small" sx={{ color: "text.secondary" }} />
-            )
+            // Один и тот же ExpandMoreIcon: открыто = 0deg, закрыто = −90deg.
+            // Плавная transition на rotate синхронизирует поворот с анимацией Collapse.
+            <ExpandMoreIcon
+              fontSize="small"
+              sx={{
+                color: "text.secondary",
+                transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)",
+                transition: "transform .22s ease",
+              }}
+            />
           ) : (
             <Box sx={{ width: 20, height: 20 }} />
           )}
@@ -814,7 +888,7 @@ export function ProjectsPage() {
               size="small"
               aria-label="Действия папки"
               onClick={(event) => openFolderActions(event, node)}
-              sx={{ width: 28, height: 28 }}
+              sx={{ width: 28, height: 28, "&:hover": { backgroundColor: "transparent" } }}
             >
               <MoreVertIcon fontSize="small" />
             </IconButton>
@@ -823,87 +897,22 @@ export function ProjectsPage() {
       </Stack>
         );
       })()}
-      {expandedFolderPaths.includes(node.path) && (
-        <>
-      {node.projects.map((project) => (
-        <Box key={project.id}>
-          {renderDropLine(node, `before-project:${project.id}`, depth + 1)}
-          <Stack
-            direction="row"
-            alignItems="center"
-            justifyContent="space-between"
-            draggable={user?.role === "admin"}
-            onDragStart={(event) => {
-              setDraggingFolderId(null);
-              setDraggingFolderPath(null);
-              setDraggingProjectId(project.id);
-              prepareDragPayload(event, "project", project.id);
-            }}
-            onDragEnd={() => {
-              setDraggingProjectId(null);
-              setDragOverFolderPath(null);
-              setDropLineTarget(null);
-              setDraggingType(null);
-              stopAutoScroll();
-              stopAutoExpand();
-            }}
-            sx={{
-              "& .project-actions": {
-                opacity: 0,
-                pointerEvents: "none",
-                transition: "opacity 0.15s ease-in-out",
-              },
-              "&:hover .project-actions": {
-                opacity: 1,
-                pointerEvents: "auto",
-              },
-            borderRadius: 0,
-            "&:hover": {
-              backgroundColor: "rgba(126,224,255,0.06)",
-            },
-            }}
-          >
-            <ListItemButton sx={{ py: 1, pl: 4 + depth * 2, borderRadius: 0 }} onClick={() => navigate(`/projects/${project.id}`)}>
-              <ListItemIcon sx={{ minWidth: 32 }}>
-                <DescriptionOutlinedIcon fontSize="small" color="action" />
-              </ListItemIcon>
-              <ListItemText
-                primary={project.name}
-                secondaryTypographyProps={{ component: "div" }}
-                secondary={
-                  <Stack direction={{ xs: "column", md: "row" }} spacing={{ xs: 0.5, md: 1.5 }} alignItems={{ md: "center" }}>
-                    <Chip size="small" label={PROJECT_STATUS_LABELS[project.status]} sx={PROJECT_STATUS_CHIP_SX[project.status]} />
-                    <Typography variant="caption" color="text.secondary">
-                      {project.start_date || "дата не задана"}
-                    </Typography>
-                  </Stack>
-                }
-              />
-            </ListItemButton>
-            {user?.role === "admin" && (
-              <Stack direction="row" alignItems="center" className="project-actions" sx={{ pr: 0.5 }}>
-                <IconButton
-                  size="small"
-                  aria-label="Действия проекта"
-                  onClick={(event) => openProjectActions(event, project)}
-                  sx={{ width: 28, height: 28 }}
-                >
-                  <MoreVertIcon fontSize="small" />
-                </IconButton>
-              </Stack>
-            )}
-          </Stack>
-        </Box>
-      ))}
+      {/*
+        Плавное раскрытие/сворачивание содержимого папки. mountOnEnter,
+        чтобы скрытые папки не рендерились до первого раскрытия (важно для
+        крупных проектных деревьев).
+      */}
+      <Collapse in={expandedFolderPaths.includes(node.path)} timeout={240} mountOnEnter>
+        <Box>
+      {node.projects.map((project) => renderProjectRow(project, depth + 1, node))}
       {node.children.map((child) => (
         <Box key={child.path} sx={{ pl: 0.8 }}>
           {renderFolderNode(child, depth + 1, node)}
         </Box>
       ))}
       {renderDropLine(node, `after-folder-content:${node.path}`, depth + 1)}
-        </>
-      )}
-      {depth === 0 && <Divider />}
+        </Box>
+      </Collapse>
     </Box>
   );
 
@@ -1157,9 +1166,10 @@ export function ProjectsPage() {
         }}
       >
         {renderDropLine(ROOT_FOLDER_NODE, "root-drop-line", 0)}
-        {groupedProjects.map((node) => renderFolderNode(node))}
+        {groupedProjects.rootProjects.map((project) => renderProjectRow(project, 0, ROOT_FOLDER_NODE))}
+        {groupedProjects.topFolders.map((node) => renderFolderNode(node))}
         {renderDropLine(ROOT_FOLDER_NODE, "root-drop-line-end", 0)}
-        {groupedProjects.length === 0 && (
+        {groupedProjects.rootProjects.length === 0 && groupedProjects.topFolders.length === 0 && (
           <Box sx={{ px: 2, py: 2 }}>
             <Typography color="text.secondary">Проекты не найдены.</Typography>
           </Box>

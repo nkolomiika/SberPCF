@@ -35,6 +35,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   isInitialized: false,
   error: null,
   initialize: async () => {
+    // На странице логина смысла дёргать /users/me нет — пользователь явно
+    // не авторизован, лишний 401 в DevTools только сбивает с толку.
+    if (typeof window !== "undefined" && window.location.pathname === "/login") {
+      set({ user: null, isInitialized: true, isLoading: false, error: null });
+      return;
+    }
     set({ isLoading: true, error: null });
     try {
       const me = await getMe();

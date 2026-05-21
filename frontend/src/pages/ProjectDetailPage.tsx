@@ -22,6 +22,7 @@ import {
   Divider,
   Grid2 as Grid,
   IconButton,
+  LinearProgress,
   List,
   ListItem,
   ListItemText,
@@ -33,7 +34,7 @@ import {
 } from "@mui/material";
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { MarkdownImage } from "../components/MarkdownImage";
 import { MarkdownOutlinedReadonlyField } from "../components/MarkdownOutlinedReadonlyField";
@@ -61,6 +62,8 @@ import {
   getVulnerability,
   importProjectData,
   listProjectNotes,
+  listProjectNotesActivity,
+  type ProjectNoteActivity,
   listVulnerabilityComments,
   moveProjectNote,
   removeProjectMember,
@@ -173,8 +176,19 @@ const parseIsoDateTimeToDateOnly = (value: string | null) => {
 };
 
 export function ProjectDetailPage() {
-  const { projectId } = useParams<{ projectId: string }>();
+  const { projectId, noteId: urlNoteId } = useParams<{ projectId: string; noteId?: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Section определяется по URL: /projects/:id/notes(/:noteId?) → notes,
+  // /projects/:id/hosts → hosts, иначе overview. Это позволяет шарить ссылки
+  // на конкретные разделы и заметки.
+  const sectionFromUrl: DetailSection = useMemo(() => {
+    const path = location.pathname;
+    if (/\/projects\/[^/]+\/notes(\/|$)/.test(path)) return "notes";
+    if (/\/projects\/[^/]+\/hosts$/.test(path)) return "hosts";
+    return "overview";
+  }, [location.pathname]);
   const user = useAuthStore((s) => s.user);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [ports, setPorts] = useState<Port[]>([]);
@@ -183,11 +197,46 @@ export function ProjectDetailPage() {
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
   const [projectVulnerabilities, setProjectVulnerabilities] = useState<Vulnerability[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Инициализация selectedSection/selectedNoteId — приоритет:
+  // URL > location.state (fallback на legacy-навигацию) > "overview". URL —
+  // источник истины, поэтому шаринг ссылок «всегда работает».
+  const initialNavState = (location.state ?? null) as
+    | {
+        section?: DetailSection;
+        noteId?: string | null;
+        clearNote?: boolean;
+        highlightNoteCommentId?: string | null;
+      }
+    | null;
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
-  const [selectedSection, setSelectedSection] = useState<DetailSection>("overview");
+  const [selectedSection, setSelectedSection] = useState<DetailSection>(
+    () => sectionFromUrl ?? (initialNavState?.section as DetailSection | undefined) ?? "overview",
+  );
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [notesActivity, setNotesActivity] = useState<ProjectNoteActivity[]>([]);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(() => {
+    // URL имеет приоритет: /projects/:id/notes/:noteId → noteId.
+    if (urlNoteId) return urlNoteId;
+    if (initialNavState?.section === "notes") {
+      if (initialNavState.clearNote) return null;
+      if (initialNavState.noteId !== undefined) return initialNavState.noteId ?? null;
+    }
+    return null;
+  });
+  // Состояние для платформенного диалога создания/переименования заметки.
+  // Заменяет window.prompt — единый стиль с остальными модалками проекта.
+  const [noteDialogMode, setNoteDialogMode] = useState<"create" | "rename" | null>(null);
+  const [noteDialogParentId, setNoteDialogParentId] = useState<string | null>(null);
+  const [noteDialogNoteId, setNoteDialogNoteId] = useState<string | null>(null);
+  const [noteDialogTitle, setNoteDialogTitle] = useState("");
+  const [noteDialogBusy, setNoteDialogBusy] = useState(false);
+  const [noteDeleteDialogNoteId, setNoteDeleteDialogNoteId] = useState<string | null>(null);
+  const [noteDeleteBusy, setNoteDeleteBusy] = useState(false);
+  // Меню «троеточие» в шапке для секций «Хосты» и «Заметки» (тот же UX,
+  // что у actionsAnchorEl для секции «Обзор»).
+  const [hostsSectionMenuAnchor, setHostsSectionMenuAnchor] = useState<HTMLElement | null>(null);
+  const [notesSectionMenuAnchor, setNotesSectionMenuAnchor] = useState<HTMLElement | null>(null);
   const [projectName, setProjectName] = useState<string>("");
   const [projectDescription, setProjectDescription] = useState<string>("");
   const [projectStatus, setProjectStatus] = useState<ProjectStatus>("active");
@@ -228,7 +277,8 @@ export function ProjectDetailPage() {
   const storagePrefix = projectId ? `project-detail:${projectId}` : null;
 
   const [hostOpen, setHostOpen] = useState(false);
-  const [removeHostsDialogOpen, setRemoveHostsDialogOpen] = useState(false);
+  const [hostsBulkDeleteMode, setHostsBulkDeleteMode] = useState(false);
+  const [hostsBulkDeleting, setHostsBulkDeleting] = useState(false);
   const [selectedHostIds, setSelectedHostIds] = useState<string[]>([]);
   const [hostIp, setHostIp] = useState("");
   const [hostName, setHostName] = useState("");
@@ -282,11 +332,15 @@ export function ProjectDetailPage() {
       return;
     }
     try {
-      const [hostsResp, projectResp, membersResp, vulnsPage] = await Promise.all([
+      const [hostsResp, projectResp, membersResp, vulnsPage, notesResp, activityResp] = await Promise.all([
         getHosts(projectId),
         getProject(projectId),
         getProjectMembers(projectId),
         getVulnerabilities(projectId),
+        listProjectNotes(projectId),
+        // Журнал действий с заметками (с username). Если эндпоинт упал —
+        // не валим всю загрузку: показываем пустой лог.
+        listProjectNotesActivity(projectId).catch(() => [] as ProjectNoteActivity[]),
       ]);
       setHosts(hostsResp.items);
       setProjectMembers(membersResp);
@@ -297,6 +351,10 @@ export function ProjectDetailPage() {
       setProjectEndDate(projectResp.end_date);
       setProjectTimelineFrozenAt(projectResp.timeline_frozen_at);
       setProjectVulnerabilities(vulnsPage.items);
+      // Заметки нужны сразу для дерева в сайдбаре (иначе при раскрытии секции
+      // «Заметки» вначале показывается пусто, пока не кликнут по заметке).
+      setProjectNotes(notesResp);
+      setNotesActivity(activityResp);
       setSelectedHostId((previousHostId) => {
         const storedHostId = storagePrefix ? window.localStorage.getItem(`${storagePrefix}:selectedHostId`) : null;
         if (previousHostId && hostsResp.items.some((host) => host.id === previousHostId)) {
@@ -354,6 +412,7 @@ export function ProjectDetailPage() {
               host.id,
               {
                 portsCount: ports.length,
+                ipAddressesCount: host.ip_addresses.length,
                 endpointsCount: endpoints.length,
                 vulnerabilitiesCount: vulnerabilities.length,
               },
@@ -368,6 +427,7 @@ export function ProjectDetailPage() {
             host.id,
             {
               portsCount: hostPorts.length,
+              ipAddressesCount: host.ip_addresses.length,
               endpointsCount: hostEndpoints.length,
               vulnerabilitiesCount: hostVulns.items.length,
             },
@@ -382,8 +442,10 @@ export function ProjectDetailPage() {
         }
       });
       if (selectedHostId) {
+        const selectedHost = hosts.find((host) => host.id === selectedHostId);
         mappedStats[selectedHostId] = {
           portsCount: ports.length,
+          ipAddressesCount: selectedHost?.ip_addresses.length ?? 0,
           endpointsCount: endpoints.length,
           vulnerabilitiesCount: vulnerabilities.length,
         };
@@ -393,23 +455,66 @@ export function ProjectDetailPage() {
     void loadStats();
   }, [projectId, hosts, selectedHostId, ports.length, endpoints.length, vulnerabilities.length]);
 
+  // Тик для пуш-обновления комментариев заметки внутри ProjectNotesSection
+  // (бампится при WS-сообщении entity=project_note_comment).
+  const [noteCommentsTick, setNoteCommentsTick] = useState(0);
+
   useEffect(() => {
     if (!projectId) {
       return;
     }
     const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${wsProtocol}://${window.location.host}/ws/projects/${projectId}`);
-    ws.onmessage = () => {
-      void loadProjectData();
-      void loadHostAssets();
+    ws.onmessage = (event) => {
+      // Гранулярный диспетчер: вместо полного loadProjectData + loadHostAssets
+      // на каждый WS-эвент обновляем только ту сущность, которая изменилась.
+      // Раньше любая правка комментария или порта триггерила полный re-fetch
+      // всего проекта → много лишних запросов.
+      let entity: string | undefined;
+      try {
+        const msg = JSON.parse(event.data) as { entity?: string };
+        entity = msg.entity;
+      } catch {
+        entity = undefined;
+      }
+      switch (entity) {
+        case "project_note":
+          // Изменение заметки — обновляем только дерево заметок и журнал активности.
+          void refreshNotesAndActivity();
+          break;
+        case "project_note_comment":
+          // Комментарий к заметке — бампим тик, ProjectNotesSection перетянет comments.
+          setNoteCommentsTick((t) => t + 1);
+          break;
+        case "host":
+        case "port":
+        case "endpoint":
+        case "service":
+        case "vulnerability":
+        case "comment":
+          // Хосты/уязвимости/их части — нужен loadProjectData + loadHostAssets.
+          void loadProjectData();
+          void loadHostAssets();
+          break;
+        default:
+          // Неизвестный/пустой entity — на всякий случай полный рефреш.
+          void loadProjectData();
+          void loadHostAssets();
+      }
     };
     return () => ws.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, loadHostAssets, loadProjectData]);
 
   useEffect(() => {
     if (!storagePrefix) {
       return;
     }
+    // Если страница открыта с явным section в location.state (переход с
+    // HostDetailPage по клику в дереве), уважаем именно его — иначе
+    // localStorage перезатрёт значение и юзер увидит мигание раздела.
+    const navState = location.state as { section?: DetailSection } | null;
+    if (navState?.section) return;
     const storedSection = window.localStorage.getItem(`${storagePrefix}:selectedSection`) as DetailSection | null;
     const storedCollapsed = window.localStorage.getItem(`${storagePrefix}:sidebarCollapsed`);
     if (storedSection) {
@@ -418,7 +523,50 @@ export function ProjectDetailPage() {
     if (storedCollapsed) {
       setSidebarCollapsed(storedCollapsed === "1");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storagePrefix]);
+
+  // ID комментария заметки, который надо подсветить — берём прямо из URL-query
+  // (?comment=<id>), как сделано для уязвимостей. Это переживает перезагрузку
+  // и не зависит от location.state.
+  const highlightNoteCommentId = useMemo(
+    () => new URLSearchParams(location.search).get("comment"),
+    [location.search],
+  );
+
+  // Синхронизация state со URL: при back/forward или при прямой загрузке ссылки
+  // /projects/:id/notes/:noteId юзер должен попасть в нужный раздел/заметку.
+  useEffect(() => {
+    setSelectedSection(sectionFromUrl);
+    if (sectionFromUrl === "notes") {
+      setSelectedNoteId(urlNoteId ?? null);
+    } else if (sectionFromUrl === "hosts") {
+      setSelectedHostId(null);
+    }
+  }, [sectionFromUrl, urlNoteId]);
+
+  // highlightNoteCommentId теперь в URL-query, отдельный useEffect не нужен.
+
+  // Стабильные обработчики через useCallback — это критично:
+  //   * `loadNotes` внутри ProjectNotesSection мемоизирован по [onSelectNote,
+  //     onNotesChange, projectId]. Если родитель передаёт inline-arrow,
+  //     ref меняется каждый рендер, useEffect[loadNotes] срабатывает и
+  //     заметки фетчатся снова и снова (вот откуда массив повторов в логах).
+  //   * `onHighlightHandled` — иначе подсветочный 3-секундный таймер
+  //     перезапускался бы при каждом рендере родителя.
+  const handleSelectNoteInEditor = useCallback(
+    (noteId: string | null) => {
+      if (!projectId) return;
+      if (noteId) navigate(`/projects/${projectId}/notes/${noteId}`);
+      else navigate(`/projects/${projectId}/notes`);
+    },
+    [navigate, projectId],
+  );
+  const handleHighlightHandled = useCallback(() => {
+    if (urlNoteId && projectId) {
+      navigate(`/projects/${projectId}/notes/${urlNoteId}`, { replace: true });
+    }
+  }, [navigate, projectId, urlNoteId]);
 
   useEffect(() => {
     if (!storagePrefix) {
@@ -585,6 +733,70 @@ export function ProjectDetailPage() {
     setHostName("");
     setHostNotes("");
     await loadProjectData();
+  };
+
+  // После любого изменения заметок (create/update/delete) синхронизируем
+  // и дерево, и журнал активности — чтобы сводка обновилась в реальном времени.
+  const refreshNotesAndActivity = async () => {
+    if (!projectId) return;
+    const [notes, activity] = await Promise.all([
+      listProjectNotes(projectId),
+      listProjectNotesActivity(projectId).catch(() => [] as ProjectNoteActivity[]),
+    ]);
+    setProjectNotes(notes);
+    setNotesActivity(activity);
+  };
+
+  // Submit диалога создания/переименования заметки. Закрывает модалку,
+  // обновляет проектное дерево, при создании сразу переключает фокус на заметку.
+  const submitNoteDialog = async () => {
+    if (!projectId) return;
+    const title = noteDialogTitle.trim();
+    if (!title) return;
+    setNoteDialogBusy(true);
+    try {
+      if (noteDialogMode === "create") {
+        const created = await createProjectNote(projectId, {
+          title,
+          parent_id: noteDialogParentId,
+        });
+        await refreshNotesAndActivity();
+        // Переходим на URL заметки — она сразу шарабельна.
+        navigate(`/projects/${projectId}/notes/${created.id}`);
+      } else if (noteDialogMode === "rename" && noteDialogNoteId) {
+        await updateProjectNote(projectId, noteDialogNoteId, { title });
+        await refreshNotesAndActivity();
+      }
+      setNoteDialogMode(null);
+    } catch (err) {
+      setError(
+        getApiErrorMessage(
+          err,
+          noteDialogMode === "rename" ? "Не удалось переименовать заметку" : "Не удалось создать заметку",
+        ),
+      );
+    } finally {
+      setNoteDialogBusy(false);
+    }
+  };
+
+  const confirmNoteDelete = async () => {
+    if (!projectId || !noteDeleteDialogNoteId) return;
+    const target = noteDeleteDialogNoteId;
+    setNoteDeleteBusy(true);
+    try {
+      await deleteProjectNote(projectId, target);
+      await refreshNotesAndActivity();
+      // Если удалили текущую заметку — уводим юзера на сводку раздела «Заметки».
+      if (selectedNoteId === target) {
+        navigate(`/projects/${projectId}/notes`);
+      }
+      setNoteDeleteDialogNoteId(null);
+    } catch (err) {
+      setError(getApiErrorMessage(err, "Не удалось удалить заметку"));
+    } finally {
+      setNoteDeleteBusy(false);
+    }
   };
 
   const selectedHost = hosts.find((host) => host.id === selectedHostId) ?? null;
@@ -1126,7 +1338,13 @@ export function ProjectDetailPage() {
 
   const openRemoveHostsDialog = () => {
     setSelectedHostIds([]);
-    setRemoveHostsDialogOpen(true);
+    setHostsBulkDeleteMode(true);
+    setSelectedSection("hosts");
+  };
+
+  const cancelHostsBulkDelete = () => {
+    setHostsBulkDeleteMode(false);
+    setSelectedHostIds([]);
   };
 
   const addMembersToProject = async () => {
@@ -1170,29 +1388,65 @@ export function ProjectDetailPage() {
       return;
     }
     setError(null);
+    setHostsBulkDeleting(true);
     try {
       await Promise.all(selectedHostIds.map((selectedHostId) => deleteHost(projectId, selectedHostId)));
       setSelectedHostIds([]);
-      setRemoveHostsDialogOpen(false);
+      setHostsBulkDeleteMode(false);
       await loadProjectData();
     } catch (error) {
       setError(getApiErrorMessage(error, "Не удалось удалить выбранные хосты."));
+    } finally {
+      setHostsBulkDeleting(false);
     }
   };
+
+  // Заголовок страницы: на разделе «Заметки» с выбранной заметкой показываем
+  // «Заметка: <название>», чтобы шапка отражала открытый контент и не дублировалась
+  // внутри карточки заметки.
+  const selectedNoteTitle = selectedNoteId
+    ? projectNotes.find((n) => n.id === selectedNoteId)?.title ?? null
+    : null;
+  const pageHeaderTitle =
+    selectedSection === "notes" && selectedNoteTitle
+      ? `Заметка: ${selectedNoteTitle}`
+      : projectName
+      ? `Проект: ${projectName}`
+      : "Проект";
 
   return (
     <Stack spacing={2.5}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Box>
           <Typography variant="h4" fontWeight={700}>
-            {projectName ? `Проект: ${projectName}` : "Проект"}
+            {pageHeaderTitle}
           </Typography>
         </Box>
-        {selectedSection === "overview" ? (
-          <IconButton onClick={openActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", width: 42, height: 42, backgroundColor: "rgba(15,27,45,0.72)" }}>
+        {(selectedSection === "overview" ||
+          selectedSection === "hosts" ||
+          selectedSection === "notes") && (
+          <IconButton
+            onClick={(event) => {
+              // Один и тот же стиль (контур + 42x42) для всех секций — меняется
+              // только содержимое выпадающего меню.
+              if (selectedSection === "overview") {
+                openActionsMenu(event);
+              } else if (selectedSection === "hosts") {
+                setHostsSectionMenuAnchor(event.currentTarget);
+              } else {
+                setNotesSectionMenuAnchor(event.currentTarget);
+              }
+            }}
+            sx={{
+              border: "1px solid rgba(126,224,255,0.2)",
+              width: 42,
+              height: 42,
+              backgroundColor: "rgba(15,27,45,0.72)",
+            }}
+          >
             <MoreVertIcon />
           </IconButton>
-        ) : null}
+        )}
       </Stack>
 
       <Menu
@@ -1255,8 +1509,84 @@ export function ProjectDetailPage() {
         )}
       </Menu>
 
-      <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+      <Menu
+        anchorEl={hostsSectionMenuAnchor}
+        open={Boolean(hostsSectionMenuAnchor)}
+        onClose={() => setHostsSectionMenuAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            setHostsSectionMenuAnchor(null);
+            setHostOpen(true);
+          }}
+        >
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Добавить хост
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setHostsSectionMenuAnchor(null);
+            openRemoveHostsDialog();
+          }}
+          disabled={hosts.length === 0}
+        >
+          <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+          Удалить хосты
+        </MenuItem>
+      </Menu>
+
+      <Menu
+        anchorEl={notesSectionMenuAnchor}
+        open={Boolean(notesSectionMenuAnchor)}
+        onClose={() => setNotesSectionMenuAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            setNotesSectionMenuAnchor(null);
+            // Создание корневой заметки — через тот же платформенный диалог.
+            setNoteDialogMode("create");
+            setNoteDialogParentId(null);
+            setNoteDialogNoteId(null);
+            setNoteDialogTitle("");
+          }}
+        >
+          <AddIcon fontSize="small" sx={{ mr: 1 }} />
+          Создать заметку
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setNotesSectionMenuAnchor(null);
+            const note = projectNotes.find((n) => n.id === selectedNoteId);
+            if (!note) return;
+            setNoteDialogMode("rename");
+            setNoteDialogParentId(null);
+            setNoteDialogNoteId(note.id);
+            setNoteDialogTitle(note.title);
+          }}
+          disabled={!selectedNoteId}
+        >
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Редактировать заметку
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setNotesSectionMenuAnchor(null);
+            if (selectedNoteId) setNoteDeleteDialogNoteId(selectedNoteId);
+          }}
+          disabled={!selectedNoteId}
+        >
+          <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+          Удалить заметку
+        </MenuItem>
+      </Menu>
+
+      <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "flex-start" }}>
         <ProjectTreeNav
+          projectId={projectId}
           hosts={hosts}
           selectedHostId={selectedHostId}
           selectedSection={selectedSection}
@@ -1269,45 +1599,38 @@ export function ProjectDetailPage() {
           notes={projectNotes}
           selectedNoteId={selectedNoteId}
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-          onSelectSection={setSelectedSection}
-          onSelectProjectOverview={() => setSelectedSection("overview")}
-          onSelectNote={setSelectedNoteId}
-          onCreateNote={async (parentId) => {
-            if (!projectId) return;
-            const title = window.prompt(parentId ? "Название подстраницы:" : "Название страницы:")?.trim();
-            if (!title) return;
-            try {
-              const created = await createProjectNote(projectId, { title, parent_id: parentId });
-              setProjectNotes(await listProjectNotes(projectId));
-              setSelectedNoteId(created.id);
-              setSelectedSection("notes");
-            } catch (err) {
-              setError(getApiErrorMessage(err, "Не удалось создать заметку"));
+          onSelectSection={(section) => {
+            // Навигация через URL — для шаринга ссылок. State синхронизируется
+            // через useEffect[sectionFromUrl].
+            if (section === "notes") {
+              navigate(`/projects/${projectId}/notes`);
+            } else if (section === "hosts") {
+              navigate(`/projects/${projectId}/hosts`);
+            } else if (section === "overview") {
+              navigate(`/projects/${projectId}`);
+            } else {
+              setSelectedSection(section);
             }
           }}
-          onRenameNote={async (noteId) => {
-            if (!projectId) return;
-            const current = projectNotes.find((n) => n.id === noteId);
-            const nextTitle = window.prompt("Новое название:", current?.title ?? "")?.trim();
-            if (!nextTitle || nextTitle === current?.title) return;
-            try {
-              await updateProjectNote(projectId, noteId, { title: nextTitle });
-              setProjectNotes(await listProjectNotes(projectId));
-            } catch (err) {
-              setError(getApiErrorMessage(err, "Не удалось переименовать заметку"));
-            }
+          onSelectProjectOverview={() => navigate(`/projects/${projectId}`)}
+          onSelectNote={(noteId) => navigate(`/projects/${projectId}/notes/${noteId}`)}
+          onSelectNotesLabel={() => navigate(`/projects/${projectId}/notes`)}
+          onCreateNote={(parentId) => {
+            // Открываем платформенный диалог ввода названия — никаких window.prompt.
+            setNoteDialogMode("create");
+            setNoteDialogParentId(parentId);
+            setNoteDialogNoteId(null);
+            setNoteDialogTitle("");
           }}
-          onDeleteNote={async (noteId) => {
-            if (!projectId) return;
+          onRenameNote={(noteId) => {
             const current = projectNotes.find((n) => n.id === noteId);
-            if (!window.confirm(`Удалить заметку "${current?.title ?? ""}" со всеми подстраницами?`)) return;
-            try {
-              await deleteProjectNote(projectId, noteId);
-              setProjectNotes(await listProjectNotes(projectId));
-              if (selectedNoteId === noteId) setSelectedNoteId(null);
-            } catch (err) {
-              setError(getApiErrorMessage(err, "Не удалось удалить заметку"));
-            }
+            setNoteDialogMode("rename");
+            setNoteDialogParentId(null);
+            setNoteDialogNoteId(noteId);
+            setNoteDialogTitle(current?.title ?? "");
+          }}
+          onDeleteNote={(noteId) => {
+            setNoteDeleteDialogNoteId(noteId);
           }}
           onMoveNote={async (noteId, newParentId) => {
             if (!projectId) return;
@@ -1334,12 +1657,10 @@ export function ProjectDetailPage() {
           onOpenHost={(hostId, section) => navigate(`/projects/${projectId}/hosts/${hostId}`, { state: { section } })}
         />
         <Stack flex={1} spacing={2}>
-          {selectedSection !== "overview" && (
+          {selectedSection !== "overview" && selectedSection !== "notes" && selectedSection !== "hosts" && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
                 <Typography variant="h6" fontWeight={700}>
-                  {selectedSection === "notes" && "Заметки проекта"}
-                  {selectedSection === "hosts" && "Хосты проекта"}
                   {selectedSection === "ports" && `Порты хоста: ${hostLabel}`}
                   {selectedSection === "endpoints" && `Эндпоинты хоста: ${hostLabel}`}
                   {selectedSection === "vulns" && `Уязвимости хоста: ${hostLabel}`}
@@ -1455,13 +1776,10 @@ export function ProjectDetailPage() {
                       <MoreVertIcon fontSize="small" />
                     </IconButton>
             <CardContent>
-                      <Typography color="text.secondary" mb={1}>
+                      <Typography sx={{ color: "#ffffff", fontWeight: 700 }} mb={1}>
                         Хосты проекта
                       </Typography>
-                      <Typography variant="h4" fontWeight={700}>
-                        {hosts.length}
-                      </Typography>
-                      <Stack spacing={0.8} mt={1} sx={{ maxHeight: 160, overflowY: "auto" }}>
+                      <Stack spacing={0.8} sx={{ maxHeight: 160, overflowY: "auto" }}>
                         {hosts.length > 0 ? (
                           hosts.map((host) => (
                             <Box key={host.id} sx={{ px: 1.2, py: 0.9, border: "1px solid rgba(126,224,255,0.10)", borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
@@ -1515,11 +1833,8 @@ export function ProjectDetailPage() {
                       </IconButton>
                     )}
                     <CardContent sx={{ height: "100%" }}>
-                      <Typography color="text.secondary" mb={1}>
+                      <Typography sx={{ color: "#ffffff", fontWeight: 700 }} mb={1}>
                         Участники проекта
-                      </Typography>
-                      <Typography variant="h4" fontWeight={700} mb={1}>
-                        {projectMembers.length}
                       </Typography>
                       <Stack spacing={0.8} sx={{ maxHeight: 160, overflowY: "auto" }}>
                         {projectMembers.length > 0 ? (
@@ -1636,23 +1951,32 @@ export function ProjectDetailPage() {
                   ) : (
                     <Box
                       sx={{
-                        "& p": { m: 0, color: "#ffffff" },
-                        "& p + p": { mt: 1 },
-                        "& img": { maxWidth: "100%", height: "auto" },
-                        "& ul, & ol": { m: 0, pl: 2.5, color: "#ffffff" },
-                        "& li": { color: "#ffffff" },
-                        "& a": { color: "rgba(255,255,255,0.92)" },
-                        "& code": { color: "#ffffff", backgroundColor: "rgba(0,0,0,0.2)" },
-                        "& strong, & em": { color: "#ffffff" },
+                        border: "1px solid rgba(126,224,255,0.12)",
+                        p: 2,
+                        borderRadius: 0,
+                        backgroundColor: "rgba(8,17,31,0.28)",
                       }}
                     >
-                      {projectDescription?.trim() ? (
-                        <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
-                          {normalizeMarkdownForRender(projectDescription)}
-                        </ReactMarkdown>
-                      ) : (
-                        <Typography color="text.secondary">Описание проекта не заполнено</Typography>
-                      )}
+                      <Box
+                        sx={{
+                          "& p": { m: 0, color: "#ffffff" },
+                          "& p + p": { mt: 1 },
+                          "& img": { maxWidth: "100%", height: "auto" },
+                          "& ul, & ol": { m: 0, pl: 2.5, color: "#ffffff" },
+                          "& li": { color: "#ffffff" },
+                          "& a": { color: "rgba(255,255,255,0.92)" },
+                          "& code": { color: "#ffffff", backgroundColor: "rgba(0,0,0,0.2)" },
+                          "& strong, & em": { color: "#ffffff" },
+                        }}
+                      >
+                        {projectDescription?.trim() ? (
+                          <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
+                            {normalizeMarkdownForRender(projectDescription)}
+                          </ReactMarkdown>
+                        ) : (
+                          <Typography color="text.secondary">Описание проекта не заполнено</Typography>
+                        )}
+                      </Box>
                     </Box>
                   )}
                 </CardContent>
@@ -1660,13 +1984,108 @@ export function ProjectDetailPage() {
             </Stack>
           )}
 
+          {selectedSection === "notes" && projectId && !selectedNoteId && (
+            <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
+              <CardContent>
+                <Typography variant="h6" fontWeight={700} mb={2}>
+                  Заметки проекта · история изменений
+                </Typography>
+                {(() => {
+                  const fmt = (iso: string) =>
+                    new Date(iso).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+                  // Источник — серверный лог из таблицы AuditLog (с username),
+                  // содержит DELETE-записи даже для удалённых уже заметок.
+                  if (notesActivity.length === 0) {
+                    return (
+                      <Typography color="text.secondary" variant="body2">
+                        Пока нет действий с заметками. Создайте первую страницу через дерево слева.
+                      </Typography>
+                    );
+                  }
+                  const verbByAction: Record<ProjectNoteActivity["action"], string> = {
+                    CREATE: "создал(а) заметку",
+                    UPDATE: "изменил(а) заметку",
+                    DELETE: "удалил(а) заметку",
+                  };
+                  return (
+                    <List dense disablePadding>
+                      {notesActivity.map((entry) => {
+                        const actorName =
+                          entry.username ||
+                          (entry.user_id ? `${entry.user_id.slice(0, 8)}…` : "—");
+                        const noteTitle = entry.note_title || "(без названия)";
+                        const clickable = entry.action !== "DELETE" && Boolean(entry.note_id);
+                        return (
+                          <ListItem
+                            key={entry.id}
+                            onClick={() => {
+                              if (clickable && entry.note_id) navigate(`/projects/${projectId}/notes/${entry.note_id}`);
+                            }}
+                            sx={{
+                              cursor: clickable ? "pointer" : "default",
+                              borderRadius: 0,
+                              alignItems: "flex-start",
+                              borderBottom: "1px solid rgba(126,224,255,0.06)",
+                              ...(clickable
+                                ? { "&:hover": { backgroundColor: "rgba(126,224,255,0.07)" } }
+                                : {}),
+                            }}
+                          >
+                            <ListItemText
+                              primary={
+                                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                                  <Typography component="span" fontWeight={600}>
+                                    {actorName}
+                                  </Typography>
+                                  <Typography component="span" color="text.secondary">
+                                    {verbByAction[entry.action]}
+                                  </Typography>
+                                  <Typography
+                                    component="span"
+                                    fontWeight={600}
+                                    sx={{
+                                      color:
+                                        entry.action === "DELETE"
+                                          ? "rgba(244,67,54,0.85)"
+                                          : "rgba(126,224,255,0.9)",
+                                      textDecoration: entry.action === "DELETE" ? "line-through" : "none",
+                                    }}
+                                  >
+                                    {noteTitle}
+                                  </Typography>
+                                </Stack>
+                              }
+                              secondary={fmt(entry.created_at)}
+                            />
+                          </ListItem>
+                        );
+                      })}
+                    </List>
+                  );
+                })()}
+              </CardContent>
+            </Card>
+          )}
+
+          {/*
+            ProjectNotesSection держим смонтированным всегда, пока активна
+            секция «Заметки» — это исключает гонку «notes сброшены при перемонтировании».
+            Когда selectedNoteId == null показываем только сводку раздела (выше),
+            поэтому сам редактор скрываем визуально, не размонтируя.
+          */}
           {selectedSection === "notes" && projectId && (
-            <ProjectNotesSection
-              projectId={projectId}
-              selectedNoteId={selectedNoteId}
-              onSelectNote={setSelectedNoteId}
-              onNotesChange={setProjectNotes}
-            />
+            <Box sx={{ display: selectedNoteId ? "block" : "none" }}>
+              <ProjectNotesSection
+                projectId={projectId}
+                notes={projectNotes}
+                selectedNoteId={selectedNoteId}
+                onSelectNote={handleSelectNoteInEditor}
+                onNotesChange={setProjectNotes}
+                commentsTick={noteCommentsTick}
+                highlightCommentId={highlightNoteCommentId}
+                onHighlightHandled={handleHighlightHandled}
+              />
+            </Box>
           )}
 
           {selectedSection === "hosts" && (
@@ -1674,59 +2093,137 @@ export function ProjectDetailPage() {
               <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
                 <CardContent>
                   <Typography variant="h6" fontWeight={700} mb={2}>
-                    Уязвимости по критичности (проект)
+                    Уязвимости по критичности
                   </Typography>
-                  <Stack spacing={1.25}>
-                    {SEVERITY_ORDER.map((sev) => {
-                      const count = projectSeverityStats[sev];
-                      const total = SEVERITY_ORDER.reduce((sum, key) => sum + projectSeverityStats[key], 0);
-                      const pct = total > 0 ? Math.round((count / total) * 100) : 0;
-                      const tone = severityChipSx[sev] as { bgcolor?: string };
-                      return (
-                        <Stack key={sev} spacing={0.5}>
-                          <Stack direction="row" justifyContent="space-between" alignItems="center">
-                            <Typography variant="body2" sx={{ color: "#ffffff" }}>
-                              {SEVERITY_LABELS_RU[sev]}
-                            </Typography>
-                            <Typography variant="body2" fontWeight={700} sx={{ color: "#ffffff" }}>
-                              {count}
-                            </Typography>
-                          </Stack>
-                          <Box sx={{ height: 10, backgroundColor: "rgba(126,224,255,0.08)", borderRadius: 0, overflow: "hidden" }}>
-                            <Box sx={{ height: "100%", width: `${pct}%`, backgroundColor: tone.bgcolor ?? "rgba(126,224,255,0.3)" }} />
-                          </Box>
-                        </Stack>
-                      );
-                    })}
-                  </Stack>
-                  {SEVERITY_ORDER.every((sev) => projectSeverityStats[sev] === 0) ? (
-                    <Typography color="text.secondary" variant="body2" sx={{ mt: 2 }}>
-                      Уязвимостей по проекту не найдено.
-                    </Typography>
-                  ) : null}
+                  {(() => {
+                    const totalVulns = SEVERITY_ORDER.reduce((sum, sev) => sum + projectSeverityStats[sev], 0);
+                    // Даже при нулевых уязвимостях рисуем все 5 кружков с нулями —
+                    // визуальный блок остаётся на месте, юзер видит структуру.
+                    const palette: Record<typeof SEVERITY_ORDER[number], { bg: string; text: string; bar: string; ring: string }> = {
+                      critical: { bg: "#b71c1c", text: "#fff", bar: "#f44336", ring: "rgba(244,67,54,0.45)" },
+                      high: { bg: "#e65100", text: "#fff", bar: "#ff9800", ring: "rgba(255,152,0,0.45)" },
+                      medium: { bg: "#f9a825", text: "#1a1a1a", bar: "#ffeb3b", ring: "rgba(255,235,59,0.45)" },
+                      low: { bg: "#2e7d32", text: "#fff", bar: "#4caf50", ring: "rgba(76,175,80,0.45)" },
+                      info: { bg: "#1565c0", text: "#fff", bar: "#2196f3", ring: "rgba(33,150,243,0.45)" },
+                    };
+                    return (
+                      <Stack
+                        direction="row"
+                        spacing={2}
+                        flexWrap="wrap"
+                        useFlexGap
+                        justifyContent="center"
+                        alignItems="flex-start"
+                        sx={{ width: "100%", mx: "auto" }}
+                      >
+                        {SEVERITY_ORDER.map((sev) => {
+                          const count = projectSeverityStats[sev];
+                          // При totalVulns=0 показываем 0% (защита от деления на ноль).
+                          const pct = totalVulns > 0 ? (count / totalVulns) * 100 : 0;
+                          const p = palette[sev];
+                          return (
+                            <Box key={sev} sx={{ minWidth: 110, textAlign: "center" }}>
+                              <Avatar
+                                sx={{
+                                  width: 56,
+                                  height: 56,
+                                  bgcolor: p.bg,
+                                  color: p.text,
+                                  fontWeight: 700,
+                                  fontSize: "1.25rem",
+                                  mx: "auto",
+                                  boxShadow: `0 0 0 4px ${p.ring}`,
+                                }}
+                              >
+                                {count}
+                              </Avatar>
+                              <Typography variant="caption" sx={{ display: "block", mt: 0.75, color: "text.secondary" }}>
+                                {SEVERITY_LABELS_RU[sev]}
+                              </Typography>
+                              <LinearProgress
+                                variant="determinate"
+                                value={pct}
+                                sx={{
+                                  mt: 0.5,
+                                  height: 4,
+                                  borderRadius: 2,
+                                  backgroundColor: "rgba(255,255,255,0.06)",
+                                  "& .MuiLinearProgress-bar": { backgroundColor: p.bar },
+                                }}
+                              />
+                              <Typography variant="caption" sx={{ color: "text.secondary", fontSize: "0.7rem" }}>
+                                {`${pct.toFixed(0)}%`}
+                              </Typography>
+                            </Box>
+                          );
+                        })}
+                      </Stack>
+                    );
+                  })()}
                 </CardContent>
               </Card>
               <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
                 <CardContent>
-                  <Typography variant="subtitle1" fontWeight={700} mb={1}>
-                    Хосты
-                  </Typography>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                    <Typography variant="subtitle1" fontWeight={700}>
+                      Хосты
+                    </Typography>
+                    {hostsBulkDeleteMode ? (
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Button
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          startIcon={<DeleteOutlineIcon fontSize="small" />}
+                          disabled={selectedHostIds.length === 0 || hostsBulkDeleting}
+                          onClick={() => void removeSelectedHosts()}
+                        >
+                          {hostsBulkDeleting ? "Удаление…" : `Удалить (${selectedHostIds.length})`}
+                        </Button>
+                        <Button size="small" variant="outlined" disabled={hostsBulkDeleting} onClick={cancelHostsBulkDelete}>
+                          Отменить
+                        </Button>
+                      </Stack>
+                    ) : null}
+                  </Stack>
                   <Stack spacing={1.2}>
-                    {hosts.map((host) => (
-                      <Box
-                        key={host.id}
-                        sx={{
-                          border: "1px solid rgba(126,224,255,0.12)",
-                          p: 1.6,
-                          borderRadius: 0,
-                          cursor: "pointer",
-                          backgroundColor: "rgba(8,17,31,0.24)",
-                        }}
-                        onClick={() => navigate(`/projects/${projectId}/hosts/${host.id}`)}
-                      >
-                        <Typography sx={{ color: "#ffffff" }}>{host.hostname || host.ip_address || "unknown-host"}</Typography>
-                      </Box>
-                    ))}
+                    {hosts.map((host) => {
+                      const isChecked = selectedHostIds.includes(host.id);
+                      return (
+                        <Box
+                          key={host.id}
+                          sx={{
+                            border: "1px solid rgba(126,224,255,0.12)",
+                            p: 1.6,
+                            borderRadius: 0,
+                            cursor: hostsBulkDeleteMode ? "default" : "pointer",
+                            backgroundColor: "rgba(8,17,31,0.24)",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 1,
+                          }}
+                          onClick={() => {
+                            if (hostsBulkDeleteMode) return;
+                            navigate(`/projects/${projectId}/hosts/${host.id}`);
+                          }}
+                        >
+                          {hostsBulkDeleteMode ? (
+                            <Checkbox
+                              size="small"
+                              checked={isChecked}
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={(event) =>
+                                setSelectedHostIds((prev) =>
+                                  event.target.checked ? [...prev, host.id] : prev.filter((item) => item !== host.id)
+                                )
+                              }
+                              sx={{ p: 0.25 }}
+                            />
+                          ) : null}
+                          <Typography sx={{ color: "#ffffff" }}>{host.hostname || host.ip_address || "unknown-host"}</Typography>
+                        </Box>
+                      );
+                    })}
                     {hosts.length === 0 ? <Typography color="text.secondary">Хосты не добавлены.</Typography> : null}
                   </Stack>
                 </CardContent>
@@ -1834,6 +2331,93 @@ export function ProjectDetailPage() {
         </Stack>
       </Stack>
 
+      {/*
+        Диалог создания/переименования заметки. Заменяет нативные window.prompt
+        — единый стиль с остальными диалогами проекта, поддержка темы, Enter→submit.
+      */}
+      <Dialog
+        open={noteDialogMode !== null}
+        onClose={() => {
+          if (noteDialogBusy) return;
+          setNoteDialogMode(null);
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>
+          {noteDialogMode === "rename"
+            ? "Переименовать заметку"
+            : noteDialogParentId
+            ? "Новая подстраница"
+            : "Новая страница"}
+        </DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            label="Название"
+            value={noteDialogTitle}
+            onChange={(e) => setNoteDialogTitle(e.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void submitNoteDialog();
+              }
+            }}
+            sx={{ mt: 1 }}
+            disabled={noteDialogBusy}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNoteDialogMode(null)} disabled={noteDialogBusy}>
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            disabled={noteDialogBusy || !noteDialogTitle.trim()}
+            onClick={() => void submitNoteDialog()}
+          >
+            {noteDialogMode === "rename" ? "Сохранить" : "Создать"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={noteDeleteDialogNoteId !== null}
+        onClose={() => {
+          if (noteDeleteBusy) return;
+          setNoteDeleteDialogNoteId(null);
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>Удалить заметку</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Удалить заметку
+            {" "}
+            <Box component="span" sx={{ fontWeight: 700 }}>
+              «{projectNotes.find((n) => n.id === noteDeleteDialogNoteId)?.title ?? ""}»
+            </Box>
+            {" "}
+            со всеми подстраницами? Действие нельзя отменить.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNoteDeleteDialogNoteId(null)} disabled={noteDeleteBusy}>
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            disabled={noteDeleteBusy}
+            onClick={() => void confirmNoteDelete()}
+          >
+            Удалить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={hostOpen} onClose={() => setHostOpen(false)} fullWidth>
         <DialogTitle>Добавить хост</DialogTitle>
         <DialogContent>
@@ -1852,44 +2436,6 @@ export function ProjectDetailPage() {
           <Button onClick={() => setHostOpen(false)}>Отмена</Button>
           <Button variant="contained" disabled={!hostIp && !hostName} onClick={() => void submitHost()}>
             Сохранить
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={removeHostsDialogOpen} onClose={() => setRemoveHostsDialogOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Удалить хосты</DialogTitle>
-        <DialogContent>
-          <Stack spacing={1} sx={{ mt: 1 }}>
-            <List dense disablePadding>
-              {hosts.map((host) => {
-                const checked = selectedHostIds.includes(host.id);
-                return (
-                  <ListItem
-                    key={host.id}
-                    secondaryAction={
-                      <Checkbox
-                        edge="end"
-                        checked={checked}
-                        onChange={(event) =>
-                          setSelectedHostIds((prev) =>
-                            event.target.checked ? [...prev, host.id] : prev.filter((item) => item !== host.id)
-                          )
-                        }
-                      />
-                    }
-                  >
-                    <ListItemText primary={host.hostname || host.ip_address || "unknown-host"} secondary={host.ip_address || host.hostname || ""} />
-                  </ListItem>
-                );
-              })}
-              {hosts.length === 0 && <Typography color="text.secondary">Хосты пока не добавлены.</Typography>}
-            </List>
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setRemoveHostsDialogOpen(false)}>Закрыть</Button>
-          <Button color="error" variant="contained" startIcon={<DeleteOutlineIcon />} disabled={selectedHostIds.length === 0} onClick={() => void removeSelectedHosts()}>
-            Удалить
           </Button>
         </DialogActions>
       </Dialog>

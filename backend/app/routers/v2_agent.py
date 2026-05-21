@@ -1,12 +1,14 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import AgentTokenContext, require_agent_project_access, require_agent_scope
-from app.models import AgentApiTokenProjectGrant, Project
+from app.enums import AssetType
+from app.exceptions import NotFoundError
+from app.models import AgentApiTokenProjectGrant, Host, Project
 from app.pagination import PageParams, to_paginated_response
 from app.schemas import HostOut, ProjectNoteCreate, ProjectNoteOut, ProjectNoteUpdate, ProjectOut, VulnerabilityCreate, VulnerabilityOut, VulnerabilityUpdate
 from app.services import AssetService, ProjectNoteService, VulnerabilityService
@@ -30,6 +32,15 @@ async def list_agent_projects(
     return [ProjectOut.model_validate(project) for project in projects]
 
 
+@router.get("/projects/{project_id}", response_model=ProjectOut)
+async def get_agent_project(
+    project_id: UUID,
+    _scope: AgentTokenContext = Depends(require_agent_scope("projects:read")),
+    project: Project = Depends(require_agent_project_access),
+) -> ProjectOut:
+    return ProjectOut.model_validate(project)
+
+
 @router.get("/projects/{project_id}/hosts", response_model=dict)
 async def list_agent_hosts(
     project_id: UUID,
@@ -43,6 +54,17 @@ async def list_agent_hosts(
     return to_paginated_response([HostOut.model_validate(item) for item in items], total, PageParams(page=page, size=size)).model_dump()
 
 
+@router.get("/projects/{project_id}/hosts/{host_id}", response_model=dict)
+async def get_agent_host(
+    project_id: UUID,
+    host_id: UUID,
+    _scope: AgentTokenContext = Depends(require_agent_scope("assets:read")),
+    _project: Project = Depends(require_agent_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return await AssetService(db).get_host(project_id, host_id)
+
+
 @router.get("/projects/{project_id}/notes", response_model=list[ProjectNoteOut])
 async def list_agent_notes(
     project_id: UUID,
@@ -52,6 +74,18 @@ async def list_agent_notes(
 ) -> list[ProjectNoteOut]:
     notes = await ProjectNoteService(db).list_notes(project_id)
     return [ProjectNoteOut.model_validate(note) for note in notes]
+
+
+@router.get("/projects/{project_id}/notes/{note_id}", response_model=ProjectNoteOut)
+async def get_agent_note(
+    project_id: UUID,
+    note_id: UUID,
+    _scope: AgentTokenContext = Depends(require_agent_scope("notes:read")),
+    _project: Project = Depends(require_agent_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> ProjectNoteOut:
+    note = await ProjectNoteService(db).get_note(project_id, note_id)
+    return ProjectNoteOut.model_validate(note)
 
 
 @router.post("/projects/{project_id}/notes", response_model=ProjectNoteOut, status_code=status.HTTP_201_CREATED)
@@ -79,17 +113,39 @@ async def update_agent_note(
     return ProjectNoteOut.model_validate(note)
 
 
-@router.get("/projects/{project_id}/vulnerabilities", response_model=dict)
-async def list_agent_vulnerabilities(
+@router.get("/projects/{project_id}/{host_id}/vulnerabilities", response_model=dict)
+async def list_agent_host_vulnerabilities(
     project_id: UUID,
+    host_id: UUID,
     page: int = Query(1, ge=1),
     size: int = Query(100, ge=1, le=200),
     _scope: AgentTokenContext = Depends(require_agent_scope("vulns:read")),
     _project: Project = Depends(require_agent_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    items, total = await VulnerabilityService(db).list(project_id, page, size, None, None)
+    items, total = await VulnerabilityService(db).list_for_host(project_id, host_id, page, size, None, None)
     return to_paginated_response([VulnerabilityOut.model_validate(item) for item in items], total, PageParams(page=page, size=size)).model_dump()
+
+
+@router.get("/projects/{project_id}/{host_id}/vulnerabilities/{vulnerability_id}", response_model=VulnerabilityOut)
+async def get_agent_host_vulnerability(
+    project_id: UUID,
+    host_id: UUID,
+    vulnerability_id: UUID,
+    _scope: AgentTokenContext = Depends(require_agent_scope("vulns:read")),
+    _project: Project = Depends(require_agent_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> VulnerabilityOut:
+    host_exists = await db.scalar(
+        select(Host.id).where(and_(Host.id == host_id, Host.project_id == project_id))
+    )
+    if not host_exists:
+        raise NotFoundError("Хост не принадлежит указанному проекту")
+    bundle = await VulnerabilityService(db).get(project_id, vulnerability_id)
+    host_links = [link for link in bundle["assets"] if link.asset_type == AssetType.HOST]
+    if not any(link.asset_id == host_id for link in host_links):
+        raise NotFoundError("Уязвимость не найдена на указанном хосте")
+    return VulnerabilityOut.model_validate(bundle["vulnerability"])
 
 
 @router.post("/projects/{project_id}/vulnerabilities", response_model=VulnerabilityOut, status_code=status.HTTP_201_CREATED)

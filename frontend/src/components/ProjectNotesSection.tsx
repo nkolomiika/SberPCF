@@ -16,13 +16,15 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
+  List,
+  ListItem,
   Menu,
   MenuItem,
   Stack,
   TextField,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createProjectNote,
   createProjectNoteComment,
@@ -44,18 +46,33 @@ type DialogMode = "create-root" | "create-child" | "rename" | "move" | null;
 
 export function ProjectNotesSection({
   projectId,
+  notes: externalNotes,
   selectedNoteId,
   onSelectNote,
   onNotesChange,
+  commentsTick = 0,
+  highlightCommentId = null,
+  onHighlightHandled,
 }: {
   projectId: string;
+  /** Список заметок проекта — берём из родителя, чтобы не дублировать fetch и
+   *  избежать гонок (родитель синхронизирует своё projectNotes по WS). */
+  notes: ProjectNote[];
   selectedNoteId: string | null;
   onSelectNote: (noteId: string | null) => void;
   onNotesChange: (notes: ProjectNote[]) => void;
+  /** Тик из WS-пуша — бампится при entity=project_note_comment. Перетягивает comments. */
+  commentsTick?: number;
+  /** ID комментария, который нужно подсветить (3 секунды) после перехода по уведомлению. */
+  highlightCommentId?: string | null;
+  onHighlightHandled?: () => void;
 }) {
   const user = useAuthStore((state) => state.user);
   const pushToast = useToastStore((state) => state.pushToast);
-  const [notes, setNotes] = useState<ProjectNote[]>([]);
+  // notes теперь приходят сверху; локальный fetch удалён — это убирает
+  // двойную загрузку и предыдущий рантайм-цикл «selectedNoteId not in notes →
+  // refetch → setNotes → effect re-runs → refetch …».
+  const notes = externalNotes;
   const [draftContent, setDraftContent] = useState("");
   const [busy, setBusy] = useState(false);
   const [dialogMode, setDialogMode] = useState<DialogMode>(null);
@@ -65,6 +82,13 @@ export function ProjectNotesSection({
   const [comments, setComments] = useState<ProjectNoteComment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Меню действий комментария (троеточие) + диалог редактирования —
+  // тот же UX, что в комментариях уязвимостей.
+  const [commentActionsAnchorEl, setCommentActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [activeComment, setActiveComment] = useState<ProjectNoteComment | null>(null);
+  const [commentEditOpen, setCommentEditOpen] = useState(false);
+  const [commentEditDraft, setCommentEditDraft] = useState("");
+  const [commentEditBusy, setCommentEditBusy] = useState(false);
 
   const selectedNote = useMemo(
     () => notes.find((note) => note.id === selectedNoteId) ?? null,
@@ -85,25 +109,6 @@ export function ProjectNotesSection({
     return grouped;
   }, [notes]);
 
-  const loadNotes = useCallback(async () => {
-    try {
-      const items = await listProjectNotes(projectId);
-      let finalItems = items;
-      if (items.length === 0) {
-        const createdRoot = await createProjectNote(projectId, { title: "Главная страница", parent_id: null, content: null });
-        finalItems = [createdRoot];
-      }
-      setNotes(finalItems);
-      onNotesChange(finalItems);
-      if (selectedNoteId && finalItems.some((item) => item.id === selectedNoteId)) {
-        return;
-      }
-      onSelectNote(finalItems[0]?.id ?? null);
-    } catch (loadError) {
-      setError(getApiErrorMessage(loadError, "Не удалось загрузить заметки"));
-    }
-  }, [onNotesChange, onSelectNote, projectId, selectedNoteId]);
-
   const loadComments = useCallback(async () => {
     if (!selectedNoteId) {
       setComments([]);
@@ -118,12 +123,10 @@ export function ProjectNotesSection({
   }, [projectId, selectedNoteId]);
 
   useEffect(() => {
-    void loadNotes();
-  }, [loadNotes]);
-
-  useEffect(() => {
     void loadComments();
-  }, [loadComments]);
+    // commentsTick — внешний триггер (WS-пуш «изменился комментарий заметки»),
+    // заставляет перетянуть список без поллинга.
+  }, [loadComments, commentsTick]);
 
   useEffect(() => {
     if (!selectedNote) {
@@ -188,18 +191,18 @@ export function ProjectNotesSection({
       setError(null);
       if (dialogMode === "create-root") {
         const created = await createProjectNote(projectId, { title: dialogValue.trim(), parent_id: null, content: null });
-        await loadNotes();
+        onNotesChange(await listProjectNotes(projectId));
         onSelectNote(created.id);
       } else if (dialogMode === "create-child" && selectedNote) {
         const created = await createProjectNote(projectId, { title: dialogValue.trim(), parent_id: selectedNote.id, content: null });
-        await loadNotes();
+        onNotesChange(await listProjectNotes(projectId));
         onSelectNote(created.id);
       } else if (dialogMode === "rename" && selectedNote) {
         await updateProjectNote(projectId, selectedNote.id, { title: dialogValue.trim() });
-        await loadNotes();
+        onNotesChange(await listProjectNotes(projectId));
       } else if (dialogMode === "move" && selectedNote) {
         await moveProjectNote(projectId, selectedNote.id, { parent_id: moveTargetParentId || null });
-        await loadNotes();
+        onNotesChange(await listProjectNotes(projectId));
       }
       setDialogMode(null);
       setDialogValue("");
@@ -220,7 +223,7 @@ export function ProjectNotesSection({
       await updateProjectNote(projectId, selectedNote.id, {
         content: draftContent.trim() || null,
       });
-      await loadNotes();
+      onNotesChange(await listProjectNotes(projectId));
       pushToast("Заметка сохранена", "success");
     } catch (saveError) {
       setError(getApiErrorMessage(saveError, "Не удалось сохранить страницу заметки"));
@@ -240,7 +243,7 @@ export function ProjectNotesSection({
       setBusy(true);
       setError(null);
       await deleteProjectNote(projectId, selectedNote.id);
-      await loadNotes();
+      onNotesChange(await listProjectNotes(projectId));
     } catch (deleteError) {
       setError(getApiErrorMessage(deleteError, "Не удалось удалить страницу заметки"));
     } finally {
@@ -267,7 +270,7 @@ export function ProjectNotesSection({
         parent_id: note.parent_id,
         items: siblings.map((item, index) => ({ id: item.id, sort_order: index + 1 })),
       });
-      await loadNotes();
+      onNotesChange(await listProjectNotes(projectId));
     } catch (reorderError) {
       setError(getApiErrorMessage(reorderError, "Не удалось изменить порядок страниц"));
     } finally {
@@ -302,21 +305,81 @@ export function ProjectNotesSection({
     }
   };
 
-  const editComment = async (comment: ProjectNoteComment) => {
-    if (!selectedNoteId) {
+  const openCommentActionsMenu = (event: React.MouseEvent<HTMLElement>, comment: ProjectNoteComment) => {
+    event.stopPropagation();
+    setCommentActionsAnchorEl(event.currentTarget);
+    setActiveComment(comment);
+  };
+
+  const closeCommentActionsMenu = () => {
+    setCommentActionsAnchorEl(null);
+    setActiveComment(null);
+  };
+
+  const openCommentEdit = (comment: ProjectNoteComment) => {
+    setActiveComment(comment);
+    setCommentEditDraft(comment.content);
+    setCommentEditOpen(true);
+  };
+
+  const submitCommentEdit = async () => {
+    if (!selectedNoteId || !activeComment) return;
+    const next = commentEditDraft.trim();
+    if (!next || next === activeComment.content) {
+      setCommentEditOpen(false);
       return;
     }
-    const nextContent = window.prompt("Изменить комментарий", comment.content);
-    if (!nextContent || !nextContent.trim()) {
-      return;
-    }
+    setCommentEditBusy(true);
     try {
-      await updateProjectNoteComment(projectId, selectedNoteId, comment.id, nextContent.trim());
+      await updateProjectNoteComment(projectId, selectedNoteId, activeComment.id, next);
       await loadComments();
+      setCommentEditOpen(false);
     } catch (commentError) {
       setError(getApiErrorMessage(commentError, "Не удалось обновить комментарий"));
+    } finally {
+      setCommentEditBusy(false);
     }
   };
+
+  const formatCommentTimestamp = (iso: string) => new Date(iso).toLocaleString("ru-RU");
+
+  // Подсветка одного комментария на 3 секунды (по приходу из уведомления).
+  // Логика 1-в-1 с уязвимостями (HostDetailPage.mentionHighlightFade):
+  //   - Стабильный ключ commentIdsKey (отсортированные id через \n) — useEffect
+  //     не перезапускается при каждом setComments на тот же набор.
+  //   - Активация только когда DOM-элемент комментария фактически существует,
+  //     иначе откладываем до следующего рендера (когда DOM появится).
+  //   - 3-секундный таймер плавно гасит зелёную рамку.
+  const [mentionHighlightActive, setMentionHighlightActive] = useState(false);
+  const commentIdsKey = useMemo(
+    () => comments.map((c) => c.id).sort().join("\n"),
+    [comments],
+  );
+  useEffect(() => {
+    if (!highlightCommentId) {
+      setMentionHighlightActive(false);
+      return;
+    }
+    const idsSet = new Set(commentIdsKey.split("\n").filter(Boolean));
+    if (!idsSet.has(highlightCommentId)) {
+      setMentionHighlightActive(false);
+      return;
+    }
+    const element = document.getElementById(`note-comment-${highlightCommentId}`);
+    if (!element) {
+      // DOM ещё не дорендерил элемент (например, родительский Box с
+      // selectedNoteId только что монтировался) — выйдем, при следующем
+      // рендере эффект сработает с уже существующим элементом.
+      return;
+    }
+    window.setTimeout(() => element.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+    setMentionHighlightActive(true);
+    const timer = window.setTimeout(() => {
+      setMentionHighlightActive(false);
+      if (onHighlightHandled) onHighlightHandled();
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [highlightCommentId, commentIdsKey, onHighlightHandled]);
 
   return (
     <Stack spacing={2}>
@@ -332,14 +395,11 @@ export function ProjectNotesSection({
                 <Typography color="text.secondary">Выберите страницу слева или создайте новую заметку.</Typography>
               ) : (
                 <Stack spacing={1.5}>
-                  <Stack direction="row" justifyContent="space-between" alignItems="center">
-                    <Typography variant="h6" fontWeight={700}>
-                      {selectedNote.title}
-                    </Typography>
-                    <IconButton size="small" onClick={(event) => setActionsAnchorEl(event.currentTarget)}>
-                      <MoreVertIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
+                  {/*
+                    Заголовок и троеточие убраны из карточки — название теперь
+                    в шапке страницы как «Заметка: <title>», а действия
+                    (Создать/Редактировать/Удалить) — в верхнем троеточии раздела.
+                  */}
                   <MarkdownEditor
                     label="Контент страницы"
                     showLabel={false}
@@ -366,52 +426,130 @@ export function ProjectNotesSection({
             </CardContent>
           </Card>
 
-          {selectedNote && (
+          {/*
+            Блок комментариев рендерим по selectedNoteId, а не по selectedNote: на
+            переходе с уведомления (например, из списка проектов) родительские
+            projectNotes ещё грузятся, но комментарии уже доступны (loadComments
+            не зависит от notes). Иначе блок не появляется в DOM, и 3-секундная
+            подсветка истекает раньше, чем элемент рендерится.
+          */}
+          {selectedNoteId && (
             <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
               <CardContent>
-                <Stack spacing={1.2}>
-                  <Typography variant="h6" fontWeight={700}>
+                {/*
+                  Дизайн комментариев — единый с уязвимостями (см. renderCommentsSection
+                  в HostDetailPage). Список с Divider'ами вместо «карточек», троеточие-меню
+                  по hover, Avatar 28x28, имя жирным, таймстамп справа.
+                */}
+                <Stack spacing={1.25}>
+                  <Typography variant="subtitle1" fontWeight={700}>
                     Комментарии ({comments.length})
                   </Typography>
-                  {comments.map((comment) => {
-                    const canManage = user?.id === comment.user_id;
-                    return (
-                      <Box key={comment.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, backgroundColor: "rgba(8,17,31,0.24)" }}>
-                        <Stack direction="row" justifyContent="space-between" spacing={1}>
-                          <Stack direction="row" spacing={1} alignItems="center">
-                            <Avatar src={comment.avatar_url || undefined} sx={{ width: 26, height: 26 }}>
-                              {comment.username.slice(0, 1).toUpperCase()}
-                            </Avatar>
-                            <Typography fontWeight={700}>{comment.username}</Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {new Date(comment.created_at).toLocaleString("ru-RU")}
-                            </Typography>
-                          </Stack>
-                          {canManage && (
-                            <Stack direction="row">
-                              <IconButton size="small" onClick={() => void editComment(comment)}>
-                                <EditIcon fontSize="small" />
-                              </IconButton>
-                              <IconButton size="small" onClick={() => void deleteComment(comment.id)}>
-                                <DeleteOutlineIcon fontSize="small" />
-                              </IconButton>
+                  <List dense disablePadding>
+                    {comments.map((comment, commentIndex) => {
+                      const canManage = user?.id === comment.user_id;
+                      const isHighlighted = highlightCommentId === comment.id && mentionHighlightActive;
+                      return (
+                        <Box component="li" key={comment.id} sx={{ listStyle: "none" }}>
+                          <ListItem
+                            id={`note-comment-${comment.id}`}
+                            alignItems="flex-start"
+                            sx={{
+                              mb: 0,
+                              py: 1.25,
+                              border: "1px solid transparent",
+                              scrollMarginTop: 96,
+                              ...(isHighlighted
+                                ? {
+                                    animation: "noteMentionHighlightFade 3s ease forwards",
+                                    "@keyframes noteMentionHighlightFade": {
+                                      "0%": {
+                                        backgroundColor: "rgba(76,175,80,0.28)",
+                                        borderColor: "rgba(76,175,80,0.75)",
+                                      },
+                                      "66%": {
+                                        backgroundColor: "rgba(76,175,80,0.28)",
+                                        borderColor: "rgba(76,175,80,0.75)",
+                                      },
+                                      "100%": {
+                                        backgroundColor: "transparent",
+                                        borderColor: "transparent",
+                                      },
+                                    },
+                                  }
+                                : {}),
+                              ...(canManage
+                                ? {
+                                    "&:hover .comment-row-actions, &:focus-within .comment-row-actions": {
+                                      opacity: 1,
+                                      pointerEvents: "auto",
+                                    },
+                                  }
+                                : {}),
+                            }}
+                          >
+                            <Stack spacing={0.75} sx={{ width: "100%" }}>
+                              <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={2}>
+                                <Stack direction="row" alignItems="center" spacing={1.25} minWidth={0}>
+                                  <Avatar
+                                    src={comment.avatar_url || undefined}
+                                    alt={comment.username}
+                                    sx={{ width: 28, height: 28, fontSize: "0.8rem", bgcolor: "rgba(126,224,255,0.18)" }}
+                                  >
+                                    {comment.username.slice(0, 1).toUpperCase()}
+                                  </Avatar>
+                                  <Typography fontWeight={700} color="text.primary" noWrap>
+                                    {comment.username}
+                                  </Typography>
+                                </Stack>
+                                <Stack direction="row" alignItems="center" spacing={0} sx={{ flexShrink: 0 }}>
+                                  <Typography
+                                    variant="caption"
+                                    color="text.secondary"
+                                    sx={{ whiteSpace: "nowrap", textAlign: "right", minWidth: "7.75rem", pr: 0.5 }}
+                                  >
+                                    {formatCommentTimestamp(comment.created_at)}
+                                  </Typography>
+                                  <Box sx={{ width: 36, display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
+                                    {canManage ? (
+                                      <IconButton
+                                        className="comment-row-actions"
+                                        size="small"
+                                        onClick={(event) => openCommentActionsMenu(event, comment)}
+                                        sx={{
+                                          mr: -0.75,
+                                          opacity: 0,
+                                          pointerEvents: "none",
+                                          transition: "opacity 0.15s ease",
+                                          color: "rgba(148,163,184,0.85)",
+                                          "&:hover": {
+                                            color: "rgba(148,163,184,1)",
+                                            backgroundColor: "rgba(126,224,255,0.06)",
+                                          },
+                                        }}
+                                      >
+                                        <MoreVertIcon fontSize="small" />
+                                      </IconButton>
+                                    ) : null}
+                                  </Box>
+                                </Stack>
+                              </Stack>
+                              <Typography variant="body2" color="rgba(235,245,255,0.92)" sx={{ whiteSpace: "pre-wrap", pr: 1 }}>
+                                {comment.content}
+                              </Typography>
                             </Stack>
-                          )}
-                        </Stack>
-                        <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
-                          {comment.content}
-                        </Typography>
-                      </Box>
-                    );
-                  })}
-                  {comments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
+                          </ListItem>
+                        </Box>
+                      );
+                    })}
+                    {comments.length === 0 && <Typography color="text.secondary">Комментариев пока нет.</Typography>}
+                  </List>
                   <TextField
-                    label="Новый комментарий"
+                    label="Комментарий"
                     multiline
                     minRows={3}
                     value={newComment}
                     onChange={(event) => setNewComment(event.target.value)}
-                    sx={{ "& .MuiInputBase-input": { color: "#ffffff" } }}
                   />
                   <Stack direction="row" justifyContent="flex-end">
                     <Button variant="contained" disabled={!newComment.trim()} onClick={() => void submitComment()}>
@@ -553,6 +691,70 @@ export function ProjectNotesSection({
               ((dialogMode === "create-root" || dialogMode === "create-child" || dialogMode === "rename") && !dialogValue.trim())
             }
             onClick={() => void submitDialog()}
+          >
+            Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Menu
+        anchorEl={commentActionsAnchorEl}
+        open={Boolean(commentActionsAnchorEl)}
+        onClose={closeCommentActionsMenu}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem
+          onClick={() => {
+            if (activeComment) openCommentEdit(activeComment);
+            closeCommentActionsMenu();
+          }}
+        >
+          <EditIcon fontSize="small" sx={{ mr: 1 }} />
+          Редактировать
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (activeComment) void deleteComment(activeComment.id);
+            closeCommentActionsMenu();
+          }}
+        >
+          <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+          Удалить
+        </MenuItem>
+      </Menu>
+
+      <Dialog
+        open={commentEditOpen}
+        onClose={() => {
+          if (commentEditBusy) return;
+          setCommentEditOpen(false);
+        }}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Редактировать комментарий</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            multiline
+            minRows={3}
+            label="Комментарий"
+            value={commentEditDraft}
+            onChange={(event) => setCommentEditDraft(event.target.value)}
+            sx={{ mt: 1 }}
+            disabled={commentEditBusy}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCommentEditOpen(false)} disabled={commentEditBusy}>
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            disabled={commentEditBusy || !commentEditDraft.trim()}
+            onClick={() => void submitCommentEdit()}
           >
             Сохранить
           </Button>

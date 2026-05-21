@@ -14,8 +14,7 @@
 
 - `frontend` — React + Vite (HTTPS, порт 3000), проксирует `/api` и `/ws` на `backend`.
 - `backend` — FastAPI (uvicorn, порт 8000): REST API `/api/v1`, машинный API `/api/v2` для AI-агентов, WebSocket `/ws/*`.
-- `db` — PostgreSQL: основная БД (async-доступ через asyncpg).
-- `clickhouse` — ClickHouse: аудит-лог (отдельное хранилище аудит-событий).
+- `db` — PostgreSQL: основная БД (async-доступ через asyncpg). Хранит и доменные данные, и audit-журнал.
 - `minio` — S3-совместимое хранилище для аватаров пользователей и evidence-файлов уязвимостей.
 - `rabbitmq` — брокер сообщений для очереди отправки писем (`pcf.mail`).
 - `mail-worker` — отдельный sidecar-процесс, потребляющий `pcf.mail` и отправляющий письма по SMTP.
@@ -30,7 +29,7 @@
 - JWT через `python-jose`, bcrypt через `passlib`
 - `python-magic` (детекция MIME), Pillow (обработка изображений)
 - `cvss` (вычисление CVSS), `httpx` (HTTP-клиент для Jira)
-- `minio` (SDK MinIO), `clickhouse-connect` (драйвер ClickHouse)
+- `minio` (SDK MinIO)
 - `aio-pika` (RabbitMQ), `aiosmtplib` (SMTP в worker)
 
 **Frontend**
@@ -81,7 +80,6 @@ backend/
 │   ├── security.py                # bcrypt (hash_password / verify_password), JWT encode/decode,
 │   │                              # hash_refresh_token (SHA-256), hash_agent_token (SHA-256)
 │   ├── pagination.py              # PageParams, to_paginated_response
-│   ├── audit_store.py             # ClickHouse-клиент: ensure_table, write/read audit logs
 │   ├── ws_manager.py              # WebSocket connection manager:
 │   │                              #   broadcast по project_id, notify_user по user_id,
 │   │                              #   projects-index общий канал
@@ -107,7 +105,7 @@ backend/
 │   │   ├── jira.py                # /jira/config (admin), /projects/{id}/jira-link,
 │   │   │                          # экспорт уязвимости в Jira issue
 │   │   ├── reports.py             # генерация Word-отчётов: ПП и СЗИ
-│   │   ├── audit_logs.py          # чтение audit-логов из ClickHouse
+│   │   ├── audit_logs.py          # чтение audit-логов из PostgreSQL (full-text + фильтры)
 │   │   ├── agent_tokens.py        # /agent-tokens — управление Bearer-токенами для AI агентов
 │   │   ├── v2_agent.py            # публичный /api/v2 для AI агентов (Bearer auth)
 │   │   └── websocket.py           # /ws/notifications, /ws/projects/{id}, /ws/projects-index
@@ -191,7 +189,6 @@ frontend/src/
 |-------------|--------------------------------------------------------------|------------------------------------------------------------|
 | PostgreSQL  | основная БД                                                  | `database_url` (asyncpg), `app/database.py`                |
 | MinIO       | хранилище файлов (avatars, vulnerability evidence)           | `app/storage/minio_client.py` (`MinioStorage`)             |
-| ClickHouse  | audit logs (отдельная БД, дублирует часть в PostgreSQL)      | `app/audit_store.py`                                       |
 | RabbitMQ    | очередь `pcf.mail` для асинхронной отправки писем            | publish — `app/messaging.py`, consume — `app/worker/`      |
 | Mailpit/SMTP| отправка писем (dev — Mailpit, prod — внешний SMTP)          | `app/worker/mail_worker.py` (aiosmtplib)                   |
 | Jira REST   | (опционально) экспорт уязвимостей в Jira issues              | `JiraIntegrationService` (httpx), backend-only             |
@@ -256,7 +253,7 @@ frontend/src/
   - Лимит размера: `CHECK size_bytes <= 50 MiB` на уровне БД.
 - **Аватары пользователей**: только `image/png|jpeg|webp|gif` (без SVG — антиXSS).
 - **SSRF-защита Jira `base_url`**: запрет схем кроме `https`, отказ от `localhost`/loopback/private/link-local IP.
-- **Audit log**: основной поток — ClickHouse (`audit_store`), часть событий дублируется в PostgreSQL `audit_logs`.
+- **Audit log**: единое хранилище — PostgreSQL-таблица `audit_logs` (`AuditService.log()` пишет один раз и сразу коммитит). Чтение через `GET /api/v1/audit-logs` с фильтрами и full-text-поиском по action/entity_type/ip/username/details.
 - **Markdown XSS**: `react-markdown` с `urlTransform` whitelist — `http/https/mailto` + только `data:image/...;base64,...` (см. `markdownUrlTransform.ts`).
 
 ---
@@ -295,7 +292,6 @@ frontend/src/
 - Выполняет идемпотентные `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` для совместимости с уже задеплоенными базами (вместо полноценных Alembic-миграций для добавляемых колонок).
 - Расширяет PostgreSQL ENUM'ы (`ADD VALUE IF NOT EXISTS 'developer'`, `'handover_to_development'`, `'vulnerability_recheck'`).
 - Выполняет идемпотентную трансформацию `vulnerabilities.workflow_steps` — удаление поля `title` из элементов JSON-массива.
-- `audit_store.ensure_table()` — создание таблицы в ClickHouse.
 - `MinioStorage().ensure_bucket()` — создание бакета MinIO при необходимости.
 - `UserService.bootstrap_admin()` — стартовый администратор.
 
@@ -338,7 +334,7 @@ frontend/src/
 | `/api/v1/projects/{id}/reports/szi`             | генерация Word-отчёта СЗИ                                      |
 | `/api/v1/projects/{id}/reports/pp`              | генерация Word-отчёта ПП                                       |
 | `/api/v1/notifications/*`                       | список, unread-count, mark-read, read-all                      |
-| `/api/v1/audit-logs`                            | чтение audit-логов из ClickHouse                               |
+| `/api/v1/audit-logs`                            | чтение audit-логов из PostgreSQL (admin)                       |
 | `/api/v1/jira/config`                           | глобальная конфигурация Jira (admin)                           |
 | `/api/v1/agent-tokens/*`                        | управление API-токенами агентов (admin)                        |
 

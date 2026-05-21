@@ -168,8 +168,30 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     }
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${window.location.host}/ws/notifications`);
-    socket.onmessage = () => {
-      pushToast("Новое уведомление", "info");
+    socket.onmessage = (event) => {
+      let toastMessage = "Новое уведомление";
+      try {
+        const payload = JSON.parse(event.data) as {
+          data?: {
+            commenter_username?: string;
+            note_title?: string;
+            vulnerability_title?: string;
+            note_comment_id?: string;
+            comment_id?: string;
+          };
+        };
+        const who = payload.data?.commenter_username;
+        if (payload.data?.note_comment_id) {
+          const where = payload.data.note_title ? ` в заметке «${payload.data.note_title}»` : "";
+          toastMessage = who ? `${who} упомянул(а) вас${where}` : `Новое упоминание${where}`;
+        } else if (payload.data?.comment_id) {
+          const where = payload.data.vulnerability_title ? ` в уязвимости «${payload.data.vulnerability_title}»` : "";
+          toastMessage = who ? `${who} упомянул(а) вас${where}` : `Новое упоминание${where}`;
+        }
+      } catch {
+        // payload format unexpected — fall back to generic message
+      }
+      pushToast(toastMessage, "info");
       void loadUnreadNotifications();
       if (notificationsOpenRef.current) {
         void loadNotificationsList();
@@ -203,6 +225,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
       const projectId = notification.context?.project_id;
       const hostId = notification.context?.host_id;
       const vulnerabilityId = notification.context?.vulnerability_id;
+      const noteId = notification.context?.note_id;
       if (!projectId) {
         closeNotifications();
         return;
@@ -221,6 +244,14 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
         setCount((prev) => Math.max(0, prev - (notification.is_read ? 0 : 1)));
       }
       closeNotifications();
+      // Упоминание в комментарии заметки — открываем заметку и через URL-query
+      // ?comment=<id> просим подсветить комментарий (тот же паттерн, что в
+      // уязвимостях через `?comment=`).
+      if (noteId) {
+        const query = notification.note_comment_id ? `?comment=${notification.note_comment_id}` : "";
+        navigate(`/projects/${projectId}/notes/${noteId}${query}`);
+        return;
+      }
       if (hostId && vulnerabilityId) {
         const query = notification.comment_id ? `?comment=${notification.comment_id}` : "";
         navigate(`/projects/${projectId}/hosts/${hostId}/vulnerabilities/${vulnerabilityId}${query}`, {
@@ -250,7 +281,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     return <Navigate to="/force-change-password" replace />;
   }
 
-  const roleLabel = user.role === "admin" ? "Администратор" : user.role === "developer" ? "Разработчик" : "Пентестер";
+  const roleLabel = user.role === "admin" ? "Администратор" : "Пентестер";
 
   return (
     <Box
@@ -364,31 +395,35 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
           },
         }}
       >
-        <MenuItem
-          onClick={() => {
-            navigate("/profile");
-            closeProfileMenu();
-          }}
-          sx={{ minWidth: 220 }}
-        >
-          <ListItemIcon sx={{ minWidth: 30 }}>
-            <PersonOutlineIcon fontSize="small" />
-          </ListItemIcon>
-          <ListItemText>Профиль</ListItemText>
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            navigate("/");
-            closeProfileMenu();
-          }}
-          sx={{ minWidth: 220 }}
-        >
-          <ListItemIcon sx={{ minWidth: 30 }}>
-            <HomeIcon fontSize="small" />
-          </ListItemIcon>
-          <ListItemText>Домой</ListItemText>
-        </MenuItem>
-        {user.role === "admin" && (
+        {!isPasswordChangeLocked && (
+          <MenuItem
+            onClick={() => {
+              navigate("/profile");
+              closeProfileMenu();
+            }}
+            sx={{ minWidth: 220 }}
+          >
+            <ListItemIcon sx={{ minWidth: 30 }}>
+              <PersonOutlineIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Профиль</ListItemText>
+          </MenuItem>
+        )}
+        {!isPasswordChangeLocked && (
+          <MenuItem
+            onClick={() => {
+              navigate("/");
+              closeProfileMenu();
+            }}
+            sx={{ minWidth: 220 }}
+          >
+            <ListItemIcon sx={{ minWidth: 30 }}>
+              <HomeIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>Домой</ListItemText>
+          </MenuItem>
+        )}
+        {!isPasswordChangeLocked && user.role === "admin" && (
           <MenuItem
             onClick={() => {
               navigate("/users");
@@ -402,7 +437,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemText>Пользователи</ListItemText>
           </MenuItem>
         )}
-        {user.role === "admin" && (
+        {!isPasswordChangeLocked && user.role === "admin" && (
           <MenuItem
             onClick={() => {
               navigate("/audit-logs");
@@ -416,7 +451,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemText>Журнал действий</ListItemText>
           </MenuItem>
         )}
-        {user.role === "admin" && (
+        {!isPasswordChangeLocked && user.role === "admin" && (
           <MenuItem
             onClick={() => {
               navigate("/ai-integration");
@@ -427,7 +462,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemIcon sx={{ minWidth: 30 }}>
               <SmartToyOutlinedIcon fontSize="small" />
             </ListItemIcon>
-            <ListItemText>ИИ / API агента</ListItemText>
+            <ListItemText>API токены</ListItemText>
           </MenuItem>
         )}
         <MenuItem
@@ -482,10 +517,16 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
                   }}
                 >
                   <ListItemText
-                    primary={notification.context?.vulnerability_title ?? "Уведомление"}
+                    primary={
+                      notification.context?.note_title ??
+                      notification.context?.vulnerability_title ??
+                      "Уведомление"
+                    }
                     secondary={
                       notification.context?.commenter_username
-                        ? `Упоминание от ${notification.context.commenter_username}`
+                        ? `Упоминание от ${notification.context.commenter_username}${
+                            notification.context?.note_title ? " (заметка)" : ""
+                          }`
                         : "Обновление в проекте"
                     }
                   />
@@ -521,7 +562,13 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
           />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/ai-integration" element={user.role === "admin" ? <AiAgentIntegrationPage /> : <Navigate to="/" replace />} />
+          {/* Project routes — раздельные пути для шаринга ссылок на разделы и
+              конкретные заметки. ProjectDetailPage внутри читает useParams и
+              синхронизирует selectedSection / selectedNoteId. */}
           <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
+          <Route path="/projects/:projectId/notes" element={<ProjectDetailPage />} />
+          <Route path="/projects/:projectId/notes/:noteId" element={<ProjectDetailPage />} />
+          <Route path="/projects/:projectId/hosts" element={<ProjectDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId" element={<HostDetailPage />} />
           <Route path="/projects/:projectId/hosts/:hostId/vulnerabilities/:vulnerabilityId" element={<HostDetailPage />} />
           <Route path="/users" element={user.role === "admin" ? <UsersAdminPage /> : <Navigate to="/" replace />} />

@@ -11,6 +11,7 @@ describe("ProjectTreeNav", () => {
 
     renderWithProviders(
       <ProjectTreeNav
+        viewMode="host"
         hosts={[
           {
             id: "host-b",
@@ -24,13 +25,13 @@ describe("ProjectTreeNav", () => {
             updated_at: new Date().toISOString(),
           },
         ]}
-        selectedHostId={null}
+        selectedHostId="host-b"
         selectedSection="hosts"
         isCollapsed={false}
         portsCount={0}
         endpointsCount={0}
         vulnerabilitiesCount={0}
-        hostStatsById={{ "host-b": { portsCount: 4, endpointsCount: 2, vulnerabilitiesCount: 1 } }}
+        hostStatsById={{ "host-b": { portsCount: 4, ipAddressesCount: 2, endpointsCount: 2, vulnerabilitiesCount: 1 } }}
         onToggleCollapsed={() => undefined}
         onSelectSection={onSelectSection}
         onSelectHost={onSelectHost}
@@ -38,7 +39,7 @@ describe("ProjectTreeNav", () => {
       />
     );
 
-    await userEvent.click(screen.getByText("Порты (4)"));
+    await userEvent.click(screen.getByText("IP-адреса (2)"));
 
     expect(onSelectHost).toHaveBeenCalledWith("host-b");
     expect(onSelectSection).toHaveBeenCalledWith("ports");

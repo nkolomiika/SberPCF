@@ -58,7 +58,6 @@ class User(Base, TimestampMixin):
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     avatar_minio_bucket: Mapped[str | None] = mapped_column(String(63), nullable=True)
     avatar_minio_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     avatar_content_type: Mapped[str | None] = mapped_column(String(127), nullable=True)
@@ -96,7 +95,10 @@ class AgentApiToken(Base, TimestampMixin):
     __tablename__ = "agent_api_tokens"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # name — TEXT без ограничения длины: бывают токены с длинными описательными
+    # именами ("Jenkins CI / nightly scan for project X / scope: vulns+notes"),
+    # не хотим ловить отказ на UI.
+    name: Mapped[str] = mapped_column(Text, nullable=False)
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     token_prefix: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
@@ -261,7 +263,9 @@ class ProjectNoteComment(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
     content: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -287,7 +291,7 @@ class Host(Base, TimestampMixin):
         Enum(OsType, name="host_os_type"),
         nullable=False,
         default=OsType.UNKNOWN,
-        server_default=OsType.UNKNOWN.value,
+        server_default=OsType.UNKNOWN.name,
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -319,6 +323,12 @@ class HostIpAddress(Base, TimestampMixin):
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     host: Mapped[Host] = relationship("Host", back_populates="ip_addresses")
+    ports: Mapped[list["Port"]] = relationship(
+        "Port",
+        back_populates="ip_address",
+        cascade="all, delete-orphan",
+        order_by="Port.port_number",
+    )
 
 
 class Port(Base, TimestampMixin):
@@ -326,15 +336,23 @@ class Port(Base, TimestampMixin):
 
     __tablename__ = "ports"
     __table_args__ = (
-        UniqueConstraint("host_id", "port_number", "protocol", name="uq_port_host_number_protocol"),
+        UniqueConstraint("ip_address_id", "port_number", "protocol", name="uq_port_ip_number_protocol"),
         CheckConstraint("port_number >= 1 AND port_number <= 65535", name="ck_port_number_range"),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     host_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False)
+    ip_address_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("host_ip_addresses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     port_number: Mapped[int] = mapped_column(nullable=False)
     protocol: Mapped[Protocol] = mapped_column(Enum(Protocol, name="port_protocol"), nullable=False, default=Protocol.TCP)
     state: Mapped[PortState] = mapped_column(Enum(PortState, name="port_state"), nullable=False, default=PortState.OPEN)
+
+    ip_address: Mapped["HostIpAddress"] = relationship("HostIpAddress", back_populates="ports")
 
 
 class Service(Base, TimestampMixin):
@@ -486,6 +504,13 @@ class Notification(Base):
         default=NotificationType.MENTION,
     )
     comment_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("comments.id", ondelete="SET NULL"), nullable=True)
+    # FK на комментарий заметки — для упоминаний (@username) в обсуждениях заметок.
+    # Заполнен ровно у одного из двух (comment_id ИЛИ note_comment_id), не у обоих.
+    note_comment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("project_note_comments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

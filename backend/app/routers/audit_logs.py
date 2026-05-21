@@ -2,10 +2,9 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, not_, select
+from sqlalchemy import Text, and_, cast, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit_store import audit_store
 from app.database import get_db
 from app.dependencies import require_admin
 from app.models import AuditLog, User
@@ -32,30 +31,12 @@ async def list_audit_logs(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Возвращает журнал действий с фильтрацией."""
-    if audit_store.enabled:
-        clickhouse_result = await audit_store.list_logs(
-            page,
-            size,
-            {
-                "user_id": user_id,
-                "username": username,
-                "action": action,
-                "entity_type": entity_type,
-                "entity_id": entity_id,
-                "ip_address": ip_address,
-                "query": query,
-                "created_from": created_from,
-                "created_to": created_to,
-            },
-        )
-        if clickhouse_result is not None:
-            items, total = clickhouse_result
-            payload = [AuditLogOut.model_validate(item) for item in items]
-            return to_paginated_response(payload, total, PageParams(page=page, size=size)).model_dump()
-
     stmt = select(AuditLog, User.username).outerjoin(User, User.id == AuditLog.user_id)
-    conditions = []
-    conditions.append(not_(and_(AuditLog.action == "LOGIN", AuditLog.details["source"].as_string() == "refresh")))
+    conditions = [
+        # Скрываем LOGIN-события, инициированные refresh-токеном: они шумные
+        # и не отражают реальной активности пользователя.
+        not_(and_(AuditLog.action == "LOGIN", AuditLog.details["source"].as_string() == "refresh"))
+    ]
     if user_id:
         conditions.append(AuditLog.user_id == user_id)
     if username:
@@ -70,11 +51,16 @@ async def list_audit_logs(
         conditions.append(AuditLog.ip_address.ilike(f"%{ip_address.strip()}%"))
     if query is not None and query.strip():
         query_value = f"%{query.strip()}%"
+        # Поиск по «всему сразу»: action / entity_type / username / ip / detail-JSON.
+        # cast(details, Text) — Postgres приводит jsonb к строке, на маленьких объёмах
+        # это приемлемо. Если станет узко — добавить GIN-индекс на details.
         conditions.append(
-            (
-                AuditLog.action.ilike(query_value)
-                | AuditLog.entity_type.ilike(query_value)
-                | AuditLog.ip_address.ilike(query_value)
+            or_(
+                AuditLog.action.ilike(query_value),
+                AuditLog.entity_type.ilike(query_value),
+                AuditLog.ip_address.ilike(query_value),
+                User.username.ilike(query_value),
+                cast(AuditLog.details, Text).ilike(query_value),
             )
         )
     if created_from:
@@ -87,8 +73,7 @@ async def list_audit_logs(
             conditions.append(AuditLog.created_at <= datetime.fromisoformat(created_to.replace("Z", "+00:00")))
         except ValueError:
             pass
-    if conditions:
-        stmt = stmt.where(and_(*conditions))
+    stmt = stmt.where(and_(*conditions))
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = (
         await db.execute(stmt.order_by(AuditLog.created_at.desc()).offset((page - 1) * size).limit(size))
@@ -99,7 +84,7 @@ async def list_audit_logs(
             {
                 "id": item.id,
                 "user_id": item.user_id,
-                "username": username,
+                "username": joined_username,
                 "action": item.action,
                 "entity_type": item.entity_type,
                 "entity_id": item.entity_id,
@@ -108,6 +93,6 @@ async def list_audit_logs(
                 "created_at": item.created_at,
             }
         )
-        for item, username in rows
+        for item, joined_username in rows
     ]
     return to_paginated_response(payload, total_count, PageParams(page=page, size=size)).model_dump()

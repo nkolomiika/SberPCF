@@ -6,7 +6,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models  # noqa: F401
-from app.audit_store import audit_store
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, PCFError, UnauthorizedError, ValidationError
@@ -68,7 +67,7 @@ def _register_routes() -> None:
     app.include_router(reports.router, prefix=prefix)
     app.include_router(audit_logs.router, prefix=prefix)
     agent_api_v2.include_router(v2_agent.router)
-    app.mount("/api/v2", agent_api_v2)
+    app.mount("/v2", agent_api_v2)
     app.include_router(websocket.router)
 
 
@@ -133,7 +132,6 @@ async def startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         if conn.dialect.name == "postgresql":
-            await conn.execute(text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'developer'"))
             await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'handover_to_development'"))
             await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'vulnerability_recheck'"))
             await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder VARCHAR(255) NOT NULL DEFAULT ''"))
@@ -177,7 +175,6 @@ async def startup() -> None:
                 await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT ''"))
             if not has_timeline_frozen_at:
                 await conn.execute(text("ALTER TABLE projects ADD COLUMN timeline_frozen_at TIMESTAMP"))
-    await audit_store.ensure_table()
     MinioStorage().ensure_bucket()
     async with SessionLocal() as db:
         service = UserService(db)

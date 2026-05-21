@@ -22,7 +22,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Navigate } from "react-router-dom";
 import {
   createAgentToken,
@@ -57,11 +57,15 @@ export function AiAgentIntegrationPage() {
   const [scopes, setScopes] = useState<string[]>(() => SCOPE_OPTIONS.map((s) => s.id));
   const [revealedToken, setRevealedToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Поиск по проектам внутри диалога создания токена.
+  const [projectsSearch, setProjectsSearch] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
+      // size=500 раньше отбрасывался валидатором (cap=200) — список приходил пустым.
+      // Backend поднят до 1000; 500 — комфортный запас для большинства инсталляций.
       const [tok, proj] = await Promise.all([listAgentTokens(), getProjects(1, 500)]);
       setTokens(tok);
       setProjects(proj.items);
@@ -84,6 +88,14 @@ export function AiAgentIntegrationPage() {
     setSelectedProjectIds((prev) => (prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]));
   };
 
+  // Локальная фильтрация по имени проекта (без обращения к серверу — каталог
+  // уже загружен в state одним запросом).
+  const filteredProjects = useMemo(() => {
+    const query = projectsSearch.trim().toLowerCase();
+    if (!query) return projects;
+    return projects.filter((p) => p.name.toLowerCase().includes(query));
+  }, [projects, projectsSearch]);
+
   const submitCreate = async () => {
     const name = newName.trim();
     if (!name) {
@@ -99,10 +111,19 @@ export function AiAgentIntegrationPage() {
         all_projects: allProjects,
       };
       const created = await createAgentToken(payload);
+      // Оптимистичное добавление в список — гарантирует, что новый токен
+      // мгновенно появится в таблице, даже если последующий load() задержится.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { token: _revealed, ...tokenWithoutSecret } = created;
+      setTokens((prev) => [tokenWithoutSecret as AgentApiToken, ...prev]);
       setRevealedToken(created.token);
       pushToast("Токен создан. Сохраните значение — оно показывается один раз.", "success");
       setCreateOpen(false);
+      // Сбрасываем форму, чтобы следующий открыватель не унаследовал старые галочки.
       setNewName("");
+      setSelectedProjectIds([]);
+      setAllProjects(true);
+      setProjectsSearch("");
       await load();
     } catch (e) {
       setError(getApiErrorMessage(e, "Не удалось создать токен"));
@@ -137,41 +158,29 @@ export function AiAgentIntegrationPage() {
     return (
       <Box sx={{ p: 3 }}>
         <Typography variant="h6" fontWeight={700}>
-          Интеграция с ИИ
+          API токены
         </Typography>
         <Typography color="text.secondary" sx={{ mt: 1 }}>
-          Управление токенами API агента доступно только администраторам.
+          Управление API токенами доступно только администраторам.
         </Typography>
       </Box>
     );
   }
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100, mx: "auto" }}>
+    <Box>
       <Stack direction="row" spacing={1} alignItems="center" mb={2}>
         <SmartToyOutlinedIcon color="primary" />
         <Typography variant="h5" fontWeight={700}>
-          Интеграция с ИИ (API агента)
+          API токены
         </Typography>
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Bearer-токены для доступа к <strong>/api/v2</strong> из внешних ассистентов и скриптов. Храните секрет в надёжном месте.
-      </Typography>
 
       {error && (
         <Typography color="error" variant="body2" sx={{ mb: 2 }}>
           {error}
         </Typography>
       )}
-
-      <Stack direction="row" spacing={1} mb={2}>
-        <Button variant="contained" onClick={() => setCreateOpen(true)} disabled={busy}>
-          Новый токен
-        </Button>
-        <Button variant="outlined" onClick={() => void load()} disabled={loading}>
-          Обновить список
-        </Button>
-      </Stack>
 
       <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
         <CardContent>
@@ -213,20 +222,92 @@ export function AiAgentIntegrationPage() {
         </CardContent>
       </Card>
 
+      <Stack direction="row" spacing={1} mt={2}>
+        <Button variant="contained" onClick={() => setCreateOpen(true)} disabled={busy}>
+          Новый токен
+        </Button>
+      </Stack>
+
       <Dialog open={createOpen} onClose={() => (busy ? undefined : setCreateOpen(false))} fullWidth maxWidth="sm">
         <DialogTitle>Новый токен агента</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField label="Название" value={newName} onChange={(e) => setNewName(e.target.value)} fullWidth required />
+            <TextField
+              label="Название"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              fullWidth
+              required
+            />
             <FormControlLabel control={<Checkbox checked={allProjects} onChange={(e) => setAllProjects(e.target.checked)} />} label="Доступ ко всем проектам" />
             {!allProjects && (
-              <Box sx={{ maxHeight: 200, overflowY: "auto", border: "1px solid rgba(126,224,255,0.16)", p: 1 }}>
-                <FormGroup>
-                  {projects.map((p) => (
-                    <FormControlLabel key={p.id} control={<Checkbox checked={selectedProjectIds.includes(p.id)} onChange={() => toggleProject(p.id)} />} label={p.name} />
-                  ))}
-                </FormGroup>
-              </Box>
+              <Stack spacing={1}>
+                {/*
+                  Поиск + список проектов с чекбоксами. Каталог уже подтянут одним
+                  запросом в state.projects, фильтрация по имени локальная — реагирует
+                  моментально, без обращения к серверу.
+                */}
+                <TextField
+                  size="small"
+                  label="Поиск по проектам"
+                  value={projectsSearch}
+                  onChange={(e) => setProjectsSearch(e.target.value)}
+                  fullWidth
+                />
+                <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                  <Typography variant="caption" color="text.secondary">
+                    Выбрано: {selectedProjectIds.length} из {projects.length}
+                    {projectsSearch.trim() && ` · найдено ${filteredProjects.length}`}
+                  </Typography>
+                  <Stack direction="row" spacing={1}>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        // Выбрать все отфильтрованные (с учётом активного поиска)
+                        setSelectedProjectIds((prev) => {
+                          const next = new Set(prev);
+                          filteredProjects.forEach((p) => next.add(p.id));
+                          return Array.from(next);
+                        });
+                      }}
+                      disabled={filteredProjects.length === 0}
+                    >
+                      Выбрать все
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => setSelectedProjectIds([])}
+                      disabled={selectedProjectIds.length === 0}
+                    >
+                      Очистить
+                    </Button>
+                  </Stack>
+                </Stack>
+                <Box sx={{ maxHeight: 240, overflowY: "auto", border: "1px solid rgba(126,224,255,0.16)", p: 1 }}>
+                  {filteredProjects.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
+                      {projects.length === 0
+                        ? "Нет доступных проектов."
+                        : "Ничего не найдено по запросу."}
+                    </Typography>
+                  ) : (
+                    <FormGroup>
+                      {filteredProjects.map((p) => (
+                        <FormControlLabel
+                          key={p.id}
+                          control={
+                            <Checkbox
+                              checked={selectedProjectIds.includes(p.id)}
+                              onChange={() => toggleProject(p.id)}
+                            />
+                          }
+                          label={p.name}
+                        />
+                      ))}
+                    </FormGroup>
+                  )}
+                </Box>
+              </Stack>
             )}
             <Typography variant="subtitle2" fontWeight={600}>
               Области (scopes)

@@ -61,7 +61,6 @@ import {
   createPort,
   createService,
   createVulnerability,
-  deleteProjectNote,
   deleteVulnerabilityComment,
   deleteEndpoint,
   deleteHost,
@@ -83,7 +82,6 @@ import {
   updateEndpoint,
   updateHost,
   updatePort,
-  updateProjectNote,
   updateService,
   updateVulnerabilityComment,
   updateVulnerability,
@@ -530,6 +528,11 @@ export function HostDetailPage() {
   const [host, setHost] = useState<HostDetails | null>(null);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
+  // Платформенный диалог ввода названия новой страницы/подстраницы (вместо window.prompt).
+  const [noteCreateDialogOpen, setNoteCreateDialogOpen] = useState(false);
+  const [noteCreateParentId, setNoteCreateParentId] = useState<string | null>(null);
+  const [noteCreateTitle, setNoteCreateTitle] = useState("");
+  const [noteCreateBusy, setNoteCreateBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
@@ -542,6 +545,9 @@ export function HostDetailPage() {
   const [editingPortNumber, setEditingPortNumber] = useState("1");
   const [editingPortProtocol, setEditingPortProtocol] = useState<Port["protocol"]>("tcp");
   const [editingPortState, setEditingPortState] = useState<Port["state"]>("open");
+  const [editingPortServiceId, setEditingPortServiceId] = useState<string | null>(null);
+  const [editingPortServiceName, setEditingPortServiceName] = useState("");
+  const [editingPortServiceVersion, setEditingPortServiceVersion] = useState("");
   const [servicesByPortId, setServicesByPortId] = useState<Record<string, Service[]>>({});
   const [isCreateServiceOpen, setCreateServiceOpen] = useState(false);
   const [createServicePortId, setCreateServicePortId] = useState<string | null>(null);
@@ -569,9 +575,12 @@ export function HostDetailPage() {
   const [editingVulnerabilitySeverity, setEditingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
   const [editingVulnerabilityStatus, setEditingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
   const [isCreatePortOpen, setCreatePortOpen] = useState(false);
+  const [creatingPortIpId, setCreatingPortIpId] = useState<string>("");
   const [creatingPortNumber, setCreatingPortNumber] = useState("443");
   const [creatingPortProtocol, setCreatingPortProtocol] = useState<Port["protocol"]>("tcp");
   const [creatingPortState, setCreatingPortState] = useState<Port["state"]>("open");
+  const [creatingPortServiceName, setCreatingPortServiceName] = useState("");
+  const [creatingPortServiceVersion, setCreatingPortServiceVersion] = useState("");
   const [isCreateEndpointOpen, setCreateEndpointOpen] = useState(false);
   const [creatingEndpointPath, setCreatingEndpointPath] = useState("");
   const [creatingEndpointMethod, setCreatingEndpointMethod] = useState<Exclude<Endpoint["method"], null>>("GET");
@@ -588,6 +597,8 @@ export function HostDetailPage() {
   const swaggerImportInputRef = useRef<HTMLInputElement | null>(null);
   const closeEndpointsMenu = () => setEndpointsMenuAnchorEl(null);
   const [nmapImporting, setNmapImporting] = useState(false);
+  const [isNmapImportOpen, setNmapImportOpen] = useState(false);
+  const [nmapImportIpId, setNmapImportIpId] = useState<string>("");
   const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
   const [creatingVulnerabilityTitle, setCreatingVulnerabilityTitle] = useState("");
   const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("info");
@@ -603,13 +614,23 @@ export function HostDetailPage() {
   const [editingHostIps, setEditingHostIps] = useState<HostIpDraft[]>([]);
   const [editingHostName, setEditingHostName] = useState("");
   const [editingHostNotes, setEditingHostNotes] = useState("");
+  const [hostNotesEditOpen, setHostNotesEditOpen] = useState(false);
+  const [hostNotesSaving, setHostNotesSaving] = useState(false);
   const [editingHostOsType, setEditingHostOsType] = useState<OsType>("unknown");
+  const [ipActionsAnchorEl, setIpActionsAnchorEl] = useState<HTMLElement | null>(null);
+  const [addIpDraft, setAddIpDraft] = useState<string | null>(null);
+  const [editIpDraftId, setEditIpDraftId] = useState<string | null>(null);
+  const [editIpDraft, setEditIpDraft] = useState<{ ip: string; label: string }>({ ip: "", label: "" });
+  const ipCsvInputRef = useRef<HTMLInputElement | null>(null);
+  const [ipBulkDeleteMode, setIpBulkDeleteMode] = useState(false);
+  const [selectedIpIds, setSelectedIpIds] = useState<Set<string>>(() => new Set());
+  const [bulkDeletingIps, setBulkDeletingIps] = useState(false);
   const [portActionsAnchorEl, setPortActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activePort, setActivePort] = useState<Port | null>(null);
   const [portsSectionMenuAnchorEl, setPortsSectionMenuAnchorEl] = useState<HTMLElement | null>(null);
   const portsSectionMenuOpen = Boolean(portsSectionMenuAnchorEl);
   const closePortsSectionMenu = () => setPortsSectionMenuAnchorEl(null);
-  const nmapImportInputRef = useRef<HTMLInputElement | null>(null);
+  const nmapImportFileInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedPortIds, setSelectedPortIds] = useState<Set<string>>(() => new Set());
   const [bulkDeletingPorts, setBulkDeletingPorts] = useState(false);
   const [portBulkDeleteMode, setPortBulkDeleteMode] = useState(false);
@@ -628,6 +649,7 @@ export function HostDetailPage() {
   const [bulkDeletingVulnerabilities, setBulkDeletingVulnerabilities] = useState(false);
   const [vulnerabilityBulkDeleteMode, setVulnerabilityBulkDeleteMode] = useState(false);
   const [expandedPortIds, setExpandedPortIds] = useState<string[]>([]);
+  const [expandedIpIds, setExpandedIpIds] = useState<string[]>([]);
   const [expandedEndpointIds, setExpandedEndpointIds] = useState<string[]>([]);
   const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<string[]>([]);
   const normalizedHostEndpoints = useMemo(() => dedupeEndpointsByNormalizedPath(host?.endpoints ?? []), [host?.endpoints]);
@@ -775,6 +797,17 @@ export function HostDetailPage() {
       if (!projectId || !hostId) {
         return;
       }
+      // Секции «hosts» и «notes» относятся к проекту, а не к конкретному хосту,
+      // поэтому при клике на эти разделы в дереве уводим юзера обратно в проект,
+      // чтобы он увидел сводные данные (диаграммы по уязвимостям, журнал заметок).
+      if (section === "hosts") {
+        navigate(`/projects/${projectId}/hosts`);
+        return;
+      }
+      if (section === "notes") {
+        navigate(`/projects/${projectId}/notes`);
+        return;
+      }
       if (isVulnerabilityRoute) {
         navigate(`/projects/${projectId}/hosts/${hostId}`, { state: { section } });
         return;
@@ -815,21 +848,24 @@ export function HostDetailPage() {
     }
     setError(null);
     try {
-      const [hostResponse, hostsResponse, hostVulnsResponse] = await Promise.all([
+      const [hostResponse, hostsResponse, hostVulnsResponse, notesResponse] = await Promise.all([
         getHost(projectId, hostId),
         getHosts(projectId),
         getHostVulnerabilities(projectId, hostId),
+        listProjectNotes(projectId).catch(() => [] as ProjectNote[]),
       ]);
       setHost(hostResponse);
       setHosts(hostsResponse.items);
       setVulnerabilities(hostVulnsResponse.items);
+      setProjectNotes(notesResponse);
       const statsEntries = await Promise.allSettled(
         hostsResponse.items.map(async (listedHost) => {
           if (listedHost.id === hostId) {
             return [
               listedHost.id,
               {
-                portsCount: hostResponse.ports.length,
+                portsCount: hostResponse.ip_addresses.reduce((acc, ip) => acc + ip.ports.length, 0),
+                ipAddressesCount: hostResponse.ip_addresses.length,
                 endpointsCount: hostResponse.endpoints.length,
                 vulnerabilitiesCount: hostVulnsResponse.items.length,
               },
@@ -842,7 +878,8 @@ export function HostDetailPage() {
           return [
             listedHost.id,
             {
-              portsCount: hostDetails.ports.length,
+              portsCount: hostDetails.ip_addresses.reduce((acc, ip) => acc + ip.ports.length, 0),
+              ipAddressesCount: hostDetails.ip_addresses.length,
               endpointsCount: hostDetails.endpoints.length,
               vulnerabilitiesCount: hostVulns.items.length,
             },
@@ -966,12 +1003,13 @@ export function HostDetailPage() {
 
   useEffect(() => {
     const loadServices = async () => {
-      if (!projectId || !hostId || !host?.ports.length) {
+      const ports = host?.ip_addresses.flatMap((ip) => ip.ports) ?? [];
+      if (!projectId || !hostId || !ports.length) {
         setServicesByPortId({});
         return;
       }
       const entries = await Promise.allSettled(
-        host.ports.map(async (port) => {
+        ports.map(async (port) => {
           const services = await getServices(projectId, hostId, port.id);
           return [port.id, services] as const;
         })
@@ -986,7 +1024,7 @@ export function HostDetailPage() {
       setServicesByPortId(mapped);
     };
     void loadServices();
-  }, [host?.ports, hostId, projectId]);
+  }, [host?.ip_addresses, hostId, projectId]);
 
   const hostActionsOpen = Boolean(hostActionsAnchorEl);
   const portActionsOpen = Boolean(portActionsAnchorEl);
@@ -1064,34 +1102,59 @@ export function HostDetailPage() {
     setEditHostOpen(true);
   };
 
+  const startHostNotesEdit = () => {
+    if (!host) {
+      return;
+    }
+    setError(null);
+    setEditingHostNotes(host.notes ?? "");
+    setHostNotesEditOpen(true);
+  };
+
+  const cancelHostNotesEdit = () => {
+    setEditingHostNotes(host?.notes ?? "");
+    setHostNotesEditOpen(false);
+  };
+
+  const submitHostNotes = async () => {
+    if (!projectId || !hostId) {
+      return;
+    }
+    setHostNotesSaving(true);
+    setError(null);
+    try {
+      const updatedHost = await updateHost(projectId, hostId, {
+        notes: editingHostNotes.trim() || null,
+      });
+      setHost((prev) => (prev ? { ...prev, notes: updatedHost.notes } : prev));
+      setHostNotesEditOpen(false);
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось обновить описание хоста"));
+    } finally {
+      setHostNotesSaving(false);
+    }
+  };
+
   const saveHostInfo = async () => {
     if (!projectId || !hostId) {
       return;
     }
     setError(null);
     try {
-      const ipAddresses = normalizedEditingHostIps.map((item, index) => ({
-        ip_address: item.ip_address,
-        label: item.label || null,
-        is_primary: item.is_primary || !normalizedEditingHostIps.some((candidate) => candidate.is_primary) && index === 0,
-      }));
+      // В упрощённой форме редактируем только hostname и os_type.
+      // IP-адреса и описание управляются отдельными UI-фрагментами
+      // на самой странице хоста, в этот диалог не выносим.
       const updatedHost = await updateHost(projectId, hostId, {
-        ip_address: ipAddresses.find((item) => item.is_primary)?.ip_address || ipAddresses[0]?.ip_address,
-        ip_addresses: ipAddresses,
         hostname: editingHostName.trim() || undefined,
-        notes: editingHostNotes.trim() || undefined,
         os_type: editingHostOsType,
       });
       setHost((prev) =>
         prev
           ? {
               ...prev,
-              ip_address: updatedHost.ip_address,
-              ip_addresses: updatedHost.ip_addresses,
               hostname: updatedHost.hostname,
               status: updatedHost.status,
               os_type: updatedHost.os_type,
-              notes: updatedHost.notes,
             }
           : prev
       );
@@ -1099,6 +1162,148 @@ export function HostDetailPage() {
     } catch (error) {
       setError(getApiErrorMessage(error, "Не удалось обновить информацию о хосте."));
     }
+  };
+
+  /** Сохраняет переданный список IP в БД и обновляет state хоста на месте. */
+  const persistHostIps = async (next: Array<{ ip_address: string; label: string | null; is_primary: boolean }>): Promise<void> => {
+    if (!projectId || !hostId) return;
+    setError(null);
+    try {
+      const updated = await updateHost(projectId, hostId, {
+        ip_address: next.find((it) => it.is_primary)?.ip_address || next[0]?.ip_address,
+        ip_addresses: next,
+      });
+      setHost((prev) =>
+        prev ? { ...prev, ip_address: updated.ip_address, ip_addresses: updated.ip_addresses } : prev,
+      );
+    } catch (err) {
+      setError(getApiErrorMessage(err, "Не удалось обновить IP-адреса хоста."));
+    }
+  };
+
+  const sanitizeIpv4Input = (raw: string): string => {
+    const cleaned = raw.replace(/[^0-9.]/g, "").replace(/\.{2,}/g, ".");
+    const parts = cleaned.split(".").slice(0, 4);
+    return parts
+      .map((part) => {
+        if (part === "") return "";
+        const trimmed = part.replace(/^0+(?=\d)/, "").slice(0, 3) || part.slice(0, 3);
+        const n = parseInt(trimmed, 10);
+        if (Number.isNaN(n)) return "";
+        return n > 255 ? "255" : String(n);
+      })
+      .join(".");
+  };
+
+  const isValidIpv4 = (value: string): boolean => {
+    const parts = value.split(".");
+    if (parts.length !== 4) return false;
+    return parts.every((p) => /^(0|[1-9]\d?|1\d{2}|2[0-4]\d|25[0-5])$/.test(p));
+  };
+
+  const handleAddIp = async (ip: string) => {
+    const trimmed = ip.trim();
+    if (!trimmed) return;
+    if (!isValidIpv4(trimmed)) {
+      setError("Некорректный IPv4-адрес");
+      return;
+    }
+    const current = (host?.ip_addresses ?? []).map((row) => ({
+      ip_address: row.ip_address,
+      label: row.label,
+      is_primary: row.is_primary,
+    }));
+    if (current.some((row) => row.ip_address === trimmed)) {
+      setError("IP-адрес уже добавлен");
+      return;
+    }
+    current.push({ ip_address: trimmed, label: null, is_primary: current.length === 0 });
+    await persistHostIps(current);
+  };
+
+  const handleRemoveIp = async (id: string) => {
+    const current = host?.ip_addresses ?? [];
+    if (current.length <= 1 && !host?.hostname) {
+      setError("Нельзя удалить единственный IP-адрес без указанного hostname");
+      return;
+    }
+    const next = current
+      .filter((row) => row.id !== id)
+      .map((row, idx) => ({ ip_address: row.ip_address, label: row.label, is_primary: idx === 0 }));
+    await persistHostIps(next);
+  };
+
+  const removeSelectedIps = async () => {
+    const current = host?.ip_addresses ?? [];
+    if (selectedIpIds.size === 0) return;
+    if (current.length - selectedIpIds.size < 1 && !host?.hostname) {
+      setError("Нельзя удалить все IP-адреса без указанного hostname");
+      return;
+    }
+    if (!window.confirm(`Удалить выбранные IP-адреса (${selectedIpIds.size})?`)) return;
+    setBulkDeletingIps(true);
+    setError(null);
+    try {
+      const next = current
+        .filter((row) => !selectedIpIds.has(row.id))
+        .map((row, idx) => ({ ip_address: row.ip_address, label: row.label, is_primary: idx === 0 }));
+      await persistHostIps(next);
+      setSelectedIpIds(new Set());
+      setIpBulkDeleteMode(false);
+    } finally {
+      setBulkDeletingIps(false);
+    }
+  };
+
+  const toggleIpSelection = (id: string) => {
+    setSelectedIpIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleSaveIpEdit = async (id: string, ip: string, label: string) => {
+    const trimmed = ip.trim();
+    if (!trimmed) return;
+    const current = host?.ip_addresses ?? [];
+    if (current.some((row) => row.ip_address === trimmed && row.id !== id)) {
+      setError("IP-адрес уже существует в списке");
+      return;
+    }
+    const next = current.map((row) =>
+      row.id === id ? { ip_address: trimmed, label: label.trim() || null, is_primary: row.is_primary } : { ip_address: row.ip_address, label: row.label, is_primary: row.is_primary },
+    );
+    await persistHostIps(next);
+  };
+
+  const handleImportIpsCsv = async (file: File) => {
+    const text = await file.text();
+    const parsed: Array<{ ip: string; label: string }> = [];
+    text.split(/\r?\n/).forEach((rawLine) => {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) return;
+      const [ip, ...rest] = line.split(",");
+      const candidate = (ip || "").trim();
+      if (!candidate) return;
+      parsed.push({ ip: candidate, label: rest.join(",").trim() });
+    });
+    if (parsed.length === 0) {
+      setError("В CSV-файле не найдено валидных IP-адресов");
+      return;
+    }
+    const existing = host?.ip_addresses ?? [];
+    const seen = new Set(existing.map((row) => row.ip_address));
+    const next = [
+      ...existing.map((row) => ({ ip_address: row.ip_address, label: row.label, is_primary: row.is_primary })),
+    ];
+    parsed.forEach(({ ip, label }) => {
+      if (seen.has(ip)) return;
+      seen.add(ip);
+      next.push({ ip_address: ip, label: label || null, is_primary: next.length === 0 });
+    });
+    await persistHostIps(next);
   };
 
   const removeHost = async () => {
@@ -1110,6 +1315,22 @@ export function HostDetailPage() {
     }
     await deleteHost(projectId, hostId);
     navigate(`/projects/${projectId}`);
+  };
+
+  const submitNewNote = async () => {
+    if (!projectId) return;
+    const title = noteCreateTitle.trim();
+    if (!title) return;
+    setNoteCreateBusy(true);
+    try {
+      await createProjectNote(projectId, { title, parent_id: noteCreateParentId });
+      setProjectNotes(await listProjectNotes(projectId));
+      setNoteCreateDialogOpen(false);
+    } catch (err) {
+      setError(getApiErrorMessage(err, "Не удалось создать заметку"));
+    } finally {
+      setNoteCreateBusy(false);
+    }
   };
 
   const openEndpointActions = (event: React.MouseEvent<HTMLElement>, endpoint: Endpoint) => {
@@ -1200,6 +1421,10 @@ export function HostDetailPage() {
     setEditingPortNumber(String(port.port_number));
     setEditingPortProtocol(port.protocol);
     setEditingPortState(port.state);
+    const portService = servicesByPortId[port.id]?.[0] ?? null;
+    setEditingPortServiceId(portService?.id ?? null);
+    setEditingPortServiceName(portService?.name ?? "");
+    setEditingPortServiceVersion(portService?.version ?? "");
     setEditPortOpen(true);
   };
 
@@ -1207,29 +1432,94 @@ export function HostDetailPage() {
     if (!projectId || !hostId || !editingPortId) {
       return;
     }
-    await updatePort(projectId, hostId, editingPortId, {
-      port_number: Number(editingPortNumber),
-      protocol: editingPortProtocol,
-      state: editingPortState,
-    });
-    setEditPortOpen(false);
-    await loadHost();
+    try {
+      await updatePort(projectId, hostId, editingPortId, {
+        port_number: Number(editingPortNumber),
+        protocol: editingPortProtocol,
+        state: editingPortState,
+      });
+      const nextName = editingPortServiceName.trim();
+      const nextVersion = editingPortServiceVersion.trim();
+      if (editingPortServiceId) {
+        if (!nextName) {
+          await deleteService(projectId, hostId, editingPortId, editingPortServiceId);
+        } else {
+          await updateService(projectId, hostId, editingPortId, editingPortServiceId, {
+            name: nextName,
+            version: nextVersion || null,
+          });
+        }
+      } else if (nextName) {
+        await createService(projectId, hostId, editingPortId, {
+          name: nextName,
+          version: nextVersion || undefined,
+        });
+      }
+      setEditPortOpen(false);
+      await loadHost();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось сохранить порт."));
+    }
   };
 
   const createHostPort = async () => {
-    if (!projectId || !hostId) {
+    if (!projectId || !hostId || !creatingPortIpId) {
       return;
     }
-    await createPort(projectId, hostId, {
-      port_number: Number(creatingPortNumber),
-      protocol: creatingPortProtocol,
-      state: creatingPortState,
-    });
-    setCreatePortOpen(false);
+    try {
+      const port = await createPort(projectId, hostId, {
+        ip_address_id: creatingPortIpId,
+        port_number: Number(creatingPortNumber),
+        protocol: creatingPortProtocol,
+        state: creatingPortState,
+      });
+      const serviceName = creatingPortServiceName.trim();
+      if (serviceName) {
+        try {
+          await createService(projectId, hostId, port.id, {
+            name: serviceName,
+            version: creatingPortServiceVersion.trim() || undefined,
+          });
+        } catch (serviceError) {
+          setError(getApiErrorMessage(serviceError, "Порт создан, но не удалось сохранить сервис."));
+        }
+      }
+      setCreatePortOpen(false);
+      setCreatingPortIpId("");
+      setCreatingPortNumber("443");
+      setCreatingPortProtocol("tcp");
+      setCreatingPortState("open");
+      setCreatingPortServiceName("");
+      setCreatingPortServiceVersion("");
+      await loadHost();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось создать порт."));
+    }
+  };
+
+  const openCreatePortDialogForIp = (ipAddressId: string) => {
+    setCreatingPortIpId(ipAddressId);
     setCreatingPortNumber("443");
     setCreatingPortProtocol("tcp");
     setCreatingPortState("open");
-    await loadHost();
+    setCreatingPortServiceName("");
+    setCreatingPortServiceVersion("");
+    setCreatePortOpen(true);
+  };
+
+  const removeSinglePort = async (port: Port) => {
+    if (!projectId || !hostId) {
+      return;
+    }
+    if (!window.confirm(`Удалить порт ${port.port_number}/${port.protocol}?`)) {
+      return;
+    }
+    try {
+      await deletePort(projectId, hostId, port.id);
+      await loadHost();
+    } catch (error) {
+      setError(getApiErrorMessage(error, "Не удалось удалить порт."));
+    }
   };
 
   const normalizeImportedPortState = (value: string): Port["state"] => {
@@ -1309,8 +1599,8 @@ export function HostDetailPage() {
     return Array.from(entries.values()).sort((left, right) => left.port_number - right.port_number);
   };
 
-  const importPortsFromNmapFile = async (file: File | null) => {
-    if (!file || !projectId || !hostId) {
+  const importPortsFromNmapFile = async (file: File | null, ipAddressId: string) => {
+    if (!file || !projectId || !hostId || !ipAddressId) {
       return;
     }
     setNmapImporting(true);
@@ -1322,7 +1612,8 @@ export function HostDetailPage() {
       if (!parsedPorts.length) {
         throw new Error("В Nmap файле не найдено портов для импорта.");
       }
-      const existingKeys = new Set((host?.ports ?? []).map((item) => `${item.port_number}/${item.protocol}`));
+      const targetIp = host?.ip_addresses.find((ip) => ip.id === ipAddressId);
+      const existingKeys = new Set((targetIp?.ports ?? []).map((item) => `${item.port_number}/${item.protocol}`));
       let created = 0;
       let skipped = 0;
       let failed = 0;
@@ -1333,7 +1624,7 @@ export function HostDetailPage() {
           continue;
         }
         try {
-          await createPort(projectId, hostId, entry);
+          await createPort(projectId, hostId, { ...entry, ip_address_id: ipAddressId });
           existingKeys.add(key);
           created += 1;
         } catch {
@@ -2002,7 +2293,7 @@ export function HostDetailPage() {
 
   useEffect(() => {
     setSelectedPortIds((prev) => {
-      const valid = new Set((host?.ports ?? []).map((p) => p.id));
+      const valid = new Set((host?.ip_addresses ?? []).flatMap((ip) => ip.ports.map((p) => p.id)));
       const next = new Set<string>();
       prev.forEach((id) => {
         if (valid.has(id)) {
@@ -2011,7 +2302,30 @@ export function HostDetailPage() {
       });
       return next.size === prev.size ? prev : next;
     });
-  }, [host?.ports]);
+  }, [host?.ip_addresses]);
+
+  useEffect(() => {
+    if (!host?.ip_addresses?.length) {
+      return;
+    }
+    setExpandedIpIds((prev) => {
+      const validIds = new Set(host.ip_addresses.map((ip) => ip.id));
+      const kept = prev.filter((id) => validIds.has(id));
+      return kept.length === prev.length ? prev : kept;
+    });
+  }, [host?.ip_addresses]);
+
+  useEffect(() => {
+    if (selectedSection === "ports") {
+      setExpandedIpIds([]);
+    }
+  }, [selectedSection]);
+
+  useEffect(() => {
+    if (ipBulkDeleteMode) {
+      setExpandedIpIds([]);
+    }
+  }, [ipBulkDeleteMode]);
 
   const togglePortSelection = useCallback((portId: string) => {
     setSelectedPortIds((prev) => {
@@ -2147,7 +2461,7 @@ export function HostDetailPage() {
     setMentionHighlightActive(true);
     const timer = window.setTimeout(() => {
       setMentionHighlightActive(false);
-    }, 5000);
+    }, 3000);
     return () => {
       window.clearTimeout(timer);
     };
@@ -2241,16 +2555,13 @@ export function HostDetailPage() {
   };
 
   const hostTitle = host?.hostname || host?.ip_address || "unknown-host";
-  const portsCount = host?.ports.length ?? 0;
+  const allHostPorts = useMemo<Port[]>(
+    () => host?.ip_addresses.flatMap((ip) => ip.ports) ?? [],
+    [host?.ip_addresses]
+  );
+  const portsCount = allHostPorts.length;
   const endpointsCount = normalizedHostEndpoints.length;
   const vulnerabilitiesCount = vulnerabilities.length;
-  const vulnsBySeverity = useMemo(() => {
-    const counts: Record<Vulnerability["severity"], number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-    vulnerabilities.forEach((v) => {
-      counts[v.severity] = (counts[v.severity] ?? 0) + 1;
-    });
-    return counts;
-  }, [vulnerabilities]);
   const severityChipSx: Record<Vulnerability["severity"], object> = {
     critical: { bgcolor: "rgba(244,67,54,0.18)", color: "#ff8a80", border: "1px solid rgba(244,67,54,0.4)" },
     high: { bgcolor: "rgba(255,152,0,0.18)", color: "#ffcc80", border: "1px solid rgba(255,152,0,0.4)" },
@@ -2669,18 +2980,19 @@ export function HostDetailPage() {
               alignItems="flex-start"
               sx={{
                 mb: 0,
+                py: 1.25,
                 border: "1px solid transparent",
                 ...(isHighlighted
                   ? {
-                      animation: "mentionHighlightFade 5s ease forwards",
+                      animation: "mentionHighlightFade 3s ease forwards",
                       "@keyframes mentionHighlightFade": {
                         "0%": {
-                          backgroundColor: "rgba(76,175,80,0.18)",
-                          borderColor: "rgba(76,175,80,0.65)",
+                          backgroundColor: "rgba(76,175,80,0.28)",
+                          borderColor: "rgba(76,175,80,0.75)",
                         },
-                        "60%": {
-                          backgroundColor: "rgba(76,175,80,0.18)",
-                          borderColor: "rgba(76,175,80,0.65)",
+                        "66%": {
+                          backgroundColor: "rgba(76,175,80,0.28)",
+                          borderColor: "rgba(76,175,80,0.75)",
                         },
                         "100%": {
                           backgroundColor: "transparent",
@@ -2751,17 +3063,6 @@ export function HostDetailPage() {
                 </Typography>
               </Stack>
             </ListItem>
-            {commentIndex < vulnComments.length - 1 ? (
-              <Divider
-                component="li"
-                sx={{
-                  my: 2.25,
-                  borderColor: "rgba(126,224,255,0.2)",
-                  borderBottomWidth: 2,
-                  listStyle: "none",
-                }}
-              />
-            ) : null}
             </Fragment>
           );
         })}
@@ -2988,7 +3289,10 @@ export function HostDetailPage() {
     );
   };
 
-  if (loading) {
+  // Показываем full-screen спиннер только при первом заходе (когда host ещё не загружен).
+  // При навигации между хостами host уже есть из предыдущего рендера — пользователь видит
+  // прежний контент + узкий LinearProgress сверху, без "перезагрузки страницы".
+  if (loading && !host) {
     return (
       <Box display="flex" justifyContent="center" py={6}>
         <CircularProgress />
@@ -2998,6 +3302,11 @@ export function HostDetailPage() {
 
   return (
     <Stack spacing={2.5}>
+      {loading && (
+        <LinearProgress
+          sx={{ height: 2, "& .MuiLinearProgress-bar": { backgroundColor: "rgba(126,224,255,0.6)" } }}
+        />
+      )}
       <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
         <Stack direction="row" alignItems="center" spacing={1.5}>
           <HostOsIcon os_type={host?.os_type ?? "unknown"} sx={{ fontSize: 36 }} />
@@ -3007,6 +3316,22 @@ export function HostDetailPage() {
             </Typography>
           </Stack>
         </Stack>
+        {/*
+          Кнопка-троеточие в правом краю шапки — единый стиль с обзором проекта:
+          контур, 42x42, тёмная заливка. В меню — «Редактировать хост» / «Удалить хост».
+        */}
+        <IconButton
+          aria-label="Действия с хостом"
+          onClick={openHostActionsMenu}
+          sx={{
+            border: "1px solid rgba(126,224,255,0.2)",
+            width: 42,
+            height: 42,
+            backgroundColor: "rgba(15,27,45,0.72)",
+          }}
+        >
+          <MoreVertIcon />
+        </IconButton>
       </Stack>
 
       <Menu
@@ -3031,8 +3356,10 @@ export function HostDetailPage() {
         </MenuItem>
       </Menu>
 
-      <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+      <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "flex-start" }}>
         <ProjectTreeNav
+          projectId={projectId}
+          viewMode="host"
           hosts={hosts}
           selectedHostId={hostId ?? null}
           selectedSection={selectedSection}
@@ -3041,9 +3368,41 @@ export function HostDetailPage() {
           endpointsCount={endpointsCount}
           vulnerabilitiesCount={vulnerabilitiesCount}
           hostStatsById={hostStatsById}
+          notesCount={projectNotes.length}
+          notes={projectNotes}
+          selectedNoteId={null}
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
           onSelectSection={openHostSection}
           onSelectProjectOverview={() => navigate(`/projects/${projectId}`)}
+          onSelectNote={(noteId) => navigate(`/projects/${projectId}/notes/${noteId}`)}
+          onSelectNotesLabel={() => navigate(`/projects/${projectId}/notes`)}
+          onCreateNote={(parentId) => {
+            // Открываем платформенный диалог — никаких window.prompt.
+            setNoteCreateParentId(parentId);
+            setNoteCreateTitle("");
+            setNoteCreateDialogOpen(true);
+          }}
+          onMoveNote={async (noteId, newParentId) => {
+            if (!projectId) return;
+            try {
+              await moveProjectNote(projectId, noteId, { parent_id: newParentId });
+              setProjectNotes(await listProjectNotes(projectId));
+            } catch (err) {
+              setError(getApiErrorMessage(err, "Не удалось переместить заметку"));
+            }
+          }}
+          onReorderNotes={async (parentId, orderedIds) => {
+            if (!projectId) return;
+            try {
+              await reorderProjectNotes(projectId, {
+                parent_id: parentId,
+                items: orderedIds.map((id, idx) => ({ id, sort_order: idx + 1 })),
+              });
+              setProjectNotes(await listProjectNotes(projectId));
+            } catch (err) {
+              setError(getApiErrorMessage(err, "Не удалось обновить порядок заметок"));
+            }
+          }}
           onSelectHost={() => undefined}
           onOpenHost={(nextHostId, section) => {
             // #region agent log
@@ -3070,9 +3429,9 @@ export function HostDetailPage() {
                 }}
               >
                 <CardContent>
-                  <Typography color="text.secondary">Портов хоста</Typography>
+                  <Typography color="text.secondary">IP-адресов хоста</Typography>
                   <Typography variant="h4" fontWeight={700}>
-                    {portsCount}
+                    {host?.ip_addresses.length ?? 0}
                   </Typography>
                 </CardContent>
               </Card>
@@ -3117,111 +3476,273 @@ export function HostDetailPage() {
             <Stack spacing={2}>
               <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
                 <CardContent>
-                  <Typography variant="h6" fontWeight={700} mb={1.5}>
-                    Уязвимости по уровням
-                  </Typography>
-                  <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
-                    {(["critical", "high", "medium", "low", "info"] as const).map((sev) => {
-                      const count = vulnsBySeverity[sev] ?? 0;
-                      const total = vulnerabilitiesCount || 1;
-                      const percent = vulnerabilitiesCount > 0 ? (count / total) * 100 : 0;
-                      const palette: Record<typeof sev, { bg: string; text: string; bar: string; ring: string }> = {
-                        critical: { bg: "#b71c1c", text: "#fff", bar: "#f44336", ring: "rgba(244,67,54,0.45)" },
-                        high: { bg: "#e65100", text: "#fff", bar: "#ff9800", ring: "rgba(255,152,0,0.45)" },
-                        medium: { bg: "#f9a825", text: "#1a1a1a", bar: "#ffeb3b", ring: "rgba(255,235,59,0.45)" },
-                        low: { bg: "#2e7d32", text: "#fff", bar: "#4caf50", ring: "rgba(76,175,80,0.45)" },
-                        info: { bg: "#1565c0", text: "#fff", bar: "#2196f3", ring: "rgba(33,150,243,0.45)" },
-                      };
-                      const labels: Record<typeof sev, string> = {
-                        critical: "Critical",
-                        high: "High",
-                        medium: "Medium",
-                        low: "Low",
-                        info: "Info",
-                      };
-                      const p = palette[sev];
-                      return (
-                        <Box key={sev} sx={{ minWidth: 110, textAlign: "center" }}>
-                          <Avatar
-                            sx={{
-                              width: 56,
-                              height: 56,
-                              bgcolor: p.bg,
-                              color: p.text,
-                              fontWeight: 700,
-                              fontSize: "1.25rem",
-                              mx: "auto",
-                              boxShadow: `0 0 0 4px ${p.ring}`,
-                            }}
-                          >
-                            {count}
-                          </Avatar>
-                          <Typography variant="caption" sx={{ display: "block", mt: 0.75, color: "text.secondary" }}>
-                            {labels[sev]}
-                          </Typography>
-                          <LinearProgress
-                            variant="determinate"
-                            value={percent}
-                            sx={{
-                              mt: 0.5,
-                              height: 4,
-                              borderRadius: 2,
-                              backgroundColor: "rgba(255,255,255,0.06)",
-                              "& .MuiLinearProgress-bar": { backgroundColor: p.bar },
-                            }}
-                          />
-                          <Typography variant="caption" sx={{ color: "text.secondary", fontSize: "0.7rem" }}>
-                            {vulnerabilitiesCount > 0 ? `${percent.toFixed(0)}%` : "—"}
-                          </Typography>
-                        </Box>
-                      );
-                    })}
-                  </Stack>
-                </CardContent>
-              </Card>
-              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
-                <CardContent>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                     <Typography variant="h6" fontWeight={700}>
                       IP-адреса
                     </Typography>
-                    <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={openHostEdit}>
-                      Добавить
-                    </Button>
+                    <IconButton
+                      size="small"
+                      aria-label="Действия с IP-адресами"
+                      onClick={(event) => setIpActionsAnchorEl(event.currentTarget)}
+                    >
+                      <MoreVertIcon fontSize="small" />
+                    </IconButton>
                   </Stack>
+                  <Menu
+                    anchorEl={ipActionsAnchorEl}
+                    open={Boolean(ipActionsAnchorEl)}
+                    onClose={() => setIpActionsAnchorEl(null)}
+                    anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                    transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  >
+                    <MenuItem
+                      onClick={() => {
+                        setAddIpDraft("");
+                        setIpActionsAnchorEl(null);
+                      }}
+                    >
+                      <AddIcon fontSize="small" sx={{ mr: 1 }} />
+                      Добавить IP-адрес
+                    </MenuItem>
+                    <MenuItem
+                      onClick={() => {
+                        ipCsvInputRef.current?.click();
+                        setIpActionsAnchorEl(null);
+                      }}
+                    >
+                      <UploadFileIcon fontSize="small" sx={{ mr: 1 }} />
+                      Импортировать из CSV
+                    </MenuItem>
+                    <MenuItem
+                      onClick={() => {
+                        setIpBulkDeleteMode(true);
+                        setSelectedIpIds(new Set());
+                        setIpActionsAnchorEl(null);
+                      }}
+                    >
+                      <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
+                      Удалить IP-адреса
+                    </MenuItem>
+                  </Menu>
+                  {ipBulkDeleteMode && (
+                    <Stack direction="row" spacing={1} alignItems="center" mb={1}>
+                      <Typography variant="body2" color="text.secondary">
+                        Выбрано: {selectedIpIds.size}
+                      </Typography>
+                      <Box sx={{ flexGrow: 1 }} />
+                      <Button
+                        size="small"
+                        color="error"
+                        variant="contained"
+                        disabled={selectedIpIds.size === 0 || bulkDeletingIps}
+                        onClick={() => void removeSelectedIps()}
+                      >
+                        {bulkDeletingIps ? "Удаление…" : `Удалить (${selectedIpIds.size})`}
+                      </Button>
+                      <Button
+                        size="small"
+                        disabled={bulkDeletingIps}
+                        onClick={() => {
+                          setIpBulkDeleteMode(false);
+                          setSelectedIpIds(new Set());
+                        }}
+                      >
+                        Отмена
+                      </Button>
+                    </Stack>
+                  )}
+                  <input
+                    ref={ipCsvInputRef}
+                    type="file"
+                    accept=".csv,text/csv,text/plain"
+                    hidden
+                    onChange={async (event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (file) await handleImportIpsCsv(file);
+                    }}
+                  />
                   <Stack spacing={1}>
-                    {(host?.ip_addresses?.length ? host.ip_addresses : host?.ip_address ? [{ id: "primary", ip_address: host.ip_address, label: null, is_primary: true }] : []).map((ip) => (
-                      <Box key={ip.id} sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 1.2, backgroundColor: "rgba(8,17,31,0.24)" }}>
+                    {(host?.ip_addresses?.length ? host.ip_addresses : host?.ip_address ? [{ id: "primary", ip_address: host.ip_address, label: null, is_primary: true }] : []).map((ip) => {
+                      const isEditing = editIpDraftId === ip.id;
+                      return (
+                        <Box
+                          key={ip.id}
+                          sx={{
+                            border: "1px solid rgba(126,224,255,0.12)",
+                            p: 1.2,
+                            backgroundColor: "rgba(8,17,31,0.24)",
+                            "&:hover .ip-row-actions": { opacity: 1 },
+                          }}
+                        >
+                          {isEditing ? (
+                            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                              <TextField
+                                size="small"
+                                value={editIpDraft.ip}
+                                onChange={(event) => setEditIpDraft((prev) => ({ ...prev, ip: event.target.value }))}
+                                placeholder="IP"
+                                sx={{ minWidth: 160 }}
+                              />
+                              <TextField
+                                size="small"
+                                value={editIpDraft.label}
+                                onChange={(event) => setEditIpDraft((prev) => ({ ...prev, label: event.target.value }))}
+                                placeholder="Метка"
+                                sx={{ minWidth: 160 }}
+                              />
+                              <Button
+                                size="small"
+                                variant="contained"
+                                onClick={async () => {
+                                  await handleSaveIpEdit(ip.id, editIpDraft.ip, editIpDraft.label);
+                                  setEditIpDraftId(null);
+                                }}
+                              >
+                                Сохранить
+                              </Button>
+                              <Button size="small" onClick={() => setEditIpDraftId(null)}>
+                                Отмена
+                              </Button>
+                            </Stack>
+                          ) : (
+                            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                              {ipBulkDeleteMode && ip.id !== "primary" && (
+                                <Checkbox
+                                  size="small"
+                                  checked={selectedIpIds.has(ip.id)}
+                                  onChange={() => toggleIpSelection(ip.id)}
+                                  sx={{ p: 0.25 }}
+                                />
+                              )}
+                              <Typography fontWeight={700}>{ip.ip_address}</Typography>
+                              {ip.label ? <Typography color="text.secondary">{ip.label}</Typography> : null}
+                              <Box sx={{ flexGrow: 1 }} />
+                              {!ipBulkDeleteMode && ip.id !== "primary" && (
+                                <IconButton
+                                  size="small"
+                                  aria-label="Редактировать IP"
+                                  className="ip-row-actions"
+                                  sx={{ opacity: 0, transition: "opacity .15s ease" }}
+                                  onClick={() => {
+                                    setEditIpDraftId(ip.id);
+                                    setEditIpDraft({ ip: ip.ip_address, label: ip.label ?? "" });
+                                  }}
+                                >
+                                  <EditIcon fontSize="small" />
+                                </IconButton>
+                              )}
+                            </Stack>
+                          )}
+                        </Box>
+                      );
+                    })}
+                    {addIpDraft !== null && (
+                      <Box sx={{ border: "1px dashed rgba(126,224,255,0.3)", p: 1.2, backgroundColor: "rgba(8,17,31,0.18)" }}>
                         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                          <Typography fontWeight={700}>{ip.ip_address}</Typography>
-                          {ip.label ? <Typography color="text.secondary">{ip.label}</Typography> : null}
-                          {ip.is_primary ? <Chip size="small" color="primary" label="Основной" /> : null}
+                          <TextField
+                            size="small"
+                            autoFocus
+                            value={addIpDraft}
+                            onChange={(event) => setAddIpDraft(sanitizeIpv4Input(event.target.value))}
+                            onKeyDown={async (event) => {
+                              if (event.key === "Enter" && addIpDraft && isValidIpv4(addIpDraft)) {
+                                event.preventDefault();
+                                await handleAddIp(addIpDraft);
+                                setAddIpDraft(null);
+                              }
+                            }}
+                            placeholder="0.0.0.0"
+                            inputProps={{
+                              inputMode: "numeric",
+                              maxLength: 15,
+                              pattern: "^(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)){3}$",
+                              "aria-label": "IPv4-адрес",
+                            }}
+                            error={Boolean(addIpDraft) && !isValidIpv4(addIpDraft)}
+                            helperText={addIpDraft && !isValidIpv4(addIpDraft) ? "Введите IPv4 в формате 0.0.0.0" : " "}
+                            sx={{ minWidth: 180 }}
+                          />
+                          <Button
+                            size="small"
+                            variant="contained"
+                            disabled={!addIpDraft || !isValidIpv4(addIpDraft)}
+                            onClick={async () => {
+                              if (!addIpDraft) return;
+                              await handleAddIp(addIpDraft);
+                              setAddIpDraft(null);
+                            }}
+                          >
+                            Добавить
+                          </Button>
+                          <Button size="small" onClick={() => setAddIpDraft(null)}>
+                            Отмена
+                          </Button>
                         </Stack>
                       </Box>
-                    ))}
-                    {!host?.ip_addresses?.length && !host?.ip_address && <Typography color="text.secondary">IP-адреса не добавлены.</Typography>}
+                    )}
+                    {!host?.ip_addresses?.length && !host?.ip_address && !addIpDraft && (
+                      <Typography color="text.secondary">IP-адреса не добавлены.</Typography>
+                    )}
                   </Stack>
                 </CardContent>
               </Card>
-              <Card sx={{ border: "1px solid rgba(126,224,255,0.14)" }}>
+              <Card
+                sx={{
+                  border: "1px solid rgba(126,224,255,0.14)",
+                  "&:hover .host-notes-edit-btn": { opacity: 1 },
+                }}
+              >
                 <CardContent>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                     <Typography variant="h6" fontWeight={700}>
                       Описание хоста
                     </Typography>
-                    <IconButton size="small" onClick={openHostActionsMenu} sx={{ border: "1px solid rgba(126,224,255,0.2)", backgroundColor: "rgba(15,27,45,0.6)" }}>
-                      <MoreVertIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                  <Box sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 2, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
-                    {host?.notes?.trim() ? (
-                      <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
-                        {normalizeMarkdownForRender(host.notes)}
-                      </ReactMarkdown>
-                    ) : (
-                      <Typography color="text.secondary">Описание хоста не заполнено</Typography>
+                    {!hostNotesEditOpen && (
+                      <IconButton
+                        size="small"
+                        aria-label="Редактировать описание хоста"
+                        className="host-notes-edit-btn"
+                        onClick={startHostNotesEdit}
+                        sx={{ opacity: 0, transition: "opacity .15s ease" }}
+                      >
+                        <EditIcon fontSize="small" />
+                      </IconButton>
                     )}
-                  </Box>
+                  </Stack>
+                  {hostNotesEditOpen ? (
+                    <Stack spacing={1.5}>
+                      <MarkdownEditor
+                        label="Описание хоста"
+                        showLabel={false}
+                        minRows={4}
+                        value={editingHostNotes}
+                        onChange={(next) => setEditingHostNotes(next || "")}
+                      />
+                      <Stack direction="row" spacing={1} justifyContent="flex-end">
+                        <Button onClick={cancelHostNotesEdit} disabled={hostNotesSaving}>
+                          Отмена
+                        </Button>
+                        <Button
+                          variant="contained"
+                          onClick={() => void submitHostNotes()}
+                          disabled={hostNotesSaving}
+                        >
+                          Сохранить
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  ) : (
+                    <Box sx={{ border: "1px solid rgba(126,224,255,0.12)", p: 2, borderRadius: 0, backgroundColor: "rgba(8,17,31,0.28)" }}>
+                      {host?.notes?.trim() ? (
+                        <ReactMarkdown urlTransform={markdownUrlTransform} components={{ img: MarkdownImage }}>
+                          {normalizeMarkdownForRender(host.notes)}
+                        </ReactMarkdown>
+                      ) : (
+                        <Typography color="text.secondary">Описание хоста не заполнено</Typography>
+                      )}
+                    </Box>
+                  )}
                 </CardContent>
               </Card>
             </Stack>
@@ -3232,38 +3753,39 @@ export function HostDetailPage() {
               <CardContent>
                 <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
                   <Typography variant="h6" fontWeight={700}>
-                    Порты
+                    IP-адреса
                   </Typography>
                   <Stack direction="row" alignItems="center" spacing={0.5}>
-                    {portBulkDeleteMode && selectedPortIds.size > 0 ? (
-                      <Tooltip title="Удалить выбранные порты">
+                    {ipBulkDeleteMode && selectedIpIds.size > 0 ? (
+                      <Tooltip title="Удалить выбранные IP">
                         <span>
                           <Button
                             size="small"
                             color="error"
                             variant="outlined"
                             startIcon={<DeleteIcon fontSize="small" />}
-                            disabled={bulkDeletingPorts}
-                            onClick={() => void removeSelectedPorts()}
+                            disabled={bulkDeletingIps}
+                            onClick={() => void removeSelectedIps()}
                           >
-                            Удалить ({selectedPortIds.size})
+                            Удалить ({selectedIpIds.size})
                           </Button>
                         </span>
                       </Tooltip>
                     ) : null}
-                    {portBulkDeleteMode && selectedPortIds.size === 0 ? (
+                    {ipBulkDeleteMode ? (
                       <Button
                         size="small"
                         variant="outlined"
+                        disabled={bulkDeletingIps}
                         onClick={() => {
-                          setPortBulkDeleteMode(false);
-                          setSelectedPortIds(new Set());
+                          setIpBulkDeleteMode(false);
+                          setSelectedIpIds(new Set());
                         }}
                       >
                         Отменить
                       </Button>
                     ) : null}
-                    <Tooltip title="Действия с портами">
+                    <Tooltip title="Действия">
                       <span>
                         <IconButton
                           size="small"
@@ -3276,17 +3798,6 @@ export function HostDetailPage() {
                       </span>
                     </Tooltip>
                   </Stack>
-                  <input
-                    ref={nmapImportInputRef}
-                    hidden
-                    type="file"
-                    accept=".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml"
-                    onChange={(event) => {
-                      const selectedFile = event.target.files?.[0] ?? null;
-                      void importPortsFromNmapFile(selectedFile);
-                      event.target.value = "";
-                    }}
-                  />
                   <Menu
                     anchorEl={portsSectionMenuAnchorEl}
                     open={portsSectionMenuOpen}
@@ -3295,187 +3806,172 @@ export function HostDetailPage() {
                     transformOrigin={{ vertical: "top", horizontal: "right" }}
                   >
                     <MenuItem
+                      disabled={nmapImporting || !host?.ip_addresses.length}
                       onClick={() => {
                         closePortsSectionMenu();
-                        setCreatePortOpen(true);
-                      }}
-                    >
-                      <AddIcon fontSize="small" sx={{ mr: 1 }} />
-                      Добавить порт
-                    </MenuItem>
-                    <MenuItem
-                      disabled={nmapImporting}
-                      onClick={() => {
-                        closePortsSectionMenu();
-                        nmapImportInputRef.current?.click();
+                        const primaryIp = host?.ip_addresses.find((ip) => ip.is_primary) ?? host?.ip_addresses[0];
+                        setNmapImportIpId(primaryIp?.id ?? "");
+                        setNmapImportOpen(true);
                       }}
                     >
                       <UploadFileIcon fontSize="small" sx={{ mr: 1 }} />
                       Импортировать из Nmap
                     </MenuItem>
                     <MenuItem
-                      disabled={!host?.ports.length}
+                      disabled={!host?.ip_addresses.length}
                       onClick={() => {
                         closePortsSectionMenu();
                         cancelServiceBulkDelete();
-                        setPortBulkDeleteMode(true);
+                        setSelectedIpIds(new Set());
+                        setIpBulkDeleteMode(true);
                       }}
                     >
                       <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
-                      Выбрать порты для удаления
+                      Выбрать IP для удаления
                     </MenuItem>
                   </Menu>
                 </Stack>
                 <Stack spacing={1}>
-                  {host?.ports.map((port) => (
-                    <Stack
-                      key={port.id}
-                      onClick={() => toggleExpandedId(port.id, setExpandedPortIds)}
-                      sx={{
-                        border: "1px solid rgba(126,224,255,0.12)",
-                        p: 1.4,
-                        borderRadius: 0,
-                        backgroundColor: "rgba(8,17,31,0.24)",
-                        cursor: "pointer",
-                        "& .port-actions": {
-                          opacity: 0,
-                          pointerEvents: "none",
-                          transition: "opacity 0.15s ease-in-out",
-                        },
-                        "&:hover .port-actions": {
-                          opacity: 1,
-                          pointerEvents: "auto",
-                        },
-                        ...(serviceBulkDeletePortId === port.id
-                          ? {
-                              "& .port-actions": {
-                                opacity: 1,
-                                pointerEvents: "auto",
-                              },
-                            }
-                          : {}),
-                      }}
-                    >
-                      <Stack direction="row" justifyContent="space-between" alignItems="center">
-                        <Stack direction="row" spacing={1} alignItems="center">
-                          {portBulkDeleteMode ? (
-                            <Checkbox
-                              size="small"
-                              checked={selectedPortIds.has(port.id)}
-                              onClick={(event) => event.stopPropagation()}
-                              onChange={() => togglePortSelection(port.id)}
-                              sx={{ p: 0.25, mr: -0.5 }}
-                            />
-                          ) : null}
-                          <Typography fontWeight={600}>
-                            {port.port_number}/{port.protocol}
-                          </Typography>
-                          <Chip label={port.state} size="small" />
-                        </Stack>
-                        <Stack direction="row" spacing={0.4} className="port-actions" alignItems="center">
-                          {serviceBulkDeletePortId === port.id && selectedServiceIdsForDelete.size > 0 ? (
-                            <Button
-                              size="small"
-                              color="error"
-                              variant="outlined"
-                              startIcon={<DeleteIcon fontSize="small" />}
-                              disabled={bulkDeletingServices}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void removeSelectedServicesFromPort(port.id);
-                              }}
-                            >
-                              Удалить ({selectedServiceIdsForDelete.size})
-                            </Button>
-                          ) : null}
-                          {serviceBulkDeletePortId === port.id && selectedServiceIdsForDelete.size === 0 ? (
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                cancelServiceBulkDelete();
-                              }}
-                            >
-                              Отменить
-                            </Button>
-                          ) : null}
-                          <Tooltip title="Действия">
-                            <IconButton size="small" onClick={(event) => openPortActions(event, port)}>
-                              <MoreVertIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        </Stack>
-                      </Stack>
-                      <Collapse in={expandedPortIds.includes(port.id)} timeout="auto" unmountOnExit>
-                        <Stack mt={1} spacing={1}>
-                          <Typography color="text.secondary" variant="body2">
-                            Порт {port.port_number}/{port.protocol} сейчас в состоянии {port.state}.
-                          </Typography>
-                          <Typography variant="body2" fontWeight={600}>
-                            Сервисы
-                          </Typography>
-                          <Stack spacing={0.8}>
-                            {(servicesByPortId[port.id] ?? []).map((service) => (
-                              <Stack
-                                key={service.id}
-                                direction="row"
-                                justifyContent="space-between"
-                                alignItems="center"
+                  {host?.ip_addresses.map((ip) => {
+                    const isIpExpanded = expandedIpIds.includes(ip.id);
+                    return (
+                      <Stack
+                        key={ip.id}
+                        sx={{
+                          border: "1px solid rgba(126,224,255,0.18)",
+                          borderRadius: 0,
+                          backgroundColor: "rgba(8,17,31,0.32)",
+                        }}
+                      >
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          justifyContent="space-between"
+                          onClick={() => {
+                            if (ipBulkDeleteMode) return;
+                            toggleExpandedId(ip.id, setExpandedIpIds);
+                          }}
+                          sx={{ p: 1.4, cursor: ipBulkDeleteMode ? "default" : "pointer" }}
+                        >
+                          <Stack direction="row" spacing={1.2} alignItems="center" sx={{ minWidth: 0 }}>
+                            {ipBulkDeleteMode ? (
+                              <Checkbox
+                                size="small"
+                                checked={selectedIpIds.has(ip.id)}
                                 onClick={(event) => event.stopPropagation()}
+                                onChange={() => toggleIpSelection(ip.id)}
+                                sx={{ p: 0.25 }}
+                              />
+                            ) : (
+                              <ExpandMoreIcon
+                                fontSize="small"
                                 sx={{
-                                  border: "1px solid rgba(126,224,255,0.12)",
-                                  p: 1,
-                                  borderRadius: 0,
-                                  backgroundColor: "rgba(8,17,31,0.26)",
+                                  transform: isIpExpanded ? "rotate(0deg)" : "rotate(-90deg)",
+                                  transition: "transform 0.15s ease-in-out",
+                                  color: "text.secondary",
                                 }}
-                              >
-                                <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
-                                  {serviceBulkDeletePortId === port.id ? (
-                                    <Checkbox
-                                      size="small"
-                                      checked={selectedServiceIdsForDelete.has(service.id)}
-                                      onClick={(event) => event.stopPropagation()}
-                                      onChange={() => toggleServiceSelectionForDelete(service.id)}
-                                      sx={{ p: 0.25, mr: -0.25 }}
-                                    />
-                                  ) : null}
-                                  <Stack spacing={0.2} sx={{ minWidth: 0 }}>
-                                    <Typography variant="body2" fontWeight={600}>
-                                      {service.name}
+                              />
+                            )}
+                            <Typography fontWeight={700}>{ip.ip_address}</Typography>
+                            {ip.label ? (
+                              <Typography variant="caption" color="text.secondary">
+                                {ip.label}
+                              </Typography>
+                            ) : null}
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary">
+                            {ip.ports.length} {ip.ports.length === 1 ? "порт" : ip.ports.length >= 2 && ip.ports.length <= 4 ? "порта" : "портов"}
+                          </Typography>
+                        </Stack>
+                        <Collapse in={isIpExpanded} timeout="auto" unmountOnExit>
+                          <Stack spacing={1} sx={{ px: 1.4, pb: 1.4 }}>
+                            {ip.ports.map((port) => {
+                              const portService = servicesByPortId[port.id]?.[0] ?? null;
+                              return (
+                                <Stack
+                                  key={port.id}
+                                  direction="row"
+                                  justifyContent="space-between"
+                                  alignItems="center"
+                                  sx={{
+                                    border: "1px solid rgba(126,224,255,0.12)",
+                                    p: 1.2,
+                                    borderRadius: 0,
+                                    backgroundColor: "rgba(8,17,31,0.24)",
+                                    "& .port-actions": {
+                                      opacity: 0,
+                                      pointerEvents: "none",
+                                      transition: "opacity 0.15s ease-in-out",
+                                    },
+                                    "&:hover .port-actions": {
+                                      opacity: 1,
+                                      pointerEvents: "auto",
+                                    },
+                                  }}
+                                >
+                                  <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
+                                    {portBulkDeleteMode ? (
+                                      <Checkbox
+                                        size="small"
+                                        checked={selectedPortIds.has(port.id)}
+                                        onClick={(event) => event.stopPropagation()}
+                                        onChange={() => togglePortSelection(port.id)}
+                                        sx={{ p: 0.25, mr: -0.5 }}
+                                      />
+                                    ) : null}
+                                    <Typography fontWeight={600}>
+                                      {port.port_number}/{port.protocol}
                                     </Typography>
-                                    <Typography variant="caption" color="text.secondary">
-                                      {service.version || "version n/a"}
-                                    </Typography>
+                                    <Chip label={port.state} size="small" />
+                                    {portService ? (
+                                      <Chip
+                                        label={portService.version ? `${portService.name} ${portService.version}` : portService.name}
+                                        size="small"
+                                        variant="outlined"
+                                        sx={{
+                                          borderColor: "rgba(126,224,255,0.32)",
+                                          color: "text.primary",
+                                        }}
+                                      />
+                                    ) : null}
+                                  </Stack>
+                                  <Stack direction="row" spacing={0.4} className="port-actions" alignItems="center">
+                                    <Tooltip title="Действия">
+                                      <IconButton size="small" onClick={(event) => openPortActions(event, port)}>
+                                        <MoreVertIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
                                   </Stack>
                                 </Stack>
-                                {serviceBulkDeletePortId === port.id ? null : (
-                                  <Tooltip title="Редактировать">
-                                    <IconButton
-                                      size="small"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        openEditServiceDialog(port.id, service);
-                                      }}
-                                      sx={{ color: "text.secondary", "&:hover": { backgroundColor: "rgba(126,224,255,0.08)", color: "text.primary" } }}
-                                    >
-                                      <EditIcon fontSize="small" />
-                                    </IconButton>
-                                  </Tooltip>
-                                )}
-                              </Stack>
-                            ))}
-                            {(servicesByPortId[port.id] ?? []).length === 0 && (
+                              );
+                            })}
+                            {ip.ports.length === 0 ? (
                               <Typography variant="caption" color="text.secondary">
-                                Сервисы на порту пока не добавлены.
+                                На этом IP-адресе портов пока нет.
                               </Typography>
-                            )}
+                            ) : null}
+                            <Button
+                              size="small"
+                              variant="text"
+                              startIcon={<AddIcon fontSize="small" />}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openCreatePortDialogForIp(ip.id);
+                              }}
+                              sx={{ alignSelf: "flex-start", color: "text.secondary" }}
+                            >
+                              Добавить порт
+                            </Button>
                           </Stack>
-                        </Stack>
-                      </Collapse>
-                    </Stack>
-                  ))}
-                  {!host?.ports.length && <Typography color="text.secondary">Порты для этого хоста пока не добавлены.</Typography>}
+                        </Collapse>
+                      </Stack>
+                    );
+                  })}
+                  {!host?.ip_addresses.length && (
+                    <Typography color="text.secondary">
+                      У хоста нет IP-адресов. Добавьте IP в разделе «IP-адреса», чтобы создавать порты.
+                    </Typography>
+                  )}
                 </Stack>
                 <Menu
                   anchorEl={portActionsAnchorEl}
@@ -3498,31 +3994,13 @@ export function HostDetailPage() {
                   <MenuItem
                     onClick={() => {
                       if (activePort) {
-                        openCreateServiceDialog(activePort.id);
+                        void removeSinglePort(activePort);
                       }
                       closePortActions();
-                    }}
-                  >
-                    <AddIcon fontSize="small" sx={{ mr: 1 }} />
-                    Добавить сервис
-                  </MenuItem>
-                  <MenuItem
-                    disabled={!activePort || (servicesByPortId[activePort.id] ?? []).length === 0}
-                    onClick={() => {
-                      if (!activePort) {
-                        closePortActions();
-                        return;
-                      }
-                      closePortActions();
-                      setPortBulkDeleteMode(false);
-                      setSelectedPortIds(new Set());
-                      setServiceBulkDeletePortId(activePort.id);
-                      setSelectedServiceIdsForDelete(new Set());
-                      setExpandedPortIds((prev) => (prev.includes(activePort.id) ? prev : [...prev, activePort.id]));
                     }}
                   >
                     <DeleteOutlineIcon fontSize="small" sx={{ mr: 1 }} />
-                    Выбрать сервисы для удаления
+                    Удалить порт
                   </MenuItem>
                 </Menu>
               </CardContent>
@@ -3856,50 +4334,62 @@ export function HostDetailPage() {
         </Stack>
       </Stack>
 
-      <Dialog open={isEditHostOpen} onClose={() => setEditHostOpen(false)} fullWidth>
+      <Dialog
+        open={noteCreateDialogOpen}
+        onClose={() => {
+          if (noteCreateBusy) return;
+          setNoteCreateDialogOpen(false);
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>{noteCreateParentId ? "Новая подстраница" : "Новая страница"}</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            label="Название"
+            value={noteCreateTitle}
+            onChange={(e) => setNoteCreateTitle(e.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void submitNewNote();
+              }
+            }}
+            sx={{ mt: 1 }}
+            disabled={noteCreateBusy}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNoteCreateDialogOpen(false)} disabled={noteCreateBusy}>
+            Отмена
+          </Button>
+          <Button
+            variant="contained"
+            disabled={noteCreateBusy || !noteCreateTitle.trim()}
+            onClick={() => void submitNewNote()}
+          >
+            Создать
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={isEditHostOpen} onClose={() => setEditHostOpen(false)} fullWidth maxWidth="xs">
         <DialogTitle>Редактировать хост</DialogTitle>
         <DialogContent>
+          {/*
+            Минимальная форма: только название (hostname) и тип ОС. IP-адреса
+            и описание редактируются на самой странице хоста (через troеточие
+            IP-таблицы и карандашик при наведении на описание).
+          */}
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <Stack spacing={1}>
-              <Stack direction="row" justifyContent="space-between" alignItems="center">
-                <Typography variant="subtitle2">IP-адреса</Typography>
-                <Button size="small" startIcon={<AddIcon />} onClick={addHostIpDraft}>
-                  Добавить IP
-                </Button>
-              </Stack>
-              {editingHostIps.map((item) => (
-                <Box key={item.id} sx={{ border: "1px solid rgba(126,224,255,0.14)", p: 1.2, backgroundColor: "rgba(8,17,31,0.24)" }}>
-                  <Stack direction={{ xs: "column", md: "row" }} spacing={1} alignItems={{ md: "center" }}>
-                    <TextField
-                      label="IP-адрес"
-                      value={item.ip_address}
-                      onChange={(event) => updateHostIpDraft(item.id, { ip_address: event.target.value })}
-                      sx={{ flex: 1 }}
-                    />
-                    <TextField
-                      label="Метка"
-                      value={item.label}
-                      onChange={(event) => updateHostIpDraft(item.id, { label: event.target.value })}
-                      sx={{ flex: 1 }}
-                    />
-                    <Stack direction="row" spacing={0.5} alignItems="center">
-                      <Chip
-                        size="small"
-                        color={item.is_primary ? "primary" : "default"}
-                        variant={item.is_primary ? "filled" : "outlined"}
-                        label={item.is_primary ? "Основной" : "Сделать основным"}
-                        onClick={() => markHostIpPrimary(item.id)}
-                      />
-                      <IconButton size="small" onClick={() => removeHostIpDraft(item.id)} disabled={editingHostIps.length <= 1 && !editingHostName.trim()}>
-                        <DeleteOutlineIcon fontSize="small" />
-                      </IconButton>
-                    </Stack>
-                  </Stack>
-                </Box>
-              ))}
-              {editingHostIps.length === 0 && <Typography color="text.secondary">IP-адреса не добавлены. Укажите hostname или добавьте IP.</Typography>}
-            </Stack>
-            <TextField label="Hostname" value={editingHostName} onChange={(event) => setEditingHostName(event.target.value)} />
+            <TextField
+              label="Название"
+              value={editingHostName}
+              onChange={(event) => setEditingHostName(event.target.value)}
+              autoFocus
+            />
             <FormControl fullWidth size="small">
               <InputLabel id="host-os-type-label">Тип ОС</InputLabel>
               <Select
@@ -3918,17 +4408,11 @@ export function HostDetailPage() {
                 ))}
               </Select>
             </FormControl>
-            <MarkdownEditor
-              minRows={4}
-              label="Описание"
-              value={editingHostNotes}
-              onChange={(next) => setEditingHostNotes(next || "")}
-            />
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditHostOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={() => void saveHostInfo()} disabled={normalizedEditingHostIps.length === 0 && !editingHostName.trim()}>
+          <Button variant="contained" onClick={() => void saveHostInfo()}>
             Сохранить
           </Button>
         </DialogActions>
@@ -3954,6 +4438,25 @@ export function HostDetailPage() {
               <MenuItem value="closed">closed</MenuItem>
               <MenuItem value="filtered">filtered</MenuItem>
             </TextField>
+            <Stack direction="row" spacing={1.5}>
+              <TextField
+                label="Сервис"
+                placeholder="например: nginx"
+                value={editingPortServiceName}
+                onChange={(event) => setEditingPortServiceName(event.target.value)}
+                sx={{ flex: 1 }}
+              />
+              <TextField
+                label="Версия"
+                placeholder="1.25"
+                value={editingPortServiceVersion}
+                onChange={(event) => setEditingPortServiceVersion(event.target.value)}
+                sx={{ flex: 1 }}
+              />
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              Очистите поле «Сервис», чтобы удалить сервис с порта.
+            </Typography>
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -3968,6 +4471,19 @@ export function HostDetailPage() {
         <DialogTitle>Добавить порт</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              select
+              label="IP-адрес"
+              value={creatingPortIpId}
+              onChange={(event) => setCreatingPortIpId(event.target.value)}
+            >
+              {(host?.ip_addresses ?? []).map((ip) => (
+                <MenuItem key={ip.id} value={ip.id}>
+                  {ip.ip_address}
+                  {ip.label ? ` (${ip.label})` : ""}
+                </MenuItem>
+              ))}
+            </TextField>
             <TextField
               label="Номер порта"
               type="number"
@@ -3984,12 +4500,96 @@ export function HostDetailPage() {
               <MenuItem value="closed">closed</MenuItem>
               <MenuItem value="filtered">filtered</MenuItem>
             </TextField>
+            <Stack direction="row" spacing={1.5}>
+              <TextField
+                label="Сервис (необязательно)"
+                placeholder="например: nginx"
+                value={creatingPortServiceName}
+                onChange={(event) => setCreatingPortServiceName(event.target.value)}
+                sx={{ flex: 1 }}
+              />
+              <TextField
+                label="Версия"
+                placeholder="1.25"
+                value={creatingPortServiceVersion}
+                onChange={(event) => setCreatingPortServiceVersion(event.target.value)}
+                sx={{ flex: 1 }}
+              />
+            </Stack>
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreatePortOpen(false)}>Отмена</Button>
-          <Button variant="contained" onClick={() => void createHostPort()}>
+          <Button
+            variant="contained"
+            onClick={() => void createHostPort()}
+            disabled={!creatingPortIpId || !creatingPortNumber}
+          >
             Создать
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={isNmapImportOpen}
+        onClose={() => {
+          if (!nmapImporting) {
+            setNmapImportOpen(false);
+          }
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>Импорт портов из Nmap</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              Выберите IP-адрес, к которому будут привязаны импортированные порты, и загрузите файл (txt/nmap/gnmap/xml).
+            </Typography>
+            <TextField
+              select
+              label="IP-адрес"
+              value={nmapImportIpId}
+              onChange={(event) => setNmapImportIpId(event.target.value)}
+              disabled={nmapImporting}
+            >
+              {(host?.ip_addresses ?? []).map((ip) => (
+                <MenuItem key={ip.id} value={ip.id}>
+                  {ip.ip_address}
+                  {ip.label ? ` (${ip.label})` : ""}
+                </MenuItem>
+              ))}
+            </TextField>
+            <input
+              ref={nmapImportFileInputRef}
+              hidden
+              type="file"
+              accept=".txt,.nmap,.gnmap,.xml,text/plain,text/xml,application/xml"
+              onChange={(event) => {
+                const selectedFile = event.target.files?.[0] ?? null;
+                event.target.value = "";
+                if (!selectedFile || !nmapImportIpId) {
+                  return;
+                }
+                void (async () => {
+                  await importPortsFromNmapFile(selectedFile, nmapImportIpId);
+                  setNmapImportOpen(false);
+                })();
+              }}
+            />
+            <Button
+              variant="outlined"
+              startIcon={<UploadFileIcon fontSize="small" />}
+              onClick={() => nmapImportFileInputRef.current?.click()}
+              disabled={nmapImporting || !nmapImportIpId}
+            >
+              {nmapImporting ? "Импорт..." : "Выбрать файл и импортировать"}
+            </Button>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNmapImportOpen(false)} disabled={nmapImporting}>
+            Закрыть
           </Button>
         </DialogActions>
       </Dialog>
@@ -4035,7 +4635,6 @@ export function HostDetailPage() {
                 multiline
                 minRows={4}
                 label="Вставить Raw HTTP запрос"
-                placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
                 value={editingEndpointImportRaw}
                 onChange={(event) => setEditingEndpointImportRaw(event.target.value)}
               />
@@ -4074,7 +4673,6 @@ export function HostDetailPage() {
                 multiline
                 minRows={2}
                 label="Параметры запроса (query string)"
-                placeholder="foo=bar&limit=10"
                 value={editingEndpointQueryString}
                 onChange={(event) => setEditingEndpointQueryString(event.target.value)}
               />
@@ -4083,7 +4681,6 @@ export function HostDetailPage() {
               multiline
               minRows={4}
               label="Заголовки"
-              placeholder={"Accept: application/json\nCookie: ... (будет заменён на плейсхолдер при сохранении)"}
               value={editingEndpointHeadersText}
               onChange={(event) => setEditingEndpointHeadersText(event.target.value)}
               sx={{ "& textarea": { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } }}
@@ -4108,7 +4705,6 @@ export function HostDetailPage() {
                   multiline
                   minRows={6}
                   label="Тело запроса"
-                  placeholder='{"user":"admin"}'
                   value={editingEndpointRequestBody}
                   onChange={(event) => setEditingEndpointRequestBody(event.target.value)}
                 />
@@ -4160,7 +4756,6 @@ export function HostDetailPage() {
                 multiline
                 minRows={4}
                 label="Вставить Raw HTTP запрос"
-                placeholder={"GET /api/items?page=1 HTTP/1.1\nHost: example.com\n\n"}
                 value={creatingEndpointImportRaw}
                 onChange={(event) => setCreatingEndpointImportRaw(event.target.value)}
               />
@@ -4199,7 +4794,6 @@ export function HostDetailPage() {
                 multiline
                 minRows={2}
                 label="Параметры запроса (query string)"
-                placeholder="foo=bar&limit=10"
                 value={creatingEndpointQueryString}
                 onChange={(event) => setCreatingEndpointQueryString(event.target.value)}
               />
@@ -4208,7 +4802,6 @@ export function HostDetailPage() {
               multiline
               minRows={4}
               label="Заголовки"
-              placeholder={"Accept: application/json\nAuthorization: Bearer ..."}
               value={creatingEndpointHeadersText}
               onChange={(event) => setCreatingEndpointHeadersText(event.target.value)}
               sx={{ "& textarea": { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } }}
@@ -4233,7 +4826,6 @@ export function HostDetailPage() {
                   multiline
                   minRows={6}
                   label="Тело запроса"
-                  placeholder='{"user":"admin"}'
                   value={creatingEndpointRequestBody}
                   onChange={(event) => setCreatingEndpointRequestBody(event.target.value)}
                 />

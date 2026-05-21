@@ -1,22 +1,19 @@
-import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import FilterAltOffIcon from "@mui/icons-material/FilterAltOff";
-import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SearchIcon from "@mui/icons-material/Search";
 import TuneIcon from "@mui/icons-material/Tune";
 import {
   Box,
-  Button,
   Card,
   CardContent,
   Chip,
   Collapse,
-  Divider,
   FormControlLabel,
   IconButton,
   MenuItem,
+  Pagination,
   Stack,
   Switch,
   TextField,
@@ -146,16 +143,6 @@ export function AuditLogsPage() {
     setSearchParams(params, { replace: true });
   }, [autoRefresh, filters, page, setSearchParams]);
 
-  const actionsSummary = useMemo(() => {
-    const uniqueActions = new Set(items.map((item) => item.action));
-    const uniqueEntityTypes = new Set(items.map((item) => item.entity_type).filter(Boolean));
-    return {
-      total: items.length,
-      uniqueActions: uniqueActions.size,
-      uniqueEntityTypes: uniqueEntityTypes.size,
-    };
-  }, [items]);
-
   const quickActionOptions = useMemo(() => {
     return Array.from(new Set([...auditActionOptions, ...items.map((item) => item.action)])).slice(0, 20);
   }, [items]);
@@ -196,27 +183,6 @@ export function AuditLogsPage() {
     setDraftFilters((prev) => ({ ...prev, [field]: value }));
   };
 
-  const toggleQuickAction = (action: string) => {
-    const nextValue = draftFilters.action === action ? "" : action;
-    const nextFilters = { ...draftFilters, action: nextValue };
-    setDraftFilters(nextFilters);
-    setFilters((prev) => ({ ...prev, action: nextValue }));
-    setPage(1);
-  };
-
-  const toggleQuickEntityType = (entityType: string) => {
-    const nextValue = draftFilters.entity_type === entityType ? "" : entityType;
-    const nextFilters = { ...draftFilters, entity_type: nextValue };
-    setDraftFilters(nextFilters);
-    setFilters((prev) => ({ ...prev, entity_type: nextValue }));
-    setPage(1);
-  };
-
-  const visibleDetailsCount = useMemo(
-    () => items.filter((item) => item.details && Object.keys(item.details).length > 0).length,
-    [items]
-  );
-
   const renderDetailsPreview = (details: Record<string, unknown> | null) => {
     if (!details) {
       return null;
@@ -240,12 +206,9 @@ export function AuditLogsPage() {
         <CardContent sx={{ pb: "16px !important" }}>
           <Stack spacing={2}>
             <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ md: "center" }} gap={1}>
-              <Stack spacing={0.3}>
-                <Typography variant="h4" fontWeight={700}>
-                  Журнал действий
-                </Typography>
-                <Typography color="text.secondary">Операционный поток событий по системе, пользователям и данным проекта.</Typography>
-              </Stack>
+              <Typography variant="h4" fontWeight={700}>
+                Журнал действий
+              </Typography>
               <Stack direction="row" spacing={1} alignItems="center">
                 <FormControlLabel
                   control={<Switch checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />}
@@ -261,15 +224,6 @@ export function AuditLogsPage() {
               </Stack>
             </Stack>
 
-            <Stack direction={{ xs: "column", md: "row" }} spacing={1} alignItems={{ md: "center" }} flexWrap="wrap" useFlexGap>
-              <Chip label={`Событий на странице: ${actionsSummary.total}`} variant="outlined" />
-              <Chip label={`Типов действий: ${actionsSummary.uniqueActions}`} variant="outlined" />
-              <Chip label={`Типов сущностей: ${actionsSummary.uniqueEntityTypes}`} variant="outlined" />
-              <Chip label={`С деталями: ${visibleDetailsCount}`} variant="outlined" />
-            </Stack>
-
-            <Divider />
-
             <Stack direction={{ xs: "column", md: "row" }} spacing={1.2} alignItems={{ md: "flex-start" }}>
               <Stack flex={1} spacing={1.2}>
                 <Stack direction={{ xs: "column", md: "row" }} spacing={1.2}>
@@ -277,7 +231,6 @@ export function AuditLogsPage() {
                     label="Поиск по логу"
                     value={draftFilters.query}
                     onChange={(event) => setDraftField("query", event.target.value)}
-                    placeholder="action, user, details, ip"
                     fullWidth
                   />
                   <TextField
@@ -346,139 +299,108 @@ export function AuditLogsPage() {
               </Stack>
             </Stack>
 
-            <Stack spacing={0.8}>
-              <Typography variant="body2" color="text.secondary">
-                Быстрые действия
-              </Typography>
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                {quickActionOptions.map((action) => (
-                  <Chip
-                    key={action}
-                    label={action}
-                    color={filters.action === action ? "primary" : "default"}
-                    variant={filters.action === action ? "filled" : "outlined"}
-                    onClick={() => toggleQuickAction(action)}
-                  />
-                ))}
-              </Stack>
-            </Stack>
-
-            <Stack spacing={0.8}>
-              <Typography variant="body2" color="text.secondary">
-                Быстрые сущности
-              </Typography>
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                {quickEntityTypeOptions.map((entityType) => (
-                  <Chip
-                    key={entityType}
-                    label={entityType}
-                    color={filters.entity_type === entityType ? "primary" : "default"}
-                    variant={filters.entity_type === entityType ? "filled" : "outlined"}
-                    onClick={() => toggleQuickEntityType(entityType)}
-                  />
-                ))}
-              </Stack>
-            </Stack>
           </Stack>
         </CardContent>
       </Card>
 
-      <Stack spacing={1}>
-        {items.map((item) => (
-          <Card
-            key={item.id}
-            sx={{
-              borderRadius: 0,
-              border: "1px solid rgba(126,224,255,0.12)",
-              borderLeft: "3px solid rgba(126,224,255,0.35)",
-              backgroundColor: "rgba(8,17,31,0.28)",
-            }}
-          >
-            <CardContent>
-              <Stack spacing={1.2}>
-                <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={1}>
-                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                    <Chip size="small" icon={<TuneIcon />} label={item.action} />
-                    {item.entity_type && <Chip size="small" variant="outlined" label={item.entity_type} />}
-                    {item.entity_id && <Chip size="small" variant="outlined" label={`ID: ${item.entity_id}`} />}
-                  </Stack>
-                  <Stack direction="row" spacing={0.8} alignItems="center">
-                    <AccessTimeIcon fontSize="small" color="disabled" />
-                    <Typography variant="body2" color="text.secondary">
-                      {formatDateTime(item.created_at)}
-                    </Typography>
-                  </Stack>
+      <Stack spacing={0.5}>
+        {items.map((item) => {
+          const hasDetails = item.details && Object.keys(item.details).length > 0;
+          const isExpanded = expandedDetailsId === item.id;
+          return (
+            <Card
+              key={item.id}
+              sx={{
+                borderRadius: 0,
+                border: "1px solid rgba(126,224,255,0.12)",
+                borderLeft: "3px solid rgba(126,224,255,0.35)",
+                backgroundColor: "rgba(8,17,31,0.28)",
+              }}
+            >
+              <CardContent sx={{ p: 0.9, "&:last-child": { pb: 0.9 } }}>
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ minWidth: 134 }}>
+                    {formatDateTime(item.created_at)}
+                  </Typography>
+                  <Chip size="small" icon={<TuneIcon />} label={item.action} sx={{ height: 20 }} />
+                  {item.entity_type && <Chip size="small" variant="outlined" label={item.entity_type} sx={{ height: 20 }} />}
+                  <Typography variant="caption" sx={{ minWidth: 0 }}>
+                    {item.username || item.user_id || "system"}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" noWrap>
+                    {item.ip_address || "-"}
+                  </Typography>
+                  {item.entity_id && (
+                    <Tooltip title={item.entity_id}>
+                      <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: 140 }}>
+                        {item.entity_id.slice(0, 8)}
+                      </Typography>
+                    </Tooltip>
+                  )}
+                  <Box sx={{ flex: 1 }} />
+                  {hasDetails ? (
+                    <IconButton
+                      size="small"
+                      onClick={() => setExpandedDetailsId((prev) => (prev === item.id ? null : item.id))}
+                      sx={{ p: 0.25 }}
+                    >
+                      {isExpanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+                    </IconButton>
+                  ) : null}
                 </Stack>
-
-                <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "center" }}>
-                  <Stack direction="row" spacing={0.8} alignItems="center">
-                    <PersonOutlineIcon fontSize="small" color="disabled" />
-                    <Typography variant="body2">{item.username || item.user_id || "system"}</Typography>
-                  </Stack>
-                  <Chip size="small" variant="outlined" label={`IP: ${item.ip_address || "-"}`} />
-                  {item.entity_id && <Chip size="small" variant="outlined" label={`ID: ${item.entity_id}`} />}
-                </Stack>
-
-                {item.details && Object.keys(item.details).length > 0 && (
-                  <>
-                    <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap>
-                      {renderDetailsPreview(item.details)}
-                    </Stack>
-                    <Divider />
-                    <Stack spacing={0.8}>
-                      <Box display="flex" justifyContent="flex-end">
-                        <Tooltip title={expandedDetailsId === item.id ? "Скрыть параметры" : "Показать параметры"}>
-                          <IconButton onClick={() => setExpandedDetailsId((prev) => (prev === item.id ? null : item.id))}>
-                            {expandedDetailsId === item.id ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                          </IconButton>
-                        </Tooltip>
-                      </Box>
-                      <Collapse in={expandedDetailsId === item.id} timeout="auto" unmountOnExit>
-                        <Box
+                {hasDetails ? (
+                  <Collapse in={isExpanded} timeout="auto" unmountOnExit>
+                    <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+                      <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap>
+                        {renderDetailsPreview(item.details)}
+                      </Stack>
+                      <Box
+                        sx={{
+                          border: "1px solid rgba(126,224,255,0.12)",
+                          backgroundColor: "rgba(126,224,255,0.04)",
+                          p: 1,
+                          overflowX: "auto",
+                        }}
+                      >
+                        <Typography
+                          component="pre"
                           sx={{
-                            border: "1px solid rgba(126,224,255,0.12)",
-                            backgroundColor: "rgba(126,224,255,0.04)",
-                            p: 1.2,
-                            overflowX: "auto",
+                            m: 0,
+                            fontSize: 11,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
                           }}
                         >
-                          <Typography
-                            component="pre"
-                            sx={{
-                              m: 0,
-                              fontSize: 12,
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
-                            }}
-                          >
-                            {JSON.stringify(item.details, null, 2)}
-                          </Typography>
-                        </Box>
-                      </Collapse>
+                          {JSON.stringify(item.details, null, 2)}
+                        </Typography>
+                      </Box>
                     </Stack>
-                  </>
-                )}
-              </Stack>
-            </CardContent>
-          </Card>
-        ))}
+                  </Collapse>
+                ) : null}
+              </CardContent>
+            </Card>
+          );
+        })}
         {!items.length && !loading && (
           <Typography color="text.secondary">Записей в журнале не найдено.</Typography>
         )}
       </Stack>
 
-      <Stack direction="row" spacing={1} justifyContent="flex-end">
-        <Button variant="outlined" disabled={page <= 1 || loading} onClick={() => setPage((prev) => Math.max(1, prev - 1))}>
-          Назад
-        </Button>
-        <Typography alignSelf="center" color="text.secondary">
-          Страница {page} из {pages}
-        </Typography>
-        <Button variant="outlined" disabled={page >= pages || loading} onClick={() => setPage((prev) => prev + 1)}>
-          Вперед
-        </Button>
-      </Stack>
+      {pages > 1 ? (
+        <Stack direction="row" justifyContent="center">
+          <Pagination
+            count={pages}
+            page={page}
+            onChange={(_, value) => setPage(value)}
+            disabled={loading}
+            color="primary"
+            shape="rounded"
+            siblingCount={1}
+            boundaryCount={1}
+          />
+        </Stack>
+      ) : null}
     </Stack>
   );
 }

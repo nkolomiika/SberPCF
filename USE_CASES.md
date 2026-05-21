@@ -1,7 +1,7 @@
 # Use Cases — Pentest Collaboration Framework (PCF)
 
 Документ описывает ключевые сценарии использования системы. Все use cases опираются на
-реализованный backend (`FastAPI` + `PostgreSQL` + `MinIO` + `RabbitMQ` + опционально `ClickHouse`)
+реализованный backend (`FastAPI` + `PostgreSQL` + `MinIO` + `RabbitMQ`)
 и SPA-фронтенд на `React 18 + MUI`.
 
 Роли:
@@ -215,7 +215,7 @@
 - **Участники:** `admin`.
 - **Основной поток:**
   1. На `/audit-logs` задаются фильтры: `username`, `action`, `entity_type`, `entity_id`, `ip_address`, `query`, период `created_from..created_to`.
-  2. `GET /api/v1/audit-logs` сначала пробует ClickHouse (если включён), иначе читает из PostgreSQL.
+  2. `GET /api/v1/audit-logs` читает журнал из PostgreSQL-таблицы `audit_logs` с outer join к `users` для имени пользователя.
   3. Список с пагинацией (по умолчанию 50/стр.) показывает кто/когда/что/откуда.
 - **Постусловия:** возможен экспорт/копирование данных вручную.
 

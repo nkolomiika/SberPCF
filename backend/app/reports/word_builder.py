@@ -17,6 +17,7 @@ from uuid import UUID
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from docx.enum.section import WD_ORIENT
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -130,6 +131,22 @@ def load_template(kind: ReportKind) -> DocxDocument:
     """Загружает оригинальный шаблон Word из bundled-файлов."""
     path = TEMPLATE_DIR / TEMPLATE_FILES[kind]
     return Document(str(path))
+
+
+def _set_all_sections_landscape(doc: DocxDocument) -> None:
+    """Переводит все секции документа в альбомную ориентацию.
+
+    Используется для ПП-отчёта (внутренняя приёмка): все страницы должны быть
+    горизонтальными. Меняем `orientation` и swap-аем `page_width` <-> `page_height`,
+    т.к. python-docx не делает это автоматически.
+    """
+    for section in doc.sections:
+        if section.orientation == WD_ORIENT.LANDSCAPE:
+            continue
+        new_width, new_height = section.page_height, section.page_width
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width = new_width
+        section.page_height = new_height
 
 
 def parse_cvss_vector(vector: str | None) -> dict[str, str]:
@@ -788,10 +805,10 @@ def _fill_card_prose(card_paragraphs: list[Paragraph], vuln: Vulnerability) -> N
         sections[current].append(p)
 
     section_value: dict[str, str] = {
-        SECTION_HEADER_FUNC: (vuln.description or "").strip(),
+        SECTION_HEADER_FUNC: _strip_markdown_formatting(vuln.description).strip(),
         SECTION_HEADER_STEPS: _workflow_steps_text(vuln).strip(),
-        SECTION_HEADER_IMPACT: (vuln.impact or "").strip(),
-        SECTION_HEADER_RECOMMENDATIONS: (vuln.recommendations or "").strip(),
+        SECTION_HEADER_IMPACT: _strip_markdown_formatting(vuln.impact).strip(),
+        SECTION_HEADER_RECOMMENDATIONS: _strip_markdown_formatting(vuln.recommendations).strip(),
     }
 
     # Собираем все контентные абзацы карточки, чтобы в конце удвоить им левый
@@ -851,7 +868,7 @@ def _flatten_step_description(description: str | None) -> str:
     """
     if not description:
         return ""
-    cleaned = _strip_markdown_images(description)
+    cleaned = _strip_markdown_formatting(description)
     parts = [line.strip() for line in cleaned.splitlines() if line.strip()]
     return " ".join(parts)
 
@@ -868,7 +885,7 @@ def _step_one_line(index: int, step: dict) -> str:
     Если описание уже начинается с собственной нумерации «N. ...», внешний
     префикс «N.» не добавляется, чтобы не получить «1. 1. ...».
     """
-    title = (step.get("title") or "").strip()
+    title = _strip_markdown_formatting(step.get("title")).strip()
     description = _flatten_step_description(step.get("description"))
     if title and description:
         return f"{index}. {title}: {description}"
@@ -1253,6 +1270,46 @@ def _strip_markdown_images(text: str | None) -> str:
     return _MARKDOWN_IMAGE_RE.sub("", text)
 
 
+# Markdown-разметка, которую нужно убрать перед вставкой текста в Word-отчёт.
+# В отчёт идут только «голые» строки: `### Заголовок` → `Заголовок`,
+# `**жирное**` → `жирное`, ссылки `[txt](url)` → `txt` и т.д.
+_MARKDOWN_HEADER_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+", re.MULTILINE)
+_MARKDOWN_BLOCKQUOTE_RE = re.compile(r"^[ \t]{0,3}>[ \t]?", re.MULTILINE)
+_MARKDOWN_BULLET_RE = re.compile(r"^[ \t]{0,3}[-*+][ \t]+", re.MULTILINE)
+_MARKDOWN_HR_RE = re.compile(r"^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$", re.MULTILINE)
+_MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}`{3,}[^\n]*$", re.MULTILINE)
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)\)")
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*|__([^_\n]+)__")
+_MARKDOWN_STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
+_MARKDOWN_ITALIC_RE = re.compile(
+    r"(?<![\*\w])\*([^*\n]+?)\*(?![\*\w])|(?<![_\w])_([^_\n]+?)_(?![_\w])"
+)
+_MARKDOWN_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+
+def _strip_markdown_formatting(text: str | None) -> str:
+    """Убирает базовую Markdown-разметку, оставляя читаемый текст.
+
+    Используется в отчёте: пользователи пишут описания этапов/уязвимостей
+    в Markdown-редакторе, а в Word-отчёт должен попасть «плоский» текст
+    без `#`, `**`, ссылок и т.д. Картинки и так удаляются отдельно.
+    """
+    if not text:
+        return ""
+    s = _strip_markdown_images(text)
+    s = _MARKDOWN_HR_RE.sub("", s)
+    s = _MARKDOWN_CODE_FENCE_RE.sub("", s)
+    s = _MARKDOWN_HEADER_RE.sub("", s)
+    s = _MARKDOWN_BLOCKQUOTE_RE.sub("", s)
+    s = _MARKDOWN_BULLET_RE.sub("", s)
+    s = _MARKDOWN_LINK_RE.sub(r"\1", s)
+    s = _MARKDOWN_BOLD_RE.sub(lambda m: m.group(1) or m.group(2) or "", s)
+    s = _MARKDOWN_STRIKE_RE.sub(r"\1", s)
+    s = _MARKDOWN_ITALIC_RE.sub(lambda m: m.group(1) or m.group(2) or "", s)
+    s = _MARKDOWN_INLINE_CODE_RE.sub(r"\1", s)
+    return s
+
+
 def _step_image_file_ids(step: dict) -> list[UUID]:
     """Все file_id этапа: из `image_file_ids` и из markdown в title/description."""
     ids: list[UUID] = []
@@ -1301,7 +1358,7 @@ def _figure_caption_text(*, step: dict | None, file_name: str | None, fallback_i
         if name:
             return name
     if step is not None:
-        title = (step.get("title") or "").strip()
+        title = _strip_markdown_formatting(step.get("title")).strip()
         if title:
             return title
         description = _flatten_step_description(step.get("description"))
@@ -2743,8 +2800,8 @@ def _fill_test_card(
             continue
         sections[current].append(p)
 
-    impact_text = (vuln.impact or "").strip()
-    description_text = (vuln.description or "").strip()
+    impact_text = _strip_markdown_formatting(vuln.impact).strip()
+    description_text = _strip_markdown_formatting(vuln.description).strip()
     workflow_steps = list(vuln.workflow_steps or [])
 
     content_paragraphs: list[Paragraph] = []
@@ -3000,6 +3057,8 @@ def _build_common(
     hosts: list[Host] = data["hosts"]
     vulnerabilities: list[Vulnerability] = data["vulnerabilities"]
     doc = load_template(kind)
+    if kind == "pp":
+        _set_all_sections_landscape(doc)
 
     files_by_id: dict[UUID, File] = indexes.get("files_by_id", {}) or {}
     files_by_vuln_id: dict[UUID, list[File]] = indexes.get("files_by_vuln_id", {}) or {}

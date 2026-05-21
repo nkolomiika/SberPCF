@@ -1,210 +1,171 @@
 # CONTEXT_ARCH.md — Контекст проекта SberPCF
 
-> **Назначение файла:** сохранение рабочего контекста AI-агента для быстрого восстановления состояния в новых сессиях.  
-> **Дата последнего обновления:** 2026-04-15  
-> **Ссылка на историю чата:** [Основной чат разработки](995b8c89-6c62-4a95-8f79-60e5fbd217ea)
+> **Назначение:** короткая ориентация для AI-агента / нового разработчика.
+> Подробности — в [ARCH.md](ARCH.md), [DB_SCHEMA.md](DB_SCHEMA.md), [DEV_RULES.md](DEV_RULES.md).
 
 ---
 
-## 1. Что такое этот проект
+## 1. Что это
 
-**SberPCF** — внутренняя платформа для управления пентест-проектами (Pentest Collaboration Framework).  
-Система предназначена для команд пентестеров Сбера. Позволяет:
-- вести проекты и назначать участников;
-- описывать инфраструктуру (хосты, порты, сервисы, эндпоинты);
-- регистрировать уязвимости с привязкой к активам;
-- загружать файлы-доказательства (скриншоты, логи) в MinIO;
-- оставлять комментарии с @-упоминаниями;
-- получать in-app уведомления;
-- синхронизировать работу через WebSocket (реальное время);
-- импортировать данные из собственного PCF-JSON;
-- генерировать отчёты (Markdown / PDF / DOCX);
-- вести audit log всех действий.
+**SberPCF** — внутренняя платформа управления пентест-проектами (Pentest Collaboration Framework). Закрытая система: самостоятельной регистрации нет, аккаунты создаёт администратор.
 
-**Система закрытая**: самостоятельная регистрация недоступна. Аккаунты создаёт только Администратор.
+Основные возможности:
+- проекты, папки проектов, участники с ролями `admin / pentester / developer`;
+- инвентарь (хосты с несколькими IP, порты, сервисы, HTTP endpoints);
+- уязвимости с CVSS v3.1/v4.0, workflow_steps, файлами-доказательствами, комментариями с `@mention`;
+- in-app уведомления и реалтайм через WebSocket;
+- импорт/экспорт PCF-JSON и OpenAPI/Swagger по эндпоинтам;
+- Confluence-like заметки проекта;
+- Word-отчёты (СЗИ и ПП — у ПП все страницы в landscape);
+- Jira-интеграция (экспорт уязвимости в issue) — SSRF + DNS-rebind защита, claim-row anti-race;
+- audit-журнал (Postgres), AI-агент API `/api/v2` по bearer-токенам;
+- асинхронная отправка писем через RabbitMQ + SMTP (Gmail/корпоративный — настраивается `.env`).
 
 ---
 
-## 2. Технологический стек
+## 2. Стек
 
-| Слой | Технология | Версия (requirements.txt) |
-|------|-----------|--------------------------|
-| Backend | Python + FastAPI | fastapi 0.115.5 |
-| ASGI-сервер | Uvicorn | 0.32.1 |
-| ORM | SQLAlchemy (async) | 2.0.36 |
-| БД-драйвер | asyncpg | 0.30.0 |
-| Миграции | Alembic | 1.14.0 |
-| Валидация конфига | pydantic-settings | 2.6.1 |
-| Аутентификация | python-jose (JWT) | 3.3.0 |
-| Хэширование паролей | passlib[bcrypt] + bcrypt | 1.7.4 / 4.0.1 |
-| Файлы (S3-совместимо) | MinIO SDK | 7.2.12 |
-| MIME-детект | python-magic | 0.4.27 |
-| Отчёты DOCX | python-docx | 1.1.2 |
-| Отчёты PDF | reportlab | 4.2.5 |
-| Отчёты MD | markdown | 3.7 |
-| HTTP-клиент (тесты) | httpx | 0.28.0 |
-| Тесты | pytest + pytest-asyncio | 8.3.4 / 0.24.0 |
-| База данных | PostgreSQL | 16-alpine |
-| **Хранилище аудит-логов** | **ClickHouse** | 24-alpine |
-| ClickHouse Python-клиент | clickhouse-connect | (добавить в requirements.txt) |
-| Хранилище файлов | MinIO | latest |
-| Frontend | React + TypeScript | (Vite, см. frontend/) |
-| HTTP-клиент FE | Axios | withCredentials: true |
-| Контейнеризация | Docker Compose | v3+ |
+| Слой | Технология |
+|------|-----------|
+| Backend | Python 3.12, FastAPI 0.115 |
+| ASGI | uvicorn 0.32 |
+| ORM | SQLAlchemy 2.0 (async, asyncpg) + Alembic |
+| Валидация | Pydantic 2 / pydantic-settings |
+| Auth | JWT (python-jose), bcrypt (passlib) — HttpOnly cookies, не Bearer |
+| Файлы | MinIO 7.2.x (S3-совместимое) |
+| Очередь | RabbitMQ + aio-pika |
+| SMTP | aiosmtplib (Gmail / sbertech / mailpit — конфиг через .env) |
+| Отчёты | python-docx (Word) |
+| HTTP-клиент | httpx 0.28 (+ кастомный transport для DNS-rebind protection в Jira) |
+| Frontend | React 18 + TypeScript, Vite 6, MUI 6, Zustand, axios, TipTap |
+| БД | PostgreSQL 16 (единое хранилище доменных данных и audit-журнала) |
 
 ---
 
 ## 3. Аутентификация — ВАЖНО
 
-**Используются httpOnly cookies, НЕ Bearer токены.**
+Используются **HttpOnly Secure cookies**, не Bearer Authorization headers.
 
-- `access_token` — короткоживущий JWT, передаётся в httpOnly cookie.
-- `refresh_token` — долгоживущий JWT, передаётся в httpOnly cookie.
-- CSRF-защита: `SameSite=Strict` + проверка заголовка `Origin` на бэкенде.
-- Хэши refresh-токенов хранятся в таблице `refresh_tokens` (SHA-256, сам токен не хранится).
-- При logout / смене пароля все активные refresh-токены пользователя отзываются (`revoked_at`).
+- `access_token` (JWT, ~30 мин) и `refresh_token` (JWT, ~30 дней) — оба `HttpOnly`, `Secure`, `SameSite=Strict`.
+- CSRF: `SameSite=Strict` + проверка заголовка `Origin` через `enforce_csrf` dependency.
+- `refresh_tokens` — SHA-256 хэши; сами токены в БД не хранятся; rotation при каждом `/auth/refresh`.
+- При logout / смене пароля все refresh-токены пользователя отзываются (`revoked_at`).
 
-### Зависимость FastAPI `get_current_user`
 ```python
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
-    token = request.cookies.get("access_token")  # НЕ Authorization header
+    token = request.cookies.get("access_token")  # НЕ Authorization
     if not token:
         raise ForbiddenError("Требуется аутентификация")
     ...
 ```
 
-### Axios (Frontend)
 ```typescript
 axios.defaults.withCredentials = true;  // cookie передаётся автоматически
-// НЕТ: axios.defaults.headers.common['Authorization'] = ...
+// НЕ устанавливать axios.defaults.headers.common['Authorization']
 ```
 
-### WebSocket аутентификация
-Cookie (`access_token`) передаётся браузером автоматически при WS-handshake.  
-Параметр `?token=` в URL **не используется**.
+WebSocket — cookie передаётся браузером автоматически в handshake; параметр `?token=` в URL не используется.
+
+**Исключение:** `/api/v2/*` (machine API для AI-агентов) — там Bearer-токен из заголовка `Authorization`. См. `AgentTokenService`.
 
 ---
 
-## 4. Структура проекта
+## 4. Структура
 
 ```
 SberPCF/
-├── ARCH.md              # Архитектура + полная Swagger-документация API
-├── CONTEXT_ARCH.md      # Этот файл
-├── DB_SCHEMA.md         # Схема БД (таблицы, ER-диаграмма, индексы)
-├── DEV_RULES.md         # Правила разработки (Git flow, code style, безопасность)
-├── DESIGN.md            # UI/UX дизайн-документ
-├── TASK.md              # Техническое задание (источник правды)
-├── TEST_CASES.md        # Тест-кейсы для QA (~169 кейсов, ~85% покрытие)
-├── docker-compose.yml   # Оркестрация контейнеров
-├── .env / .env.example  # Переменные окружения
-├── .gitignore
+├── README.md
+├── ARCH.md, CONTEXT_ARCH.md, DB_SCHEMA.md, DESIGN.md,
+├── DEV_RULES.md, TASK.md, TEST_CASES.md, USE_CASES.md
+├── docker-compose.yml
+├── .env.example
 ├── backend/
 │   ├── Dockerfile
-│   ├── alembic.ini
+│   ├── alembic.ini, migrations/versions/*.py
 │   ├── requirements.txt
-│   ├── migrations/      # Alembic миграции
-│   ├── tests/
-│   │   ├── test_security.py
-│   │   └── test_dependencies.py
+│   ├── pytest.ini, tests/...
+│   ├── scripts/reset_and_seed.py
 │   └── app/
-│       ├── main.py          # Точка входа FastAPI, подключение роутеров
-│       ├── config.py        # pydantic-settings конфиг
-│       ├── database.py      # async engine, session factory, Base
-│       ├── models.py        # SQLAlchemy ORM модели
-│       ├── schemas.py       # Pydantic схемы (request/response)
-│       ├── enums.py         # Python Enum-классы
-│       ├── dependencies.py  # DI: get_current_user, get_db, get_current_admin
-│       ├── exceptions.py    # Кастомные HTTP-исключения
-│       ├── security.py      # JWT create/verify, bcrypt helpers
-│       ├── services.py      # Бизнес-логика (Service Layer)
-│       ├── pagination.py    # Offset pagination helper
-│       ├── ws_manager.py    # WebSocket ConnectionManager
-│       ├── storage/
-│       │   └── minio_client.py
-│       └── routers/
-│           ├── auth.py
-│           ├── users.py
-│           ├── projects.py
-│           ├── assets.py          # hosts / ports / services / endpoints
-│           ├── vulnerabilities.py
-│           ├── files.py
-│           ├── comments.py
-│           ├── notifications.py
-│           ├── import_.py
-│           ├── reports.py
-│           ├── audit_logs.py
-│           └── websocket.py
+│       ├── main.py            # FastAPI app, startup, routers
+│       ├── config.py          # Settings (pydantic-settings) + .env
+│       ├── database.py        # async engine, SessionLocal, Base
+│       ├── models.py          # ORM модели (один файл)
+│       ├── schemas.py         # Pydantic request/response (один файл)
+│       ├── enums.py
+│       ├── dependencies.py    # get_current_user, require_admin, enforce_csrf, require_project_access
+│       ├── exceptions.py
+│       ├── security.py        # JWT, bcrypt, agent token hash
+│       ├── services.py        # Service Layer (один файл — все сервисы)
+│       ├── mail.py            # build_temporary_password_email + send_plain_text_email
+│       ├── messaging.py       # publish_mail_job в RabbitMQ
+│       ├── pagination.py
+│       ├── ws_manager.py      # WebSocket ConnectionManager
+│       ├── storage/minio_client.py
+│       ├── reports/           # word_builder.py: build_pp / build_szi
+│       ├── worker/mail_worker.py   # отдельный процесс (sidecar в compose)
+│       └── routers/           # 14 роутеров: auth, users, projects, project_notes,
+│                              # assets, vulnerabilities, files, comments,
+│                              # notifications, import_, jira, reports,
+│                              # audit_logs, agent_tokens, v2_agent, websocket
 └── frontend/
-    ├── src/
-    │   ├── main.tsx
-    │   ├── App.tsx
-    │   ├── api.ts           # Axios instance с interceptors
-    │   ├── store.ts         # Глобальный state (Context API / custom hooks)
-    │   ├── types.ts         # TypeScript типы
-    │   ├── components/
-    │   │   └── ProjectTreeNav.tsx
-    │   └── pages/
-    │       ├── LoginPage.tsx
-    │       ├── ProjectsPage.tsx
-    │       ├── ProjectDetailPage.tsx
-    │       └── HostDetailPage.tsx
-    └── (Vite config, package.json, tsconfig.json...)
+    ├── package.json, vite.config.ts
+    └── src/
+        ├── main.tsx, App.tsx
+        ├── api.ts             # axios instance с interceptors + все API-функции
+        ├── store.ts           # zustand stores (useAuthStore, useToastStore)
+        ├── types.ts
+        ├── components/        # ProjectTreeNav, VulnerabilityStagesEditor,
+        │                      # NotesTreeInline, ProjectNotesSection,
+        │                      # MarkdownEditor, ...
+        └── pages/             # LoginPage, ProjectsPage, ProjectDetailPage,
+                               # HostDetailPage, AuditLogsPage,
+                               # AiAgentIntegrationPage, ...
 ```
 
 ---
 
-## 5. Docker Compose
+## 5. Docker Compose сервисы
 
 ```yaml
-services:
-  backend:    # FastAPI, порт 8000
-  frontend:   # React/Vite, порт 3000
-  db:         # PostgreSQL 16, порт 5433:5432 (внешний 5433)
-  minio:      # MinIO, порт 9000 (API) + 9001 (Console)
-  clickhouse: # ClickHouse 24, порт 8123 (HTTP) + 9009:9000 (Native)
+backend       # FastAPI (uvicorn) :8000
+mail-worker   # отдельный процесс, потребляет pcf.mail
+frontend      # React/Vite :3000
+db            # PostgreSQL 16 :5433→5432
+minio         # MinIO :9000 (S3) + :9001 (Console)
+rabbitmq      # :15672 management + :5672 amqp
+mailpit       # dev SMTP catcher :1025 + :8025 web
 ```
 
-**Volumes:** `pgdata` (PostgreSQL), `miniodata` (MinIO), `chdata` (ClickHouse)
+Volumes: `pgdata`, `miniodata`.
+
+ClickHouse удалён из стека — audit_logs пишутся напрямую в PostgreSQL.
 
 ---
 
-## 6. База данных — все таблицы
-
-### PostgreSQL таблицы
+## 6. Доменная модель (PostgreSQL)
 
 | Таблица | Назначение |
 |---------|-----------|
-| `users` | Пользователи (admin / pentester) |
-| `refresh_tokens` | SHA-256 хэши refresh JWT, отзыв при logout/смене пароля |
-| `projects` | Пентест-проекты |
-| `project_members` | M2M: пользователи ↔ проекты |
-| `hosts` | Хосты инфраструктуры (ip_address или hostname, или оба) |
-| `ports` | Порты хоста (unique: host+port+protocol) |
-| `services` | Сервисы на порту |
-| `endpoints` | HTTP-эндпоинты, привязаны к хосту |
-| `vulnerabilities` | Уязвимости, привязаны к проекту |
-| `vulnerability_assets` | Полиморфная привязка уязвимости к активу (host/port/service/endpoint) |
-| `files` | Метаданные файлов; сами файлы в MinIO (limit: 52428800 байт = 50 МБ) |
-| `comments` | Комментарии к уязвимостям (редактируемые/удаляемые автором) |
-| `comment_mentions` | M2M: комментарии ↔ упомянутые пользователи |
-| `notifications` | In-app уведомления при @-упоминании |
+| `users` | admin / pentester / developer |
+| `refresh_tokens` | SHA-256 хэши refresh-JWT |
+| `agent_api_tokens` + `agent_api_token_project_grants` | Bearer-токены для `/api/v2`, скоупы и список проектов |
+| `mail_jobs` | outbox-задания на отправку писем |
+| `project_folders`, `projects`, `project_members` | проекты и оргструктура |
+| `hosts`, `host_ip_addresses`, `ports`, `services`, `endpoints` | инвентарь |
+| `vulnerabilities`, `vulnerability_assets` | уязвимости и привязки к активам |
+| `files` | метаданные evidence (контент в MinIO, лимит 50 МБ) |
+| `comments`, `comment_mentions` | комментарии и `@mention` |
+| `project_notes`, `project_note_comments` | Confluence-like заметки и обсуждения |
+| `notifications` | in-app уведомления |
+| `jira_instances`, `project_jira_links`, `jira_issue_links` | Jira-интеграция |
+| `audit_logs` | единый журнал действий |
 
-### ClickHouse таблицы (`pcf_logs`)
-
-| Таблица | Назначение |
-|---------|-----------|
-| `audit_logs` | Журнал действий пользователей (append-only, MergeTree, партиционирование по месяцу) |
-
-**Ключевые поля:** `id` (UUID), `user_id`, `action`, `entity_type`, `entity_id`, `details` (JSON-строка), `ip_address`, `created_at` (DateTime64)  
-**Движок:** `MergeTree() PARTITION BY toYYYYMM(created_at) ORDER BY (created_at, action)`
-
-### Ключевые enum-типы (из `enums.py`)
+Ключевые enums (`enums.py`):
 
 | Enum | Значения |
 |------|---------|
-| `UserRole` | `admin`, `pentester` |
-| `ProjectStatus` | `active`, `completed`, `archived` |
+| `UserRole` | `admin`, `pentester`, `developer` |
+| `ProjectStatus` | `active`, `handover_to_development`, `vulnerability_recheck`, `completed`, `archived` |
 | `HostStatus` | `up`, `down`, `unknown` |
 | `Protocol` | `tcp`, `udp` |
 | `PortState` | `open`, `closed`, `filtered` |
@@ -217,81 +178,66 @@ services:
 
 ---
 
-## 7. API — общие соглашения
+## 7. API
 
-- Префикс: `/api/v1/`
-- Аутентификация: httpOnly cookie `access_token` (автоматически)
-- Пагинация: offset-based `?page=1&size=20`
-- Формат ошибок:
-  ```json
-  { "detail": "Описание ошибки" }
-  ```
-- Стандартные коды: `400`, `401`, `403`, `404`, `409`, `422`
-- Комментарии в коде — на **русском языке**
+- Префикс: `/api/v1/` (cookie-auth) и `/api/v2/` (Bearer-auth для AI-агентов).
+- Пагинация: offset `?page=1&size=20` → `{ items, total, page, size, pages }`.
+- Формат ошибок: `{ "detail": "..." }`. Коды: 400/401/403/404/409/422.
+- Комментарии в коде — на **русском**.
 
-### Auth endpoints (Set-Cookie)
-| Метод | Путь | Описание |
-|-------|------|---------|
-| POST | `/api/v1/auth/login` | Логин → Set-Cookie: access_token + refresh_token |
-| POST | `/api/v1/auth/refresh` | Обновление access_token по refresh_token cookie |
-| POST | `/api/v1/auth/logout` | Очистка cookies + отзыв refresh_token |
-| GET | `/api/v1/auth/me` | Текущий пользователь |
+Основные ресурсы `/api/v1/`:
 
-### Основные ресурсы
-| Ресурс | Базовый путь |
-|--------|-------------|
-| Пользователи | `/api/v1/users/` (только admin) |
-| Проекты | `/api/v1/projects/` |
-| Хосты | `/api/v1/projects/{id}/hosts/` |
-| Порты | `/api/v1/hosts/{id}/ports/` |
-| Сервисы | `/api/v1/ports/{id}/services/` |
-| Эндпоинты | `/api/v1/hosts/{id}/endpoints/` |
-| Уязвимости | `/api/v1/projects/{id}/vulnerabilities/` |
-| Активы уязвимости | `/api/v1/vulnerabilities/{id}/assets/` |
-| Файлы | `/api/v1/vulnerabilities/{id}/files/` |
-| Комментарии | `/api/v1/vulnerabilities/{id}/comments/` |
-| Уведомления | `/api/v1/notifications/` |
-| Импорт | `/api/v1/projects/{id}/import/` |
-| Отчёты | `/api/v1/projects/{id}/reports/szi`, `/api/v1/projects/{id}/reports/pp` (Word) |
-| Audit logs | `/api/v1/audit-logs/` (только admin) |
-| WebSocket | `ws://host/ws/projects/{project_id}` |
+| Ресурс | Путь |
+|--------|------|
+| Auth | `/auth/{login, refresh, logout, me, force-change-password}` |
+| Users | `/users/...` (admin) |
+| Projects + folders | `/projects/...` |
+| Project notes | `/projects/{id}/notes/...` (+ comments) |
+| Hosts/ports/services/endpoints | `/projects/{id}/hosts/...` |
+| Vulnerabilities | `/projects/{id}/vulnerabilities/...` |
+| Files | `/vulnerabilities/{id}/files/...` |
+| Comments | `/vulnerabilities/{id}/comments/...` |
+| Notifications | `/notifications/...` |
+| Import / Export OpenAPI | `/projects/{id}/import/...`, `/hosts/{id}/(import|export)-openapi` |
+| Reports | `/projects/{id}/reports/(szi|pp)` |
+| Jira | `/jira/config`, `/projects/{id}/jira-link`, `/vulnerabilities/{id}/jira-export` |
+| Agent tokens | `/agent-tokens/...` (admin) |
+| Audit logs | `/audit-logs` (admin) — фильтры + full-text по action/entity_type/ip/username/details |
+| WebSocket | `/ws/notifications`, `/ws/projects/{id}`, `/ws/projects-index` |
 
 ---
 
 ## 8. Архитектурные паттерны
 
 ### Backend
-- **Layered Architecture**: Router → Service → Repository → Model
-- **Repository Pattern**: доступ к данным инкапсулирован в сервисах
-- **Service Layer**: бизнес-логика отделена от роутеров
-- **Dependency Injection**: FastAPI `Depends()` для сессии БД и текущего пользователя
-- **Factory Pattern**: генерация отчётов разных форматов
-- **Decorator Pattern**: запись audit logs через декоратор/middleware
-- **WebSocket ConnectionManager**: `ws_manager.py` управляет подключениями по `project_id`
+- **Layered**: Router → Service → Model. Repository-pattern не используется — сервисы работают с `AsyncSession` напрямую.
+- **Service Layer** в одном файле `services.py` (~4000 строк): UserService, ProjectService, AssetService, VulnerabilityService, FileService, CommentService, ProjectNoteService, NotificationService, ImportService, ReportService, AgentTokenService, JiraIntegrationService, AuditService, AuthService.
+- **DI**: FastAPI `Depends()` для `AsyncSession` и текущего пользователя.
+- **WebSocket ConnectionManager** (`ws_manager.py`): broadcast по `project_id`, `notify_user` по `user_id`, общий канал `projects-index`.
+- **Outbox + Worker**: письма создаются как `MailJob(status=pending)` → publish в RabbitMQ → `mail_worker` отправляет по SMTP. Перепубликация зависших pending'ов через `relay_pending_jobs`.
+- **Jira SSRF**: `_validate_external_url` (запрет loopback/private/link-local/multicast/reserved/unspecified) + кастомный `_SafeJiraTransport` (повторная DNS-валидация перед каждым запросом) + claim-row pattern против race condition при параллельных export'ах.
 
 ### Frontend
-- **Context API + Custom Hooks**: глобальный state
-- **Axios Interceptors**: автоматический refresh при 401
-- **Feature-based structure**: страницы сгруппированы по фичам
+- **Zustand** для глобального state (auth + toasts), без Redux/Context-overkill.
+- **Axios interceptors**: автоматический `/auth/refresh` при 401 → retry.
+- **WebSocket** вместо polling для уведомлений и обновлений списков.
+- **TipTap + tiptap-markdown** для редактирования Markdown.
 
 ---
 
-## 9. Правила разработки (DEV_RULES.md)
+## 9. Правила разработки (DEV_RULES.md — extract)
 
-- **Git flow**: `main` + `develop` + `feature/*` + `hotfix/*`
-- **Коммиты**: Conventional Commits (`feat:`, `fix:`, `docs:` и т.д.)
-- **Pull Request**: обязателен ревью минимум 1 человека
-- **Комментарии в коде**: только на **русском языке**
-- **Docstrings**: обязательны для всех публичных функций/классов
-- **Linting**: `ruff` + `black` + `mypy` (backend), `eslint` + `prettier` + `tsc` (frontend)
-- **Тесты**: минимум 70% покрытие сервисного слоя
+- Git flow: `main` + `feature/*` + `hotfix/*`. Conventional Commits.
+- PR требует ревью.
+- **Комментарии в коде — на русском**, docstrings обязательны для публичных функций/классов.
+- Linting: `ruff` + `mypy` (backend), `eslint` + `tsc` (frontend).
 - **Запрещено**:
-  - Хранить токены в `localStorage` / `sessionStorage`
-  - Передавать токен в URL (`?token=...`)
-  - Вручную устанавливать `Authorization: Bearer`
-  - Хардкодить секреты
-  - SELECT * (использовать явный список колонок)
-  - N+1 запросы (использовать joinedload/selectinload)
+  - Хранить токены в `localStorage` / `sessionStorage`.
+  - Передавать токен в URL.
+  - Вручную ставить `Authorization: Bearer` для `/api/v1/`.
+  - Хардкодить секреты — только через `.env`.
+  - `SELECT *` — использовать явный список колонок.
+  - N+1 — `joinedload`/`selectinload`.
 
 ---
 
@@ -299,94 +245,56 @@ services:
 
 | Угроза | Защита |
 |--------|--------|
-| XSS | httpOnly cookie (JS не имеет доступа к токену) |
-| CSRF | SameSite=Strict + проверка Origin header |
-| SQLi | SQLAlchemy ORM / параметризованные запросы |
-| IDOR | Проверка принадлежности ресурса к проекту на каждый запрос |
-| Утечка токена | Токен только в cookie, не в теле/URL/localStorage |
-| Brute-force | Rate limiting (рекомендовано на nginx/reverse proxy) |
-| Секреты | Только через `.env` + `pydantic-settings` |
+| XSS | HttpOnly cookies (JS не имеет доступа к токену), urlTransform whitelist для Markdown (`http/https/mailto` + `data:image/...`) |
+| CSRF | `SameSite=Strict` + проверка Origin (`enforce_csrf`) |
+| SQLi | SQLAlchemy ORM, параметризованные запросы |
+| IDOR | `require_project_access` проверяет принадлежность ресурса проекту на каждый запрос |
+| Утечка токена | Токен только в HttpOnly cookie |
+| SSRF (Jira) | URL-валидация + блок-лист приватных IP + `_SafeJiraTransport` (DNS-rebind защита) + `follow_redirects=False` |
+| Race condition (Jira export) | UNIQUE `(vulnerability_id)` + claim-row до HTTP-вызова |
+| Утечка Jira API token | Хранится Fernet-encrypted (ключ от SHA-256(jwt_secret_key)) |
+| Brute-force | (рекомендовано) rate limiting на nginx/reverse proxy |
+| Секреты | Только `.env` + `pydantic-settings` |
 
 ---
 
-## 11. Файлы документации
+## 11. SMTP / Mail
 
-| Файл | Описание | Строк |
-|------|---------|-------|
-| `TASK.md` | Техническое задание | ~300 |
-| `DB_SCHEMA.md` | Схема БД, ERD, индексы | ~400 |
-| `ARCH.md` | Архитектура + полная API-документация (Swagger-style) | ~1000+ |
-| `DEV_RULES.md` | Правила разработки | ~400 |
-| `DESIGN.md` | UI/UX дизайн | 466 |
-| `TEST_CASES.md` | 169 тест-кейсов QA (~85% покрытие) | 2236 |
+`mail.py` + `mail_worker.py` поддерживают любой SMTP по .env-переменным. В `.env.example` описаны три профиля:
 
----
+1. **mailpit** (dev) — `SMTP_HOST=mailpit`, без TLS, без auth.
+2. **Gmail** (тесты) — `smtp.gmail.com:587`, STARTTLS, App password (требует 2FA на аккаунте).
+3. **sbertech** (prod) — корпоративный SMTP, STARTTLS, реальные креды из vault.
 
-## 12. Что было реализовано (backend)
+`From` собирается через `email.utils.formataddr` — корректно кодирует кириллицу/спец-символы в display name. Для Gmail `SMTP_FROM_EMAIL` должен совпадать с `SMTP_USERNAME`, иначе Gmail rewrite/refuses.
 
-Реализованы (scaffolded) все роутеры, модели, схемы. Структура кода существует в:
-- `backend/app/models.py` — все ORM модели
-- `backend/app/enums.py` — все enum-типы
-- `backend/app/routers/` — все 12 роутеров
-- `backend/app/services.py` — бизнес-логика
-- `backend/app/security.py` — JWT/bcrypt
-- `backend/app/ws_manager.py` — WebSocket manager
-- `backend/app/storage/minio_client.py` — MinIO клиент
-- `backend/tests/` — unit-тесты
-
-## 13. Что было реализовано (frontend)
-
-- `frontend/src/pages/LoginPage.tsx` — страница входа
-- `frontend/src/pages/ProjectsPage.tsx` — список проектов
-- `frontend/src/pages/ProjectDetailPage.tsx` — детали проекта
-- `frontend/src/pages/HostDetailPage.tsx` — детали хоста
-- `frontend/src/components/ProjectTreeNav.tsx` — навигация по дереву проекта
-- `frontend/src/api.ts` — Axios instance
-- `frontend/src/store.ts` — глобальный state
-- `frontend/src/types.ts` — TypeScript типы
+Триггеры писем: создание пользователя с `send_invite_email=True`, сброс пароля админом.
 
 ---
 
-## 14. Нерешённые вопросы / возможные следующие шаги
+## 12. Что покрыто тестами
 
-- [ ] Запустить и проверить стек через `docker compose up --build`  
-      (ранее была ошибка: Docker Desktop не был запущен)
-- [ ] Настроить Alembic миграции и применить к PostgreSQL БД
-- [ ] Инициализировать ClickHouse: создать БД `pcf_logs` и таблицу `audit_logs` (DDL-скрипт в `backend/infrastructure/clickhouse_init.sql`)
-- [ ] Добавить `clickhouse-connect` в `requirements.txt`
-- [ ] Добавить `CLICKHOUSE_*` переменные в `.env` и `.env.example`
-- [ ] Обновить `docker-compose.yml` — добавить сервис `clickhouse` и volume `chdata`
-- [ ] Реализовать `backend/app/infrastructure/clickhouse_client.py`
-- [ ] Дописать реализацию сервисного слоя (`services.py`)
-- [ ] Дописать frontend-страницы (уязвимости, файлы, комментарии, отчёты)
-- [ ] Добавить e2e тесты
-- [ ] Настроить CI/CD pipeline
-- [ ] Реализовать rate limiting на уровне nginx
+`backend/tests/`:
+- `test_security.py`, `test_dependencies.py`, `test_pagination.py`, `test_schemas.py`
+- `test_asset_service.py`, `test_project_service.py`, `test_project_note_service.py`
+- `test_vulnerability_workflow.py`, `test_comment_service.py`, `test_import_service.py`
+- `test_user_service_security.py`, `test_auth_cookies.py`
+- `test_report_service.py`, `test_word_builder.py`
+- `test_additional_validations.py`
+
+Frontend — Vitest, расположен внутри `frontend/src/__tests__` и рядом с компонентами.
 
 ---
 
-## 15. Переменные окружения (`.env.example`)
+## 13. Переменные окружения
 
-```env
-# PostgreSQL
-DATABASE_URL=postgresql+asyncpg://user:password@db:5432/pcf
+Полный шаблон — в [.env.example](.env.example). Ключевые группы:
 
-# JWT
-SECRET_KEY=your-super-secret-key
-ACCESS_TOKEN_EXPIRE_MINUTES=15
-REFRESH_TOKEN_EXPIRE_DAYS=30
-
-# MinIO
-MINIO_ENDPOINT=minio:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=pcf-files
-MINIO_SECURE=false
-
-# ClickHouse
-CLICKHOUSE_HOST=clickhouse
-CLICKHOUSE_PORT=8123
-CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=
-CLICKHOUSE_DB=pcf_logs
-```
+- `DATABASE_URL` — Postgres.
+- `JWT_SECRET_KEY` (мин. 32 символа), `JWT_*_EXPIRE_*`.
+- `MINIO_*` — endpoint/credentials/bucket.
+- `COOKIE_SECURE`, `COOKIE_SAMESITE`, `CSRF_ALLOWED_ORIGINS`, `BACKEND_CORS_ORIGINS`.
+- `INITIAL_ADMIN_*` — стартовый админ при первом запуске.
+- `RABBITMQ_URL`, `MAIL_QUEUE_NAME`, `MAIL_ENABLED`, `MAIL_MAX_ATTEMPTS`.
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `SMTP_USE_SSL`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME`.
+- `MAIL_PREVIEW_URL` (mailpit UI в dev).
