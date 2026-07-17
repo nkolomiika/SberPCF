@@ -1,5 +1,7 @@
 from types import SimpleNamespace
-from uuid import uuid4
+from itertools import count as _id_count
+
+_ids = _id_count(1)
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,9 +19,9 @@ def _make_scalars_result(items: list[object]) -> MagicMock:
 @pytest.mark.asyncio
 async def test_move_note_blocks_descendant_cycle() -> None:
     service = ProjectNoteService(AsyncMock())
-    project_id = uuid4()
-    note_id = uuid4()
-    child_id = uuid4()
+    project_id = next(_ids)
+    note_id = next(_ids)
+    child_id = next(_ids)
 
     parent_chain = [note_id, None]
 
@@ -34,18 +36,18 @@ async def test_move_note_blocks_descendant_cycle() -> None:
     service.db.scalar = AsyncMock(side_effect=scalar_side_effect)  # type: ignore[method-assign]
 
     with pytest.raises(ValidationError, match="дочернюю"):
-        await service.move_note(project_id, note_id, child_id, actor_id=uuid4())
+        await service.move_note(project_id, note_id, child_id, actor_id=next(_ids))
 
 
 @pytest.mark.asyncio
 async def test_reorder_requires_full_sibling_set() -> None:
     db = AsyncMock()
     service = ProjectNoteService(db)
-    project_id = uuid4()
-    actor_id = uuid4()
-    parent_id = uuid4()
-    sibling_a = SimpleNamespace(id=uuid4(), project_id=project_id, parent_id=parent_id, sort_order=1)
-    sibling_b = SimpleNamespace(id=uuid4(), project_id=project_id, parent_id=parent_id, sort_order=2)
+    project_id = next(_ids)
+    actor_id = next(_ids)
+    parent_id = next(_ids)
+    sibling_a = SimpleNamespace(id=next(_ids), project_id=project_id, parent_id=parent_id, sort_order=1)
+    sibling_b = SimpleNamespace(id=next(_ids), project_id=project_id, parent_id=parent_id, sort_order=2)
     db.scalars = AsyncMock(return_value=_make_scalars_result([sibling_a, sibling_b]))
     service._ensure_parent = AsyncMock(return_value=SimpleNamespace(id=parent_id))
 

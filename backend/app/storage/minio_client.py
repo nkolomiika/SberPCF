@@ -46,6 +46,23 @@ class MinioStorage:
             response.close()
             response.release_conn()
 
+    def upload_bytes_with_key(self, key: str, content: bytes, content_type: str) -> str:
+        """Загружает объект под явным ключом (без генерации uuid)."""
+        self.client.put_object(
+            bucket_name=self.bucket,
+            object_name=key,
+            data=BytesIO(content),
+            length=len(content),
+            content_type=content_type,
+        )
+        return key
+
+    def download_with_content_type(self, object_key: str) -> tuple[bytes, str]:
+        """Скачивает объект вместе с его content-type."""
+        stat = self.client.stat_object(self.bucket, object_key)
+        content = self.download_bytes(object_key)
+        return content, stat.content_type or "application/octet-stream"
+
     def delete(self, object_key: str) -> None:
         """Удаляет объект из MinIO."""
         self.client.remove_object(self.bucket, object_key)

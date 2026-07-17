@@ -62,7 +62,7 @@ export function AuditLogsPage() {
   const [pages, setPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expandedDetailsId, setExpandedDetailsId] = useState<string | null>(null);
+  const [expandedDetailsId, setExpandedDetailsId] = useState<number | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(searchParams.get("auto_refresh") !== "0");
   const [filters, setFilters] = useState({
     query: searchParams.get("query") || "",
@@ -333,7 +333,7 @@ export function AuditLogsPage() {
                   {item.entity_id && (
                     <Tooltip title={item.entity_id}>
                       <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: 140 }}>
-                        {item.entity_id.slice(0, 8)}
+                        {String(item.entity_id).slice(0, 8)}
                       </Typography>
                     </Tooltip>
                   )}

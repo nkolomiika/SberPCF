@@ -517,7 +517,10 @@ function postEndpointDeleteModeDebugLog(_location: string, _message: string, _da
 function postHostDetailReloadDebugLog(_location: string, _message: string, _data: Record<string, unknown>, _hypothesisId: string): void {}
 
 export function HostDetailPage() {
-  const { projectId, hostId, vulnerabilityId } = useParams<{ projectId: string; hostId: string; vulnerabilityId?: string }>();
+  const { projectId: projectIdParam, hostId: hostIdParam, vulnerabilityId: vulnerabilityIdParam } = useParams<{ projectId: string; hostId: string; vulnerabilityId?: string }>();
+  const projectId = Number(projectIdParam);
+  const hostId = Number(hostIdParam);
+  const vulnerabilityId = vulnerabilityIdParam != null ? Number(vulnerabilityIdParam) : undefined;
   const location = useLocation();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
@@ -530,7 +533,7 @@ export function HostDetailPage() {
   const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
   // Платформенный диалог ввода названия новой страницы/подстраницы (вместо window.prompt).
   const [noteCreateDialogOpen, setNoteCreateDialogOpen] = useState(false);
-  const [noteCreateParentId, setNoteCreateParentId] = useState<string | null>(null);
+  const [noteCreateParentId, setNoteCreateParentId] = useState<number | null>(null);
   const [noteCreateTitle, setNoteCreateTitle] = useState("");
   const [noteCreateBusy, setNoteCreateBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -541,25 +544,25 @@ export function HostDetailPage() {
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [hostStatsById, setHostStatsById] = useState<Record<string, HostTreeStats>>({});
   const [isEditPortOpen, setEditPortOpen] = useState(false);
-  const [editingPortId, setEditingPortId] = useState<string | null>(null);
+  const [editingPortId, setEditingPortId] = useState<number | null>(null);
   const [editingPortNumber, setEditingPortNumber] = useState("1");
   const [editingPortProtocol, setEditingPortProtocol] = useState<Port["protocol"]>("tcp");
   const [editingPortState, setEditingPortState] = useState<Port["state"]>("open");
-  const [editingPortServiceId, setEditingPortServiceId] = useState<string | null>(null);
+  const [editingPortServiceId, setEditingPortServiceId] = useState<number | null>(null);
   const [editingPortServiceName, setEditingPortServiceName] = useState("");
   const [editingPortServiceVersion, setEditingPortServiceVersion] = useState("");
   const [servicesByPortId, setServicesByPortId] = useState<Record<string, Service[]>>({});
   const [isCreateServiceOpen, setCreateServiceOpen] = useState(false);
-  const [createServicePortId, setCreateServicePortId] = useState<string | null>(null);
+  const [createServicePortId, setCreateServicePortId] = useState<number | null>(null);
   const [creatingServiceName, setCreatingServiceName] = useState("");
   const [creatingServiceVersion, setCreatingServiceVersion] = useState("");
   const [isEditServiceOpen, setEditServiceOpen] = useState(false);
-  const [editServicePortId, setEditServicePortId] = useState<string | null>(null);
-  const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
+  const [editServicePortId, setEditServicePortId] = useState<number | null>(null);
+  const [editingServiceId, setEditingServiceId] = useState<number | null>(null);
   const [editingServiceName, setEditingServiceName] = useState("");
   const [editingServiceVersion, setEditingServiceVersion] = useState("");
   const [isEditEndpointOpen, setEditEndpointOpen] = useState(false);
-  const [editingEndpointId, setEditingEndpointId] = useState<string | null>(null);
+  const [editingEndpointId, setEditingEndpointId] = useState<number | null>(null);
   const [editingEndpointPath, setEditingEndpointPath] = useState("");
   const [editingEndpointMethod, setEditingEndpointMethod] = useState<Exclude<Endpoint["method"], null>>("GET");
   const [editingEndpointImportRaw, setEditingEndpointImportRaw] = useState("");
@@ -569,13 +572,13 @@ export function HostDetailPage() {
   const [editingEndpointRequestBody, setEditingEndpointRequestBody] = useState("");
   const [editingEndpointRequestContentType, setEditingEndpointRequestContentType] = useState("application/json");
   const [isEditVulnerabilityOpen, setEditVulnerabilityOpen] = useState(false);
-  const [editingVulnerabilityId, setEditingVulnerabilityId] = useState<string | null>(null);
+  const [editingVulnerabilityId, setEditingVulnerabilityId] = useState<number | null>(null);
   const [editingVulnerabilityTitle, setEditingVulnerabilityTitle] = useState("");
   const [editingVulnerabilityDescription, setEditingVulnerabilityDescription] = useState("");
   const [editingVulnerabilitySeverity, setEditingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("medium");
   const [editingVulnerabilityStatus, setEditingVulnerabilityStatus] = useState<Vulnerability["status"]>("open");
   const [isCreatePortOpen, setCreatePortOpen] = useState(false);
-  const [creatingPortIpId, setCreatingPortIpId] = useState<string>("");
+  const [creatingPortIpId, setCreatingPortIpId] = useState<number | "">("");
   const [creatingPortNumber, setCreatingPortNumber] = useState("443");
   const [creatingPortProtocol, setCreatingPortProtocol] = useState<Port["protocol"]>("tcp");
   const [creatingPortState, setCreatingPortState] = useState<Port["state"]>("open");
@@ -598,7 +601,7 @@ export function HostDetailPage() {
   const closeEndpointsMenu = () => setEndpointsMenuAnchorEl(null);
   const [nmapImporting, setNmapImporting] = useState(false);
   const [isNmapImportOpen, setNmapImportOpen] = useState(false);
-  const [nmapImportIpId, setNmapImportIpId] = useState<string>("");
+  const [nmapImportIpId, setNmapImportIpId] = useState<number | "">("");
   const [isCreateVulnerabilityOpen, setCreateVulnerabilityOpen] = useState(false);
   const [creatingVulnerabilityTitle, setCreatingVulnerabilityTitle] = useState("");
   const [creatingVulnerabilitySeverity, setCreatingVulnerabilitySeverity] = useState<Vulnerability["severity"]>("info");
@@ -619,11 +622,11 @@ export function HostDetailPage() {
   const [editingHostOsType, setEditingHostOsType] = useState<OsType>("unknown");
   const [ipActionsAnchorEl, setIpActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [addIpDraft, setAddIpDraft] = useState<string | null>(null);
-  const [editIpDraftId, setEditIpDraftId] = useState<string | null>(null);
+  const [editIpDraftId, setEditIpDraftId] = useState<number | null>(null);
   const [editIpDraft, setEditIpDraft] = useState<{ ip: string; label: string }>({ ip: "", label: "" });
   const ipCsvInputRef = useRef<HTMLInputElement | null>(null);
   const [ipBulkDeleteMode, setIpBulkDeleteMode] = useState(false);
-  const [selectedIpIds, setSelectedIpIds] = useState<Set<string>>(() => new Set());
+  const [selectedIpIds, setSelectedIpIds] = useState<Set<number>>(() => new Set());
   const [bulkDeletingIps, setBulkDeletingIps] = useState(false);
   const [portActionsAnchorEl, setPortActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activePort, setActivePort] = useState<Port | null>(null);
@@ -631,27 +634,27 @@ export function HostDetailPage() {
   const portsSectionMenuOpen = Boolean(portsSectionMenuAnchorEl);
   const closePortsSectionMenu = () => setPortsSectionMenuAnchorEl(null);
   const nmapImportFileInputRef = useRef<HTMLInputElement | null>(null);
-  const [selectedPortIds, setSelectedPortIds] = useState<Set<string>>(() => new Set());
+  const [selectedPortIds, setSelectedPortIds] = useState<Set<number>>(() => new Set());
   const [bulkDeletingPorts, setBulkDeletingPorts] = useState(false);
   const [portBulkDeleteMode, setPortBulkDeleteMode] = useState(false);
   const [serviceBulkDeletePortId, setServiceBulkDeletePortId] = useState<string | null>(null);
-  const [selectedServiceIdsForDelete, setSelectedServiceIdsForDelete] = useState<Set<string>>(() => new Set());
+  const [selectedServiceIdsForDelete, setSelectedServiceIdsForDelete] = useState<Set<number>>(() => new Set());
   const [bulkDeletingServices, setBulkDeletingServices] = useState(false);
   const [endpointActionsAnchorEl, setEndpointActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activeEndpoint, setActiveEndpoint] = useState<Endpoint | null>(null);
-  const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(() => new Set());
+  const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<number>>(() => new Set());
   const [bulkDeletingEndpoints, setBulkDeletingEndpoints] = useState(false);
   const [endpointBulkDeleteMode, setEndpointBulkDeleteMode] = useState(false);
   const [vulnerabilitiesSectionMenuAnchorEl, setVulnerabilitiesSectionMenuAnchorEl] = useState<HTMLElement | null>(null);
   const vulnerabilitiesSectionMenuOpen = Boolean(vulnerabilitiesSectionMenuAnchorEl);
   const closeVulnerabilitiesSectionMenu = () => setVulnerabilitiesSectionMenuAnchorEl(null);
-  const [selectedVulnerabilityIds, setSelectedVulnerabilityIds] = useState<Set<string>>(() => new Set());
+  const [selectedVulnerabilityIds, setSelectedVulnerabilityIds] = useState<Set<number>>(() => new Set());
   const [bulkDeletingVulnerabilities, setBulkDeletingVulnerabilities] = useState(false);
   const [vulnerabilityBulkDeleteMode, setVulnerabilityBulkDeleteMode] = useState(false);
-  const [expandedPortIds, setExpandedPortIds] = useState<string[]>([]);
-  const [expandedIpIds, setExpandedIpIds] = useState<string[]>([]);
-  const [expandedEndpointIds, setExpandedEndpointIds] = useState<string[]>([]);
-  const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<string[]>([]);
+  const [expandedPortIds, setExpandedPortIds] = useState<number[]>([]);
+  const [expandedIpIds, setExpandedIpIds] = useState<number[]>([]);
+  const [expandedEndpointIds, setExpandedEndpointIds] = useState<number[]>([]);
+  const [expandedVulnerabilityIds, setExpandedVulnerabilityIds] = useState<number[]>([]);
   const normalizedHostEndpoints = useMemo(() => dedupeEndpointsByNormalizedPath(host?.endpoints ?? []), [host?.endpoints]);
   const endpointPathTree = useMemo(() => buildEndpointPathTree(normalizedHostEndpoints), [normalizedHostEndpoints]);
 
@@ -661,7 +664,7 @@ export function HostDetailPage() {
         return prev;
       }
       const valid = new Set(normalizedHostEndpoints.map((ep) => ep.id));
-      const next = new Set<string>();
+      const next = new Set<number>();
       prev.forEach((id) => {
         if (valid.has(id)) {
           next.add(id);
@@ -674,7 +677,7 @@ export function HostDetailPage() {
   useEffect(() => {
     setSelectedVulnerabilityIds((prev) => {
       const valid = new Set(vulnerabilities.map((v) => v.id));
-      const next = new Set<string>();
+      const next = new Set<number>();
       prev.forEach((id) => {
         if (valid.has(id)) {
           next.add(id);
@@ -783,7 +786,7 @@ export function HostDetailPage() {
   const [vulnBusy, setVulnBusy] = useState(false);
   const [vulnEditMode, setVulnEditMode] = useState(false);
   const [editCommentOpen, setEditCommentOpen] = useState(false);
-  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
   const [editingCommentContent, setEditingCommentContent] = useState("");
   const [commentActionsAnchorEl, setCommentActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activeComment, setActiveComment] = useState<VulnerabilityComment | null>(null);
@@ -818,7 +821,7 @@ export function HostDetailPage() {
   );
 
   const openVulnerabilityPage = useCallback(
-    (targetVulnerabilityId: string, commentId?: string | null) => {
+    (targetVulnerabilityId: number, commentId?: number | null) => {
       if (!projectId || !hostId) {
         return;
       }
@@ -921,7 +924,7 @@ export function HostDetailPage() {
   }, [hostId, projectId]);
 
   const applyRemovedEndpointsLocally = useCallback(
-    (removedIds: Set<string>) => {
+    (removedIds: Set<number>) => {
       if (!hostId || removedIds.size === 0) {
         return;
       }
@@ -1057,7 +1060,7 @@ export function HostDetailPage() {
           ? [{ id: "primary", ip_address: source.ip_address, label: null, is_primary: true }]
           : [];
     return items.map((item) => ({
-      id: item.id || crypto.randomUUID(),
+      id: item.id != null ? String(item.id) : crypto.randomUUID(),
       ip_address: item.ip_address,
       label: item.label ?? "",
       is_primary: item.is_primary,
@@ -1221,7 +1224,7 @@ export function HostDetailPage() {
     await persistHostIps(current);
   };
 
-  const handleRemoveIp = async (id: string) => {
+  const handleRemoveIp = async (id: number) => {
     const current = host?.ip_addresses ?? [];
     if (current.length <= 1 && !host?.hostname) {
       setError("Нельзя удалить единственный IP-адрес без указанного hostname");
@@ -1255,7 +1258,7 @@ export function HostDetailPage() {
     }
   };
 
-  const toggleIpSelection = (id: string) => {
+  const toggleIpSelection = (id: number) => {
     setSelectedIpIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -1264,7 +1267,7 @@ export function HostDetailPage() {
     });
   };
 
-  const handleSaveIpEdit = async (id: string, ip: string, label: string) => {
+  const handleSaveIpEdit = async (id: number, ip: string, label: string) => {
     const trimmed = ip.trim();
     if (!trimmed) return;
     const current = host?.ip_addresses ?? [];
@@ -1344,7 +1347,7 @@ export function HostDetailPage() {
     setActiveEndpoint(null);
   };
 
-  const toggleExpandedId = (id: string, setExpanded: React.Dispatch<React.SetStateAction<string[]>>) => {
+  const toggleExpandedId = (id: number, setExpanded: React.Dispatch<React.SetStateAction<number[]>>) => {
     setExpanded((current) => (current.includes(id) ? current.filter((itemId) => itemId !== id) : [...current, id]));
   };
 
@@ -1446,7 +1449,7 @@ export function HostDetailPage() {
         } else {
           await updateService(projectId, hostId, editingPortId, editingPortServiceId, {
             name: nextName,
-            version: nextVersion || null,
+            version: nextVersion || undefined,
           });
         }
       } else if (nextName) {
@@ -1497,7 +1500,7 @@ export function HostDetailPage() {
     }
   };
 
-  const openCreatePortDialogForIp = (ipAddressId: string) => {
+  const openCreatePortDialogForIp = (ipAddressId: number) => {
     setCreatingPortIpId(ipAddressId);
     setCreatingPortNumber("443");
     setCreatingPortProtocol("tcp");
@@ -1599,7 +1602,7 @@ export function HostDetailPage() {
     return Array.from(entries.values()).sort((left, right) => left.port_number - right.port_number);
   };
 
-  const importPortsFromNmapFile = async (file: File | null, ipAddressId: string) => {
+  const importPortsFromNmapFile = async (file: File | null, ipAddressId: number) => {
     if (!file || !projectId || !hostId || !ipAddressId) {
       return;
     }
@@ -1640,7 +1643,7 @@ export function HostDetailPage() {
     }
   };
 
-  const openCreateServiceDialog = (portId: string) => {
+  const openCreateServiceDialog = (portId: number) => {
     setCreateServicePortId(portId);
     setCreatingServiceName("");
     setCreatingServiceVersion("");
@@ -1659,7 +1662,7 @@ export function HostDetailPage() {
     await loadHost();
   };
 
-  const openEditServiceDialog = (portId: string, service: Service) => {
+  const openEditServiceDialog = (portId: number, service: Service) => {
     setEditServicePortId(portId);
     setEditingServiceId(service.id);
     setEditingServiceName(service.name);
@@ -1672,7 +1675,7 @@ export function HostDetailPage() {
     setSelectedServiceIdsForDelete(new Set());
   };
 
-  const toggleServiceSelectionForDelete = (serviceId: string) => {
+  const toggleServiceSelectionForDelete = (serviceId: number) => {
     setSelectedServiceIdsForDelete((prev) => {
       const next = new Set(prev);
       if (next.has(serviceId)) {
@@ -1684,7 +1687,7 @@ export function HostDetailPage() {
     });
   };
 
-  const removeSelectedServicesFromPort = async (portId: string) => {
+  const removeSelectedServicesFromPort = async (portId: number) => {
     if (!projectId || !hostId || selectedServiceIdsForDelete.size === 0) {
       return;
     }
@@ -1983,7 +1986,7 @@ export function HostDetailPage() {
     await loadHost();
   };
 
-  const removeEndpoint = async (endpointId: string) => {
+  const removeEndpoint = async (endpointId: number) => {
     if (!projectId || !hostId) {
       return;
     }
@@ -2008,8 +2011,8 @@ export function HostDetailPage() {
     }
   };
 
-  const collectEndpointIdsInTreeNode = useCallback((node: EndpointPathTreeNode): string[] => {
-    const ids: string[] = node.endpointsAtNode.map((ep) => ep.id);
+  const collectEndpointIdsInTreeNode = useCallback((node: EndpointPathTreeNode): number[] => {
+    const ids: number[] = node.endpointsAtNode.map((ep) => ep.id);
     for (const child of node.children) {
       ids.push(...collectEndpointIdsInTreeNode(child));
     }
@@ -2033,7 +2036,7 @@ export function HostDetailPage() {
     [collectEndpointIdsInTreeNode, selectedEndpointIds]
   );
 
-  const toggleEndpointSelection = useCallback((endpointId: string) => {
+  const toggleEndpointSelection = useCallback((endpointId: number) => {
     setSelectedEndpointIds((prev) => {
       const next = new Set(prev);
       if (next.has(endpointId)) {
@@ -2084,7 +2087,7 @@ export function HostDetailPage() {
     setBulkDeletingEndpoints(true);
     setError(null);
     const failures: string[] = [];
-    const removedOk = new Set<string>();
+    const removedOk = new Set<number>();
     try {
       for (const endpointId of Array.from(selectedEndpointIds)) {
         try {
@@ -2170,7 +2173,7 @@ export function HostDetailPage() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      const safeHost = (host?.hostname || host?.ip_address || hostId).replace(/[^a-zA-Z0-9._-]+/g, "_");
+      const safeHost = String(host?.hostname || host?.ip_address || hostId).replace(/[^a-zA-Z0-9._-]+/g, "_");
       link.download = `swagger-${safeHost}.json`;
       document.body.appendChild(link);
       link.click();
@@ -2207,7 +2210,7 @@ export function HostDetailPage() {
     await loadHost();
   };
 
-  const toggleVulnerabilitySelection = useCallback((vulnerabilityId: string) => {
+  const toggleVulnerabilitySelection = useCallback((vulnerabilityId: number) => {
     setSelectedVulnerabilityIds((prev) => {
       const next = new Set(prev);
       if (next.has(vulnerabilityId)) {
@@ -2294,7 +2297,7 @@ export function HostDetailPage() {
   useEffect(() => {
     setSelectedPortIds((prev) => {
       const valid = new Set((host?.ip_addresses ?? []).flatMap((ip) => ip.ports.map((p) => p.id)));
-      const next = new Set<string>();
+      const next = new Set<number>();
       prev.forEach((id) => {
         if (valid.has(id)) {
           next.add(id);
@@ -2327,7 +2330,7 @@ export function HostDetailPage() {
     }
   }, [ipBulkDeleteMode]);
 
-  const togglePortSelection = useCallback((portId: string) => {
+  const togglePortSelection = useCallback((portId: number) => {
     setSelectedPortIds((prev) => {
       const next = new Set(prev);
       if (next.has(portId)) {
@@ -2382,7 +2385,7 @@ export function HostDetailPage() {
   };
 
   const loadVulnerabilityDetails = useCallback(
-    async (vulnerabilityId: string, options?: { startVulnEdit?: boolean }) => {
+    async (vulnerabilityId: number, options?: { startVulnEdit?: boolean }) => {
       if (!projectId) {
         return;
       }
@@ -2515,7 +2518,7 @@ export function HostDetailPage() {
     }
   };
 
-  const removeCommentFromActiveVuln = async (commentId: string) => {
+  const removeCommentFromActiveVuln = async (commentId: number) => {
     if (!projectId || !activeVulnDetails) {
       return;
     }
@@ -2625,7 +2628,7 @@ export function HostDetailPage() {
           {endpointBulkDeleteMode ? (
             <Checkbox
               size="small"
-              inputProps={{ "data-endpoint-delete-checkbox": "true" }}
+              inputProps={{ "data-endpoint-delete-checkbox": "true" } as React.InputHTMLAttributes<HTMLInputElement>}
               checked={selectedEndpointIds.has(endpoint.id)}
               onClick={(event) => event.stopPropagation()}
               onChange={() => toggleEndpointSelection(endpoint.id)}
@@ -2893,7 +2896,7 @@ export function HostDetailPage() {
             {endpointBulkDeleteMode ? (
               <Checkbox
                 size="small"
-                inputProps={{ "data-endpoint-delete-checkbox": "true" }}
+                inputProps={{ "data-endpoint-delete-checkbox": "true" } as React.InputHTMLAttributes<HTMLInputElement>}
                 checked={selectionState.checked}
                 indeterminate={selectionState.indeterminate}
                 disabled={selectionState.total === 0}
@@ -2971,7 +2974,7 @@ export function HostDetailPage() {
       </Typography>
       <List dense disablePadding>
         {vulnComments.map((comment, commentIndex) => {
-          const isHighlighted = highlightedCommentId === comment.id && mentionHighlightActive;
+          const isHighlighted = Number(highlightedCommentId) === comment.id && mentionHighlightActive;
           const canManageComment = user?.id === comment.user_id;
           return (
             <Fragment key={comment.id}>
@@ -3378,14 +3381,14 @@ export function HostDetailPage() {
           onSelectNotesLabel={() => navigate(`/projects/${projectId}/notes`)}
           onCreateNote={(parentId) => {
             // Открываем платформенный диалог — никаких window.prompt.
-            setNoteCreateParentId(parentId);
+            setNoteCreateParentId(parentId != null ? Number(parentId) : null);
             setNoteCreateTitle("");
             setNoteCreateDialogOpen(true);
           }}
           onMoveNote={async (noteId, newParentId) => {
             if (!projectId) return;
             try {
-              await moveProjectNote(projectId, noteId, { parent_id: newParentId });
+              await moveProjectNote(projectId, Number(noteId), { parent_id: newParentId != null ? Number(newParentId) : null });
               setProjectNotes(await listProjectNotes(projectId));
             } catch (err) {
               setError(getApiErrorMessage(err, "Не удалось переместить заметку"));
@@ -3395,8 +3398,8 @@ export function HostDetailPage() {
             if (!projectId) return;
             try {
               await reorderProjectNotes(projectId, {
-                parent_id: parentId,
-                items: orderedIds.map((id, idx) => ({ id, sort_order: idx + 1 })),
+                parent_id: parentId != null ? Number(parentId) : null,
+                items: orderedIds.map((id, idx) => ({ id: Number(id), sort_order: idx + 1 })),
               });
               setProjectNotes(await listProjectNotes(projectId));
             } catch (err) {
@@ -3595,7 +3598,7 @@ export function HostDetailPage() {
                                 size="small"
                                 variant="contained"
                                 onClick={async () => {
-                                  await handleSaveIpEdit(ip.id, editIpDraft.ip, editIpDraft.label);
+                                  await handleSaveIpEdit(Number(ip.id), editIpDraft.ip, editIpDraft.label);
                                   setEditIpDraftId(null);
                                 }}
                               >
@@ -3610,8 +3613,8 @@ export function HostDetailPage() {
                               {ipBulkDeleteMode && ip.id !== "primary" && (
                                 <Checkbox
                                   size="small"
-                                  checked={selectedIpIds.has(ip.id)}
-                                  onChange={() => toggleIpSelection(ip.id)}
+                                  checked={selectedIpIds.has(Number(ip.id))}
+                                  onChange={() => toggleIpSelection(Number(ip.id))}
                                   sx={{ p: 0.25 }}
                                 />
                               )}
@@ -3625,7 +3628,7 @@ export function HostDetailPage() {
                                   className="ip-row-actions"
                                   sx={{ opacity: 0, transition: "opacity .15s ease" }}
                                   onClick={() => {
-                                    setEditIpDraftId(ip.id);
+                                    setEditIpDraftId(Number(ip.id));
                                     setEditIpDraft({ ip: ip.ip_address, label: ip.label ?? "" });
                                   }}
                                 >
@@ -4475,7 +4478,7 @@ export function HostDetailPage() {
               select
               label="IP-адрес"
               value={creatingPortIpId}
-              onChange={(event) => setCreatingPortIpId(event.target.value)}
+              onChange={(event) => setCreatingPortIpId(event.target.value === "" ? "" : Number(event.target.value))}
             >
               {(host?.ip_addresses ?? []).map((ip) => (
                 <MenuItem key={ip.id} value={ip.id}>
@@ -4550,7 +4553,7 @@ export function HostDetailPage() {
               select
               label="IP-адрес"
               value={nmapImportIpId}
-              onChange={(event) => setNmapImportIpId(event.target.value)}
+              onChange={(event) => setNmapImportIpId(event.target.value === "" ? "" : Number(event.target.value))}
               disabled={nmapImporting}
             >
               {(host?.ip_addresses ?? []).map((ip) => (

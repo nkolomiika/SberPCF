@@ -1,5 +1,7 @@
 from types import SimpleNamespace
-from uuid import uuid4
+from itertools import count as _id_count
+
+_ids = _id_count(1)
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -17,14 +19,14 @@ def _make_scalars_result(items: list[object]) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_find_matching_host_returns_exact_host() -> None:
-    host_id = uuid4()
+    host_id = next(_ids)
     existing = SimpleNamespace(id=host_id, ip_address="10.0.0.5", hostname="api.local")
     host_data = SimpleNamespace(ip_address="10.0.0.5", hostname="api.local")
     db = AsyncMock()
     db.scalars = AsyncMock(return_value=_make_scalars_result([existing]))
     service = ImportService(db)
 
-    matched = await service._find_matching_host(uuid4(), host_data)
+    matched = await service._find_matching_host(next(_ids), host_data)
 
     assert matched is existing
 
@@ -158,9 +160,9 @@ def test_resolve_openapi_ref_supports_local_refs() -> None:
 
 @pytest.mark.asyncio
 async def test_import_openapi_skips_duplicate_and_adds_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    project_id = uuid4()
-    host_id = uuid4()
-    actor_id = uuid4()
+    project_id = next(_ids)
+    host_id = next(_ids)
+    actor_id = next(_ids)
     host = SimpleNamespace(id=host_id, hostname="current.local", ip_address=None)
     existing_endpoint = SimpleNamespace(
         description=None,
@@ -200,9 +202,9 @@ paths:
 
 @pytest.mark.asyncio
 async def test_import_openapi_accepts_relaxed_swagger_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    project_id = uuid4()
-    host_id = uuid4()
-    actor_id = uuid4()
+    project_id = next(_ids)
+    host_id = next(_ids)
+    actor_id = next(_ids)
     host = SimpleNamespace(id=host_id, hostname="current.local", ip_address=None)
     db = AsyncMock()
     db.scalar = AsyncMock(side_effect=[host, None])
@@ -294,9 +296,9 @@ def test_extract_openapi_request_details_handles_swagger2_form_data() -> None:
 
 @pytest.mark.asyncio
 async def test_import_openapi_skips_deprecated_operations(monkeypatch: pytest.MonkeyPatch) -> None:
-    project_id = uuid4()
-    host_id = uuid4()
-    actor_id = uuid4()
+    project_id = next(_ids)
+    host_id = next(_ids)
+    actor_id = next(_ids)
     host = SimpleNamespace(id=host_id, hostname="api.local", ip_address=None)
     db = AsyncMock()
     db.scalar = AsyncMock(side_effect=[host, None])
@@ -329,8 +331,8 @@ paths:
 
 @pytest.mark.asyncio
 async def test_export_openapi_builds_document_from_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
-    project_id = uuid4()
-    host_id = uuid4()
+    project_id = next(_ids)
+    host_id = next(_ids)
     host = SimpleNamespace(id=host_id, hostname="api.local", ip_address=None)
     endpoint = SimpleNamespace(
         path="/pet/{petId}",

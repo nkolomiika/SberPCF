@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, File as UploadApiFile, UploadFile
 from fastapi.responses import StreamingResponse
@@ -15,8 +14,8 @@ router = APIRouter(tags=["files"])
 
 @router.get("/projects/{project_id}/vulnerabilities/{vuln_id}/files", response_model=list[FileOut])
 async def list_files(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> list[FileOut]:
@@ -27,8 +26,8 @@ async def list_files(
 
 @router.post("/projects/{project_id}/vulnerabilities/{vuln_id}/files", response_model=FileOut, status_code=201)
 async def upload_file(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     file: UploadFile = UploadApiFile(...),
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -42,7 +41,7 @@ async def upload_file(
 
 @router.get("/files/{file_id}/download")
 async def download_file(
-    file_id: UUID,
+    file_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -55,9 +54,9 @@ async def download_file(
 
 @router.delete("/projects/{project_id}/vulnerabilities/{vuln_id}/files/{file_id}", status_code=204)
 async def delete_file(
-    project_id: UUID,
-    vuln_id: UUID,
-    file_id: UUID,
+    project_id: int,
+    vuln_id: int,
+    file_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),

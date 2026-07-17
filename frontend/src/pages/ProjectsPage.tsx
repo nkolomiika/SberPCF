@@ -53,7 +53,7 @@ const ROOT_FOLDER_LABEL = "Корень";
 const ROOT_FOLDER_NODE: FolderTreeNode = { id: null, name: "", path: "", children: [], projects: [] };
 
 type FolderTreeNode = {
-  id: string | null;
+  id: number | null;
   name: string;
   path: string;
   children: FolderTreeNode[];
@@ -62,7 +62,7 @@ type FolderTreeNode = {
 
 type DragPayload = {
   type: "project" | "folder";
-  id: string;
+  id: number;
 };
 
 const toDateInputValue = (date: Date) => {
@@ -95,20 +95,20 @@ export function ProjectsPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [folderName, setFolderName] = useState("");
-  const [folderParentId, setFolderParentId] = useState<string>("");
+  const [folderParentId, setFolderParentId] = useState<number | "">("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [usersCatalog, setUsersCatalog] = useState<User[]>([]);
-  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
   const [selectedFolder, setSelectedFolder] = useState("");
   const [folderPaths, setFolderPaths] = useState<string[]>([]);
   const [creatingProject, setCreatingProject] = useState(false);
   const [updatingProject, setUpdatingProject] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
-  const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
-  const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null);
+  const [draggingProjectId, setDraggingProjectId] = useState<number | null>(null);
+  const [draggingFolderId, setDraggingFolderId] = useState<number | null>(null);
   const [draggingFolderPath, setDraggingFolderPath] = useState<string | null>(null);
   const [dragOverFolderPath, setDragOverFolderPath] = useState<string | null>(null);
   const [dropLineTarget, setDropLineTarget] = useState<string | null>(null);
@@ -117,7 +117,7 @@ export function ProjectsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | ProjectStatus>("all");
   const [editingProjectName, setEditingProjectName] = useState("");
-  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
   const [editingProjectDescription, setEditingProjectDescription] = useState("");
   const [editingProjectStartDate, setEditingProjectStartDate] = useState("");
   const [editingProjectEndDate, setEditingProjectEndDate] = useState("");
@@ -288,7 +288,7 @@ export function ProjectsPage() {
     }
   };
 
-  const handleDeleteProject = async (projectId: string, projectName: string) => {
+  const handleDeleteProject = async (projectId: number, projectName: string) => {
     if (!window.confirm(`Удалить проект "${projectName}"?`)) {
       return;
     }
@@ -320,7 +320,7 @@ export function ProjectsPage() {
     setCreateOpen(true);
   };
 
-  const openCreateFolderDialog = (parentId = "", seedName = "") => {
+  const openCreateFolderDialog = (parentId: number | "" = "", seedName = "") => {
     closeActionsMenu();
     setFolderName(seedName);
     setFolderParentId(parentId);
@@ -432,7 +432,7 @@ export function ProjectsPage() {
     }
   };
 
-  const moveProjectToFolder = async (projectId: string, folderPath: string) => {
+  const moveProjectToFolder = async (projectId: number, folderPath: string) => {
     const normalizedFolder = (folderPath || "").trim();
     setError(null);
     try {
@@ -447,7 +447,7 @@ export function ProjectsPage() {
     }
   };
 
-  const moveFolderToFolder = async (folderId: string, targetNode: FolderTreeNode) => {
+  const moveFolderToFolder = async (folderId: number, targetNode: FolderTreeNode) => {
     const explicitTargetFolder = folders.find((item) => item.path === targetNode.path);
     const targetParentId = targetNode.path === "" ? null : explicitTargetFolder?.id ?? targetNode.id;
     if (targetNode.path !== "" && !targetParentId) {
@@ -472,7 +472,7 @@ export function ProjectsPage() {
     setExpandedFolderPaths((prev) => (prev.includes(folderPath) ? prev.filter((item) => item !== folderPath) : [...prev, folderPath]));
   };
 
-  const prepareDragPayload = (event: DragEvent, type: "project" | "folder", id: string) => {
+  const prepareDragPayload = (event: DragEvent, type: "project" | "folder", id: number) => {
     setDraggingType(type);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", `${type}:${id}`);
@@ -487,7 +487,7 @@ export function ProjectsPage() {
     const raw = event.dataTransfer.getData("text/plain") || "";
     const [type, id] = raw.split(":");
     if ((type === "project" || type === "folder") && id) {
-      return { type, id };
+      return { type, id: Number(id) };
     }
     if (draggingProjectId) {
       return { type: "project", id: draggingProjectId };
@@ -499,7 +499,7 @@ export function ProjectsPage() {
   };
 
   const getFolderSourcePath = useCallback(
-    (folderId: string) => {
+    (folderId: number) => {
       return folderId === draggingFolderId ? draggingFolderPath : folderPathById.get(folderId) ?? null;
     },
     [draggingFolderId, draggingFolderPath, folderPathById]
@@ -1215,12 +1215,12 @@ export function ProjectsPage() {
               value={selectedMemberIds}
               onChange={(event) => {
                 const value = event.target.value;
-                setSelectedMemberIds(typeof value === "string" ? value.split(",") : value);
+                setSelectedMemberIds(typeof value === "string" ? value.split(",").map(Number) : value);
               }}
               SelectProps={{
                 multiple: true,
                 renderValue: (selected) =>
-                  (selected as string[])
+                  (selected as number[])
                     .map((id) => usersCatalog.find((item) => item.id === id)?.username ?? id)
                     .join(", "),
               }}
@@ -1267,7 +1267,7 @@ export function ProjectsPage() {
               select
               label="Родительская папка"
               value={folderParentId}
-              onChange={(event) => setFolderParentId(event.target.value)}
+              onChange={(event) => setFolderParentId(event.target.value === "" ? "" : Number(event.target.value))}
             >
               <MenuItem value="">Корень</MenuItem>
               {folders.map((folder) => (

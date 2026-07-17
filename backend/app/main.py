@@ -16,6 +16,7 @@ from app.routers import (
     auth,
     comments,
     files,
+    images,
     import_,
     jira,
     notifications,
@@ -60,6 +61,7 @@ def _register_routes() -> None:
     app.include_router(assets.router, prefix=prefix)
     app.include_router(vulnerabilities.router, prefix=prefix)
     app.include_router(files.router, prefix=prefix)
+    app.include_router(images.router, prefix=prefix)
     app.include_router(comments.router, prefix=prefix)
     app.include_router(notifications.router, prefix=prefix)
     app.include_router(import_.router, prefix=prefix)
@@ -144,7 +146,6 @@ async def startup() -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_minio_key TEXT"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_content_type VARCHAR(127)"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_uploaded_at TIMESTAMP WITH TIME ZONE"))
-            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS workflow_steps JSON"))
             await conn.execute(

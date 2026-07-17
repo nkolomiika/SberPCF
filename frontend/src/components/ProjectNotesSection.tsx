@@ -54,17 +54,17 @@ export function ProjectNotesSection({
   highlightCommentId = null,
   onHighlightHandled,
 }: {
-  projectId: string;
+  projectId: number;
   /** Список заметок проекта — берём из родителя, чтобы не дублировать fetch и
    *  избежать гонок (родитель синхронизирует своё projectNotes по WS). */
   notes: ProjectNote[];
-  selectedNoteId: string | null;
-  onSelectNote: (noteId: string | null) => void;
+  selectedNoteId: number | null;
+  onSelectNote: (noteId: number | null) => void;
   onNotesChange: (notes: ProjectNote[]) => void;
   /** Тик из WS-пуша — бампится при entity=project_note_comment. Перетягивает comments. */
   commentsTick?: number;
   /** ID комментария, который нужно подсветить (3 секунды) после перехода по уведомлению. */
-  highlightCommentId?: string | null;
+  highlightCommentId?: number | null;
   onHighlightHandled?: () => void;
 }) {
   const user = useAuthStore((state) => state.user);
@@ -77,7 +77,7 @@ export function ProjectNotesSection({
   const [busy, setBusy] = useState(false);
   const [dialogMode, setDialogMode] = useState<DialogMode>(null);
   const [dialogValue, setDialogValue] = useState("");
-  const [moveTargetParentId, setMoveTargetParentId] = useState<string>("");
+  const [moveTargetParentId, setMoveTargetParentId] = useState<number | "">("");
   const [actionsAnchorEl, setActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [comments, setComments] = useState<ProjectNoteComment[]>([]);
   const [newComment, setNewComment] = useState("");
@@ -96,7 +96,7 @@ export function ProjectNotesSection({
   );
 
   const childrenByParent = useMemo(() => {
-    const grouped = new Map<string | null, ProjectNote[]>();
+    const grouped = new Map<number | null, ProjectNote[]>();
     notes.forEach((note) => {
       const key = note.parent_id ?? null;
       const current = grouped.get(key) ?? [];
@@ -167,9 +167,9 @@ export function ProjectNotesSection({
 
   const descendants = useMemo(() => {
     if (!selectedNoteId) {
-      return new Set<string>();
+      return new Set<number>();
     }
-    const ids = new Set<string>();
+    const ids = new Set<number>();
     const queue = [selectedNoteId];
     while (queue.length) {
       const currentId = queue.pop()!;
@@ -293,7 +293,7 @@ export function ProjectNotesSection({
     }
   };
 
-  const deleteComment = async (commentId: string) => {
+  const deleteComment = async (commentId: number) => {
     if (!selectedNoteId) {
       return;
     }
@@ -361,7 +361,7 @@ export function ProjectNotesSection({
       return;
     }
     const idsSet = new Set(commentIdsKey.split("\n").filter(Boolean));
-    if (!idsSet.has(highlightCommentId)) {
+    if (!idsSet.has(String(highlightCommentId))) {
       setMentionHighlightActive(false);
       return;
     }
@@ -668,7 +668,9 @@ export function ProjectNotesSection({
               fullWidth
               label="Новый родитель"
               value={moveTargetParentId}
-              onChange={(event) => setMoveTargetParentId(event.target.value)}
+              onChange={(event) =>
+                setMoveTargetParentId(event.target.value === "" ? "" : Number(event.target.value))
+              }
               sx={{ mt: 1 }}
             >
               <MenuItem value="">Корень заметок</MenuItem>

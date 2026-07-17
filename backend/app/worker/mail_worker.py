@@ -3,7 +3,6 @@ import logging
 import socket
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
-from uuid import UUID
 
 import aio_pika
 from sqlalchemy import and_, or_, select
@@ -89,7 +88,7 @@ async def relay_pending_jobs(channel: aio_pika.abc.AbstractChannel, queue_name: 
         await asyncio.sleep(5)
 
 
-async def process_mail_job(job_id: UUID) -> None:
+async def process_mail_job(job_id: int) -> None:
     async with SessionLocal() as db:
         job = await db.scalar(select(MailJob).where(MailJob.id == job_id))
         if not job or job.status == "sent":
@@ -123,7 +122,7 @@ async def consume_mail_jobs(queue: aio_pika.abc.AbstractQueue) -> None:
     async with queue.iterator() as iterator:
         async for message in iterator:
             async with message.process(requeue=False):
-                await process_mail_job(UUID(message.body.decode("utf-8")))
+                await process_mail_job(int(message.body.decode("utf-8")))
 
 
 async def main() -> None:

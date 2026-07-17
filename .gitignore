@@ -11,3 +11,18 @@ frontend/dist/
 
 pgdata/
 miniodata/
+
+# design-sync (transient: staged scripts, build output, machine state)
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+frontend/design-kit/dist/
+
+# Макеты и графика в репозитории не храним: архивы прототипов и .svg лежат
+# локально. Логотипы уже вшиты в код как JSX-пути (storm/icons.tsx), файлы для
+# сборки не нужны. Если понадобится SVG как ассет — добавлять через
+# `git add -f`, иначе он молча не попадёт в коммит.
+*.zip
+*.svg

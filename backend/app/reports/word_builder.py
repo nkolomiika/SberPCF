@@ -13,7 +13,6 @@ from datetime import date as _date
 from io import BytesIO
 from pathlib import Path
 from typing import Iterable, Literal
-from uuid import UUID
 
 from docx import Document
 from docx.document import Document as DocxDocument
@@ -418,7 +417,7 @@ def _hosts_text(hosts: Iterable[Host]) -> str:
 
 
 def _vuln_host_address(vuln: Vulnerability, indexes: dict) -> str:
-    host_by_id: dict[UUID, Host] = indexes["host_by_id"]
+    host_by_id: dict[int, Host] = indexes["host_by_id"]
     for asset in indexes["assets_by_vuln_id"].get(vuln.id, []):
         if asset.asset_type == AssetType.HOST:
             host = host_by_id.get(asset.asset_id)
@@ -1236,11 +1235,11 @@ def _apply_run_font_xml(rpr_element) -> None:
 # Паттерн markdown-картинки в описании этапа:
 # `![любой alt](/api/v1/files/<uuid>/download)` или с абсолютным URL.
 _MARKDOWN_IMAGE_RE = re.compile(
-    r"!\[[^\]]*\]\(\s*(?:https?://[^)\s]*)?/api/v1/files/([0-9a-fA-F-]{36})/download[^)]*\)"
+    r"!\[[^\]]*\]\(\s*(?:https?://[^)\s]*)?/api/v1/files/(\d+)/download[^)]*\)"
 )
 
 
-def _extract_file_ids_from_markdown(text: str | None) -> list[UUID]:
+def _extract_file_ids_from_markdown(text: str | None) -> list[int]:
     """Возвращает UUID файлов, упомянутых как markdown-картинки в тексте.
 
     Фронт Markdown-редактор при добавлении картинки в шаг вставляет ссылку вида
@@ -1249,11 +1248,11 @@ def _extract_file_ids_from_markdown(text: str | None) -> list[UUID]:
     """
     if not text:
         return []
-    result: list[UUID] = []
-    seen: set[UUID] = set()
+    result: list[int] = []
+    seen: set[int] = set()
     for match in _MARKDOWN_IMAGE_RE.finditer(text):
         try:
-            file_id = UUID(match.group(1))
+            file_id = int(match.group(1))
         except ValueError:
             continue
         if file_id in seen:
@@ -1310,13 +1309,13 @@ def _strip_markdown_formatting(text: str | None) -> str:
     return s
 
 
-def _step_image_file_ids(step: dict) -> list[UUID]:
+def _step_image_file_ids(step: dict) -> list[int]:
     """Все file_id этапа: из `image_file_ids` и из markdown в title/description."""
-    ids: list[UUID] = []
-    seen: set[UUID] = set()
+    ids: list[int] = []
+    seen: set[int] = set()
     for raw_id in step.get("image_file_ids") or []:
         try:
-            file_id = UUID(str(raw_id))
+            file_id = int(raw_id)
         except (TypeError, ValueError):
             continue
         if file_id in seen:
@@ -1335,9 +1334,9 @@ def _step_image_file_ids(step: dict) -> list[UUID]:
 _FIGURE_COUNTER_KEY = "_figure_counter"
 
 
-def _collect_step_image_ids(steps: list[dict] | None) -> set[UUID]:
+def _collect_step_image_ids(steps: list[dict] | None) -> set[int]:
     """Собирает множество file_id этапов (`image_file_ids` + markdown-вставки)."""
-    ids: set[UUID] = set()
+    ids: set[int] = set()
     for step in steps or []:
         ids.update(_step_image_file_ids(step))
     return ids
@@ -1400,7 +1399,7 @@ def _fill_card(
     sequence: int,
     indexes: dict,
     project: Project,
-    image_bytes_by_id: dict[UUID, bytes],
+    image_bytes_by_id: dict[int, bytes],
     image_state: dict,
 ) -> None:
     """Заполняет одну карточку уязвимости/слабости данными `vuln`."""
@@ -1456,9 +1455,9 @@ def _attach_workflow_images(
     card_paragraphs: list[Paragraph],
     vuln: Vulnerability,
     *,
-    image_bytes_by_id: dict[UUID, bytes],
-    files_by_id: dict[UUID, File],
-    files_by_vuln_id: dict[UUID, list[File]],
+    image_bytes_by_id: dict[int, bytes],
+    files_by_id: dict[int, File],
+    files_by_vuln_id: dict[int, list[File]],
     image_state: dict,
     doc: DocxDocument,
 ) -> None:
@@ -2566,7 +2565,7 @@ def _build_section(
     indexes: dict,
     project: Project,
     hosts: list[Host],
-    image_bytes_by_id: dict[UUID, bytes],
+    image_bytes_by_id: dict[int, bytes],
     image_state: dict,
 ) -> None:
     """Клонирует пример карточки в указанном H2-разделе под каждый элемент `items`.
@@ -2765,9 +2764,9 @@ def _fill_test_card(
     doc: DocxDocument,
     vuln: Vulnerability,
     sequence: int,
-    image_bytes_by_id: dict[UUID, bytes],
-    files_by_id: dict[UUID, File],
-    files_by_vuln_id: dict[UUID, list[File]],
+    image_bytes_by_id: dict[int, bytes],
+    files_by_id: dict[int, File],
+    files_by_vuln_id: dict[int, list[File]],
     image_state: dict,
 ) -> None:
     """Заполняет один блок-карточку теста в разделе 4.4.
@@ -2913,9 +2912,9 @@ def _fill_actual_result_section(
     paragraphs: list[Paragraph],
     steps: list[dict],
     vuln: Vulnerability,
-    image_bytes_by_id: dict[UUID, bytes],
-    files_by_id: dict[UUID, File],
-    files_by_vuln_id: dict[UUID, list[File]],
+    image_bytes_by_id: dict[int, bytes],
+    files_by_id: dict[int, File],
+    files_by_vuln_id: dict[int, list[File]],
     image_state: dict,
     doc: DocxDocument,
 ) -> list[Paragraph]:
@@ -2986,10 +2985,10 @@ def _fill_actual_result_section(
 def _build_test_executions(
     doc: DocxDocument,
     items: list[Vulnerability],
-    image_bytes_by_id: dict[UUID, bytes],
+    image_bytes_by_id: dict[int, bytes],
     *,
-    files_by_id: dict[UUID, File],
-    files_by_vuln_id: dict[UUID, list[File]],
+    files_by_id: dict[int, File],
+    files_by_vuln_id: dict[int, list[File]],
     indexes: dict,
     hosts: list[Host],
     image_state: dict,
@@ -3051,7 +3050,7 @@ def _build_common(
     kind: ReportKind,
     data: dict,
     indexes: dict,
-    image_bytes_by_id: dict[UUID, bytes],
+    image_bytes_by_id: dict[int, bytes],
 ) -> bytes:
     project: Project = data["project"]
     hosts: list[Host] = data["hosts"]
@@ -3060,8 +3059,8 @@ def _build_common(
     if kind == "pp":
         _set_all_sections_landscape(doc)
 
-    files_by_id: dict[UUID, File] = indexes.get("files_by_id", {}) or {}
-    files_by_vuln_id: dict[UUID, list[File]] = indexes.get("files_by_vuln_id", {}) or {}
+    files_by_id: dict[int, File] = indexes.get("files_by_id", {}) or {}
+    files_by_vuln_id: dict[int, list[File]] = indexes.get("files_by_vuln_id", {}) or {}
     image_state: dict = {_FIGURE_COUNTER_KEY: 0}
 
     _update_cover_page(doc, project)
@@ -3137,11 +3136,11 @@ def _build_common(
     return buffer.getvalue()
 
 
-def build_szi(data: dict, indexes: dict, image_bytes_by_id: dict[UUID, bytes]) -> bytes:
+def build_szi(data: dict, indexes: dict, image_bytes_by_id: dict[int, bytes]) -> bytes:
     """Собирает СЗИ-отчёт (сертификация)."""
     return _build_common("szi", data, indexes, image_bytes_by_id)
 
 
-def build_pp(data: dict, indexes: dict, image_bytes_by_id: dict[UUID, bytes]) -> bytes:
+def build_pp(data: dict, indexes: dict, image_bytes_by_id: dict[int, bytes]) -> bytes:
     """Собирает ПП-отчёт (внутренняя приёмка)."""
     return _build_common("pp", data, indexes, image_bytes_by_id)

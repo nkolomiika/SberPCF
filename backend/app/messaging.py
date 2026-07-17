@@ -1,4 +1,3 @@
-from uuid import UUID
 
 import aio_pika
 from aio_pika import DeliveryMode, Message
@@ -8,7 +7,7 @@ from app.config import get_settings
 settings = get_settings()
 
 
-async def publish_mail_job(job_id: UUID) -> None:
+async def publish_mail_job(job_id: int) -> None:
     if not settings.mail_enabled:
         return
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)

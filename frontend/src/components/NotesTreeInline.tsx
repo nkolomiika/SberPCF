@@ -9,17 +9,17 @@ import type { ProjectNote } from "../types";
 
 type Props = {
   notes: ProjectNote[];
-  selectedNoteId: string | null;
-  onSelect: (noteId: string) => void;
+  selectedNoteId: number | null;
+  onSelect: (noteId: number) => void;
   /** Создать подстраницу (parentId === null означает создать корневую страницу). */
-  onCreateChild?: (parentId: string | null) => void;
+  onCreateChild?: (parentId: number | null) => void;
   /** Перемещение заметки в другого родителя (drop на узле). */
-  onMove?: (noteId: string, newParentId: string | null) => Promise<void> | void;
+  onMove?: (noteId: number, newParentId: number | null) => Promise<void> | void;
   /** Изменение порядка соседей (drop на drop-line между siblings). */
-  onReorder?: (parentId: string | null, orderedIds: string[]) => Promise<void> | void;
+  onReorder?: (parentId: number | null, orderedIds: number[]) => Promise<void> | void;
 };
 
-type DragPayload = { type: "note"; id: string };
+type DragPayload = { type: "note"; id: number };
 
 const DRAG_MIME = "application/x-pcf-note";
 
@@ -40,14 +40,14 @@ export function NotesTreeInline({
   onMove,
   onReorder,
 }: Props) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [dragNoteId, setDragNoteId] = useState<string | null>(null);
-  const [dragOverNoteId, setDragOverNoteId] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [dragNoteId, setDragNoteId] = useState<number | null>(null);
+  const [dragOverNoteId, setDragOverNoteId] = useState<number | null>(null);
   const [dropLineKey, setDropLineKey] = useState<string | null>(null);
   const noteById = useMemo(() => new Map(notes.map((n) => [n.id, n])), [notes]);
 
   const notesByParent = useMemo(() => {
-    const map = new Map<string | null, ProjectNote[]>();
+    const map = new Map<number | null, ProjectNote[]>();
     notes.forEach((note) => {
       const parentKey = note.parent_id ?? null;
       const list = map.get(parentKey) ?? [];
@@ -60,7 +60,7 @@ export function NotesTreeInline({
     return map;
   }, [notes]);
 
-  const toggleExpanded = (noteId: string) => {
+  const toggleExpanded = (noteId: number) => {
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(noteId)) next.delete(noteId);
@@ -69,9 +69,9 @@ export function NotesTreeInline({
     });
   };
 
-  const ancestorsOf = (noteId: string): Set<string> => {
-    const result = new Set<string>([noteId]);
-    let cursor: string | null = noteId;
+  const ancestorsOf = (noteId: number): Set<number> => {
+    const result = new Set<number>([noteId]);
+    let cursor: number | null = noteId;
     while (cursor) {
       result.add(cursor);
       const node = noteById.get(cursor);
@@ -90,7 +90,7 @@ export function NotesTreeInline({
     return img;
   };
 
-  const writePayload = (event: DragEvent, noteId: string) => {
+  const writePayload = (event: DragEvent, noteId: number) => {
     event.dataTransfer.effectAllowed = "move";
     try {
       event.dataTransfer.setData(DRAG_MIME, JSON.stringify({ type: "note", id: noteId }));
@@ -110,7 +110,7 @@ export function NotesTreeInline({
     if (!raw) {
       return dragNoteId ? { type: "note", id: dragNoteId } : null;
     }
-    if (raw.startsWith("note:")) return { type: "note", id: raw.slice(5) };
+    if (raw.startsWith("note:")) return { type: "note", id: Number(raw.slice(5)) };
     try {
       const parsed = JSON.parse(raw);
       if (parsed && parsed.type === "note" && parsed.id) return parsed as DragPayload;
@@ -120,13 +120,13 @@ export function NotesTreeInline({
     return null;
   };
 
-  const canDrop = (sourceId: string, targetParentId: string | null): boolean => {
+  const canDrop = (sourceId: number, targetParentId: number | null): boolean => {
     if (!targetParentId) return true;
     if (sourceId === targetParentId) return false;
     return !ancestorsOf(targetParentId).has(sourceId);
   };
 
-  const handleDropOnNode = async (event: DragEvent, targetNoteId: string) => {
+  const handleDropOnNode = async (event: DragEvent, targetNoteId: number) => {
     event.preventDefault();
     event.stopPropagation();
     const payload = readPayload(event);
@@ -140,8 +140,8 @@ export function NotesTreeInline({
 
   const handleDropOnLine = async (
     event: DragEvent,
-    parentId: string | null,
-    insertBefore: string | null,
+    parentId: number | null,
+    insertBefore: number | null,
   ) => {
     event.preventDefault();
     event.stopPropagation();
@@ -160,7 +160,7 @@ export function NotesTreeInline({
     }
     const siblings = (notesByParent.get(parentId) ?? []).filter((n) => n.id !== payload.id);
     const insertIdx = insertBefore ? siblings.findIndex((n) => n.id === insertBefore) : siblings.length;
-    const orderedIds: string[] = [];
+    const orderedIds: number[] = [];
     siblings.forEach((sib, idx) => {
       if (idx === insertIdx) orderedIds.push(payload.id);
       orderedIds.push(sib.id);
@@ -169,7 +169,7 @@ export function NotesTreeInline({
     if (onReorder) await onReorder(parentId, orderedIds);
   };
 
-  const renderDropLine = (parentId: string | null, insertBefore: string | null, depth: number) => {
+  const renderDropLine = (parentId: number | null, insertBefore: number | null, depth: number) => {
     const key = `${parentId ?? "root"}->${insertBefore ?? "end"}`;
     return (
       <Box
@@ -194,7 +194,7 @@ export function NotesTreeInline({
     );
   };
 
-  const renderTree = (parentId: string | null, depth: number): JSX.Element[] => {
+  const renderTree = (parentId: number | null, depth: number): JSX.Element[] => {
     const children = notesByParent.get(parentId) ?? [];
     const out: JSX.Element[] = [];
     out.push(renderDropLine(parentId, children[0]?.id ?? null, depth));

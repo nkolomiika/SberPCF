@@ -1,0 +1,23 @@
+{
+  "pkg": "sberpcf-design-kit",
+  "globalName": "SberDesignKit",
+  "projectId": "1958e23c-ce8d-4127-9069-79aedf941cd7",
+  "shape": "package",
+  "buildCmd": "cd frontend && npx tsc -p design-kit/tsconfig.json",
+  "provider": { "component": "SberThemeProvider" },
+  "componentSrcMap": {
+    "SberThemeProvider": null
+  },
+  "overrides": {
+    "Dialog": { "cardMode": "single", "viewport": "560x380" },
+    "DialogTitle": { "cardMode": "single", "viewport": "560x380" },
+    "DialogContent": { "cardMode": "single", "viewport": "560x380" },
+    "DialogActions": { "cardMode": "single", "viewport": "560x380" },
+    "Menu": { "cardMode": "single", "viewport": "420x340" },
+    "Popover": { "cardMode": "single", "viewport": "420x340" },
+    "Tooltip": { "cardMode": "single", "viewport": "420x240" },
+    "Table": { "cardMode": "column" },
+    "AppBar": { "cardMode": "column" },
+    "Toolbar": { "cardMode": "column" }
+  }
+}

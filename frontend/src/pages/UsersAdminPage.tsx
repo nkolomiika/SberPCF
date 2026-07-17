@@ -66,7 +66,7 @@ export function UsersAdminPage() {
   const [editIsActive, setEditIsActive] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [userBulkDeleteMode, setUserBulkDeleteMode] = useState(false);
-  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(() => new Set());
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<number>>(() => new Set());
   const [bulkDeletingUsers, setBulkDeletingUsers] = useState(false);
 
   useErrorToast(error);
@@ -214,7 +214,7 @@ export function UsersAdminPage() {
     }
   };
 
-  const toggleUserSelection = (id: string) => {
+  const toggleUserSelection = (id: number) => {
     setSelectedUserIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -393,9 +393,6 @@ export function UsersAdminPage() {
                     variant={user.is_active ? "filled" : "outlined"}
                     sx={{ height: 20 }}
                   />
-                  {user.must_change_password && (
-                    <Chip size="small" color="warning" label="Смена пароля" sx={{ height: 20 }} />
-                  )}
                 </Stack>
                 {userBulkDeleteMode ? null : (
                   <IconButton

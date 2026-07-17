@@ -1,29 +1,31 @@
 export type UserRole = "admin" | "pentester";
 
 export interface User {
-  id: string;
+  id: number;
   username: string;
   email: string;
   full_name: string | null;
   avatar_url: string | null;
   role: UserRole;
+  /**
+   * Global project role. "lead" unlocks team management inside the projects the
+   * user is a member of; it is configured workspace-wide on the members page.
+   */
+  project_role: "lead" | "pentester";
   is_active: boolean;
-  must_change_password: boolean;
   password_changed_at: string | null;
   created_at: string;
 }
 
 export interface AuthLoginResponse {
-  id: string;
+  id: number;
   username: string;
   role: UserRole;
-  must_change_password: boolean;
 }
 
 export interface PasswordResetResult {
   ok: boolean;
   email_sent_to: string;
-  must_change_password: boolean;
   mail_preview_url: string | null;
 }
 
@@ -37,13 +39,15 @@ export interface PaginatedResponse<T> {
 
 export type ProjectStatus =
   | "active"
+  /** Работы приостановлены — проект не активен, но и не завершён. */
+  | "freeze"
   | "handover_to_development"
   | "vulnerability_recheck"
   | "completed"
   | "archived";
 
 export interface Project {
-  id: string;
+  id: number;
   name: string;
   folder: string;
   description: string | null;
@@ -51,47 +55,76 @@ export interface Project {
   end_date: string | null;
   timeline_frozen_at: string | null;
   status: ProjectStatus;
-  created_by: string;
+  created_by: number;
   created_at: string;
   updated_at: string;
 }
 
+export interface ProjectStats {
+  project_id: number;
+  status: ProjectStatus;
+  hosts_count: number;
+  total_findings: number;
+  open_findings: number;
+}
+
 export interface ProjectFolder {
-  id: string;
+  id: number;
   name: string;
   path: string;
-  parent_id: string | null;
-  created_by: string;
+  parent_id: number | null;
+  created_by: number;
   created_at: string;
   updated_at: string;
 }
 
 export interface ProjectMember {
-  user_id: string;
+  user_id: number;
   username: string;
   email: string;
   role: UserRole;
+  /** Глобальная проектная роль пользователя — настраивается на странице /members. */
+  project_role: "lead" | "pentester";
   added_at: string;
 }
 
+/** Событие ленты активности проекта (`GET /projects/{id}/activity`). */
+export interface ProjectActivityItem {
+  id: number;
+  action: string;
+  entity_type: string | null;
+  entity_id: number | null;
+  user_id: number | null;
+  username: string | null;
+  /** Для уязвимостей — название и severity; у остальных сущностей null. */
+  title: string | null;
+  severity: Vulnerability["severity"] | null;
+  /** Ссылка на карточку сущности, например /projects/1/vulns/7. */
+  url: string | null;
+  details: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
 export interface ProjectNote {
-  id: string;
-  project_id: string;
-  parent_id: string | null;
+  id: number;
+  project_id: number;
+  parent_id: number | null;
   title: string;
   content: string | null;
   sort_order: number;
-  created_by: string;
-  updated_by: string | null;
+  created_by: number;
+  /** Имя автора — бэкенд резолвит его сам, т.к. /users доступен только админу. */
+  created_by_username: string | null;
+  updated_by: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface ProjectNoteComment {
-  id: string;
-  project_id: string;
-  note_id: string;
-  user_id: string;
+  id: number;
+  project_id: number;
+  note_id: number;
+  user_id: number;
   username: string;
   avatar_url: string | null;
   content: string;
@@ -100,8 +133,8 @@ export interface ProjectNoteComment {
 }
 
 export interface HostIpAddress {
-  id: string;
-  host_id: string;
+  id: number;
+  host_id: number;
   ip_address: string;
   label: string | null;
   is_primary: boolean;
@@ -131,8 +164,8 @@ export const OS_TYPE_OPTIONS: { value: OsType; label: string }[] = [
 ];
 
 export interface Host {
-  id: string;
-  project_id: string;
+  id: number;
+  project_id: number;
   ip_address: string | null;
   ip_addresses: HostIpAddress[];
   hostname: string | null;
@@ -155,19 +188,21 @@ export interface HostTreeStats {
 }
 
 export interface Port {
-  id: string;
-  host_id: string;
-  ip_address_id: string;
+  id: number;
+  host_id: number;
+  ip_address_id: number;
   port_number: number;
   protocol: "tcp" | "udp";
   state: "open" | "closed" | "filtered";
+  /** Сервисы порта — бэкенд отдаёт их вместе с портом (PortOut.services). */
+  services: Service[];
   created_at: string;
   updated_at: string;
 }
 
 export interface Service {
-  id: string;
-  port_id: string;
+  id: number;
+  port_id: number;
   name: string;
   version: string | null;
   banner: string | null;
@@ -181,10 +216,10 @@ export interface EndpointRequestHeader {
 }
 
 export interface Endpoint {
-  id: string;
-  host_id: string;
+  id: number;
+  host_id: number;
   path: string;
-  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | null;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | "QUERY" | null;
   description: string | null;
   query_params: EndpointQueryParam[];
   request_body: string | null;
@@ -202,8 +237,8 @@ export interface EndpointQueryParam {
 }
 
 export interface Vulnerability {
-  id: string;
-  project_id: string;
+  id: number;
+  project_id: number;
   title: string;
   description: string | null;
   severity: "critical" | "high" | "medium" | "low" | "info";
@@ -216,7 +251,9 @@ export interface Vulnerability {
   steps_to_reproduce: string | null;
   impact: string | null;
   recommendations: string | null;
-  created_by: string;
+  created_by: number;
+  /** Имя автора — бэкенд резолвит его сам, т.к. /users доступен только админу. */
+  created_by_username: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -224,36 +261,36 @@ export interface Vulnerability {
 export interface VulnerabilityWorkflowStep {
   id: string;
   description: string | null;
-  image_file_ids: string[];
-  endpoint_id: string | null;
+  image_file_ids: number[];
+  endpoint_id: number | null;
   endpoint_request_raw: string | null;
 }
 
 export interface VulnerabilityAsset {
-  id: string;
-  vulnerability_id: string;
+  id: number;
+  vulnerability_id: number;
   asset_type: "host" | "port" | "service" | "endpoint";
-  asset_id: string;
+  asset_id: number;
 }
 
 export interface VulnerabilityFile {
-  id: string;
+  id: number;
   original_name: string;
   content_type: string;
   size_bytes: number;
-  uploaded_by: string;
+  uploaded_by: number;
   uploaded_at: string;
 }
 
 export interface Mention {
-  user_id: string;
+  user_id: number;
   username: string;
 }
 
 export interface VulnerabilityComment {
-  id: string;
-  vulnerability_id: string;
-  user_id: string;
+  id: number;
+  vulnerability_id: number;
+  user_id: number;
   username: string;
   avatar_url: string | null;
   content: string;
@@ -277,53 +314,68 @@ export interface ImportResult {
 }
 
 export interface OpenApiImportResult {
-  host_id: string;
+  host_id: number;
   spec_host: string | null;
   endpoints_created: number;
   endpoints_skipped: number;
   errors: string[];
 }
 
+/** Поводы для уведомления — ровно те четыре, что создаёт бэкенд (NotificationType). */
+export type NotificationKind =
+  /** Упоминание @username в комментарии к находке или заметке. */
+  | "mention"
+  /** Пользователя добавили в проект. */
+  | "project_member_added"
+  /** Изменился статус находки, которую он завёл. */
+  | "vuln_status_changed"
+  /** Изменился статус проекта, в котором он состоит. */
+  | "project_status_changed";
+
 export interface Notification {
-  id: string;
-  type: string;
-  comment_id: string | null;
-  note_comment_id: string | null;
+  id: number;
+  type: NotificationKind;
+  comment_id: number | null;
+  note_comment_id: number | null;
   is_read: boolean;
   created_at: string;
   context: {
-    vulnerability_id: string | null;
+    vulnerability_id: number | null;
     vulnerability_title: string | null;
-    note_id: string | null;
+    note_id: number | null;
     note_title: string | null;
-    project_id: string | null;
-    host_id: string | null;
+    project_id: number | null;
+    project_name: string | null;
+    host_id: number | null;
+    /** Кто это сделал: автор комментария либо тот, кто сменил статус. */
     commenter_username: string | null;
+    /** Выставленный статус — у уведомлений о смене статуса. */
+    status: string | null;
   } | null;
 }
 
 export interface AgentApiToken {
-  id: string;
+  id: number;
   name: string;
   token_prefix: string;
   scopes: string[];
   all_projects: boolean;
-  created_by: string;
+  created_by: number;
   expires_at: string | null;
   revoked_at: string | null;
   last_used_at: string | null;
   created_at: string;
   updated_at: string;
-  project_ids: string[];
+  project_ids: number[];
 }
 
 export interface AuditLog {
-  id: string;
-  user_id: string | null;
+  id: number;
+  user_id: number | null;
   username: string | null;
   action: string;
   entity_type: string | null;
-  entity_id: string | null;
+  entity_id: number | null;
   details: Record<string, unknown> | null;
   ip_address: string | null;
   created_at: string;

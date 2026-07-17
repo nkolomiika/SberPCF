@@ -6,8 +6,22 @@ class UserRole(str, enum.Enum):
     PENTESTER = "pentester"
 
 
+class ProjectRole(str, enum.Enum):
+    """Проектная роль пользователя — глобальная, задаётся в /members.
+
+    Не путать с UserRole (аккаунтная роль admin/pentester). Лид остаётся обычным
+    пользователем: роль лида лишь открывает дополнительные возможности в тех
+    проектах, где он состоит участником (например, управление составом команды).
+    """
+
+    LEAD = "lead"
+    PENTESTER = "pentester"
+
+
 class ProjectStatus(str, enum.Enum):
     ACTIVE = "active"
+    # Работы приостановлены: проект не активен, но и не завершён.
+    FREEZE = "freeze"
     HANDOVER_TO_DEVELOPMENT = "handover_to_development"
     VULNERABILITY_RECHECK = "vulnerability_recheck"
     COMPLETED = "completed"
@@ -50,6 +64,8 @@ class HttpMethod(str, enum.Enum):
     DELETE = "DELETE"
     HEAD = "HEAD"
     OPTIONS = "OPTIONS"
+    # QUERY — метод из RFC-драфта httpbis (безопасный поиск с телом запроса).
+    QUERY = "QUERY"
 
 
 class Severity(str, enum.Enum):
@@ -81,4 +97,18 @@ class AssetType(str, enum.Enum):
 
 
 class NotificationType(str, enum.Enum):
+    """Поводы для in-app уведомления — других не создаём.
+
+    Список намеренно узкий: уведомляем только о том, что касается пользователя
+    лично, иначе лента превращается в шум (для «кто что сделал» есть активность
+    проекта).
+    """
+
+    #: Пользователя упомянули через @username (в комментарии к находке или заметке).
     MENTION = "mention"
+    #: Пользователя добавили в проект.
+    PROJECT_MEMBER_ADDED = "project_member_added"
+    #: Изменился статус находки, которую завёл пользователь.
+    VULN_STATUS_CHANGED = "vuln_status_changed"
+    #: Изменился статус проекта, в котором состоит пользователь.
+    PROJECT_STATUS_CHANGED = "project_status_changed"

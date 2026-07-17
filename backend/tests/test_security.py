@@ -1,4 +1,6 @@
-from uuid import uuid4
+from itertools import count as _id_count
+
+_ids = _id_count(1)
 
 import pytest
 
@@ -12,7 +14,7 @@ from app.security import (
 
 
 def test_access_token_roundtrip_tc_auth_001() -> None:
-    user_id = uuid4()
+    user_id = next(_ids)
 
     token = create_access_token(user_id)
     decoded_id = decode_token(token, expected_type="access")
@@ -21,7 +23,7 @@ def test_access_token_roundtrip_tc_auth_001() -> None:
 
 
 def test_refresh_token_roundtrip_tc_auth_006() -> None:
-    user_id = uuid4()
+    user_id = next(_ids)
 
     token = create_refresh_token(user_id)
     decoded_id = decode_token(token, expected_type="refresh")
@@ -30,7 +32,7 @@ def test_refresh_token_roundtrip_tc_auth_006() -> None:
 
 
 def test_decode_token_rejects_wrong_type_tc_auth_010() -> None:
-    token = create_refresh_token(uuid4())
+    token = create_refresh_token(next(_ids))
 
     with pytest.raises(UnauthorizedError, match="Некорректный тип токена"):
         decode_token(token, expected_type="access")

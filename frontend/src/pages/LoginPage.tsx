@@ -17,8 +17,8 @@ export function LoginPage() {
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      const currentUser = await signIn(username, password);
-      navigate(currentUser.must_change_password ? "/force-change-password" : "/");
+      await signIn(username, password);
+      navigate("/");
     } catch {
       // Ошибка уже положена в store и показана на форме.
     }

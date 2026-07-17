@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import and_, select
@@ -34,7 +33,7 @@ async def list_agent_projects(
 
 @router.get("/projects/{project_id}", response_model=ProjectOut)
 async def get_agent_project(
-    project_id: UUID,
+    project_id: int,
     _scope: AgentTokenContext = Depends(require_agent_scope("projects:read")),
     project: Project = Depends(require_agent_project_access),
 ) -> ProjectOut:
@@ -43,7 +42,7 @@ async def get_agent_project(
 
 @router.get("/projects/{project_id}/hosts", response_model=dict)
 async def list_agent_hosts(
-    project_id: UUID,
+    project_id: int,
     page: int = Query(1, ge=1),
     size: int = Query(100, ge=1, le=200),
     _scope: AgentTokenContext = Depends(require_agent_scope("assets:read")),
@@ -56,8 +55,8 @@ async def list_agent_hosts(
 
 @router.get("/projects/{project_id}/hosts/{host_id}", response_model=dict)
 async def get_agent_host(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     _scope: AgentTokenContext = Depends(require_agent_scope("assets:read")),
     _project: Project = Depends(require_agent_project_access),
     db: AsyncSession = Depends(get_db),
@@ -67,7 +66,7 @@ async def get_agent_host(
 
 @router.get("/projects/{project_id}/notes", response_model=list[ProjectNoteOut])
 async def list_agent_notes(
-    project_id: UUID,
+    project_id: int,
     _scope: AgentTokenContext = Depends(require_agent_scope("notes:read")),
     _project: Project = Depends(require_agent_project_access),
     db: AsyncSession = Depends(get_db),
@@ -78,8 +77,8 @@ async def list_agent_notes(
 
 @router.get("/projects/{project_id}/notes/{note_id}", response_model=ProjectNoteOut)
 async def get_agent_note(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     _scope: AgentTokenContext = Depends(require_agent_scope("notes:read")),
     _project: Project = Depends(require_agent_project_access),
     db: AsyncSession = Depends(get_db),
@@ -90,7 +89,7 @@ async def get_agent_note(
 
 @router.post("/projects/{project_id}/notes", response_model=ProjectNoteOut, status_code=status.HTTP_201_CREATED)
 async def create_agent_note(
-    project_id: UUID,
+    project_id: int,
     payload: ProjectNoteCreate,
     context: AgentTokenContext = Depends(require_agent_scope("notes:write")),
     _project: Project = Depends(require_agent_project_access),
@@ -102,8 +101,8 @@ async def create_agent_note(
 
 @router.put("/projects/{project_id}/notes/{note_id}", response_model=ProjectNoteOut)
 async def update_agent_note(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     payload: ProjectNoteUpdate,
     context: AgentTokenContext = Depends(require_agent_scope("notes:write")),
     _project: Project = Depends(require_agent_project_access),
@@ -113,10 +112,10 @@ async def update_agent_note(
     return ProjectNoteOut.model_validate(note)
 
 
-@router.get("/projects/{project_id}/{host_id}/vulnerabilities", response_model=dict)
+@router.get("/projects/{project_id}/hosts/{host_id}/vulnerabilities", response_model=dict)
 async def list_agent_host_vulnerabilities(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     page: int = Query(1, ge=1),
     size: int = Query(100, ge=1, le=200),
     _scope: AgentTokenContext = Depends(require_agent_scope("vulns:read")),
@@ -127,11 +126,11 @@ async def list_agent_host_vulnerabilities(
     return to_paginated_response([VulnerabilityOut.model_validate(item) for item in items], total, PageParams(page=page, size=size)).model_dump()
 
 
-@router.get("/projects/{project_id}/{host_id}/vulnerabilities/{vulnerability_id}", response_model=VulnerabilityOut)
+@router.get("/projects/{project_id}/hosts/{host_id}/vulnerabilities/{vulnerability_id}", response_model=VulnerabilityOut)
 async def get_agent_host_vulnerability(
-    project_id: UUID,
-    host_id: UUID,
-    vulnerability_id: UUID,
+    project_id: int,
+    host_id: int,
+    vulnerability_id: int,
     _scope: AgentTokenContext = Depends(require_agent_scope("vulns:read")),
     _project: Project = Depends(require_agent_project_access),
     db: AsyncSession = Depends(get_db),
@@ -150,7 +149,7 @@ async def get_agent_host_vulnerability(
 
 @router.post("/projects/{project_id}/vulnerabilities", response_model=VulnerabilityOut, status_code=status.HTTP_201_CREATED)
 async def create_agent_vulnerability(
-    project_id: UUID,
+    project_id: int,
     payload: VulnerabilityCreate,
     context: AgentTokenContext = Depends(require_agent_scope("vulns:write")),
     _project: Project = Depends(require_agent_project_access),
@@ -162,8 +161,8 @@ async def create_agent_vulnerability(
 
 @router.put("/projects/{project_id}/vulnerabilities/{vuln_id}", response_model=VulnerabilityOut)
 async def update_agent_vulnerability(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     payload: VulnerabilityUpdate,
     context: AgentTokenContext = Depends(require_agent_scope("vulns:write")),
     _project: Project = Depends(require_agent_project_access),

@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, File as UploadApiFile, UploadFile
 from fastapi.responses import JSONResponse
@@ -16,7 +15,7 @@ router = APIRouter(tags=["import"])
 
 @router.post("/projects/{project_id}/import", response_model=ImportResult)
 async def import_project_data(
-    project_id: UUID,
+    project_id: int,
     file: UploadFile = UploadApiFile(...),
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -30,8 +29,8 @@ async def import_project_data(
 
 @router.post("/projects/{project_id}/hosts/{host_id}/import-openapi", response_model=OpenApiImportResult)
 async def import_openapi_file(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     file: UploadFile = UploadApiFile(...),
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -47,8 +46,8 @@ async def import_openapi_file(
 
 @router.get("/projects/{project_id}/hosts/{host_id}/export-openapi")
 async def export_openapi_file(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),

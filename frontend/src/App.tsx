@@ -31,11 +31,10 @@ import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import HistoryIcon from "@mui/icons-material/History";
 import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
 import type { PaletteMode } from "@mui/material";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { listNotifications, markNotificationRead, unreadCount } from "./api";
 import type { Notification } from "./types";
 import { useAuthStore, useToastStore } from "./store";
-import { ForceChangePasswordPage } from "./pages/ForceChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { HostDetailPage } from "./pages/HostDetailPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
@@ -111,7 +110,6 @@ function GlobalToastHost() {
 
 function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const navigate = useNavigate();
-  const location = useLocation();
   const user = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
   const pushToast = useToastStore((s) => s.pushToast);
@@ -121,7 +119,6 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const [notificationsAnchorEl, setNotificationsAnchorEl] = useState<HTMLElement | null>(null);
   const [profileAnchorEl, setProfileAnchorEl] = useState<HTMLElement | null>(null);
   const [profileMenuWidth, setProfileMenuWidth] = useState(220);
-  const isPasswordChangeLocked = Boolean(user?.must_change_password);
 
   const loadUnreadNotifications = useCallback(async () => {
     try {
@@ -144,7 +141,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   const profileMenuOpen = Boolean(profileAnchorEl);
 
   useEffect(() => {
-    if (!user || isPasswordChangeLocked) {
+    if (!user) {
       setCount(0);
       return;
     }
@@ -155,7 +152,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [isPasswordChangeLocked, loadUnreadNotifications, user]);
+  }, [loadUnreadNotifications, user]);
 
   const notificationsOpenRef = useRef(notificationsOpen);
   useEffect(() => {
@@ -163,7 +160,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
   }, [notificationsOpen]);
 
   useEffect(() => {
-    if (!user || isPasswordChangeLocked) {
+    if (!user) {
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -200,12 +197,9 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
     return () => {
       socket.close();
     };
-  }, [isPasswordChangeLocked, loadNotificationsList, loadUnreadNotifications, pushToast, user]);
+  }, [loadNotificationsList, loadUnreadNotifications, pushToast, user]);
 
   const openNotifications = async (event: React.MouseEvent<HTMLElement>) => {
-    if (isPasswordChangeLocked) {
-      return;
-    }
     setNotificationsAnchorEl(event.currentTarget);
     setNotificationsLoading(true);
     try {
@@ -275,10 +269,6 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
 
   if (!user) {
     return <Navigate to="/login" replace />;
-  }
-
-  if (user.must_change_password && location.pathname !== "/force-change-password") {
-    return <Navigate to="/force-change-password" replace />;
   }
 
   const roleLabel = user.role === "admin" ? "Администратор" : "Пентестер";
@@ -395,7 +385,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
           },
         }}
       >
-        {!isPasswordChangeLocked && (
+        {(
           <MenuItem
             onClick={() => {
               navigate("/profile");
@@ -409,7 +399,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemText>Профиль</ListItemText>
           </MenuItem>
         )}
-        {!isPasswordChangeLocked && (
+        {(
           <MenuItem
             onClick={() => {
               navigate("/");
@@ -423,7 +413,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemText>Домой</ListItemText>
           </MenuItem>
         )}
-        {!isPasswordChangeLocked && user.role === "admin" && (
+        {user.role === "admin" && (
           <MenuItem
             onClick={() => {
               navigate("/users");
@@ -437,7 +427,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemText>Пользователи</ListItemText>
           </MenuItem>
         )}
-        {!isPasswordChangeLocked && user.role === "admin" && (
+        {user.role === "admin" && (
           <MenuItem
             onClick={() => {
               navigate("/audit-logs");
@@ -451,7 +441,7 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
             <ListItemText>Журнал действий</ListItemText>
           </MenuItem>
         )}
-        {!isPasswordChangeLocked && user.role === "admin" && (
+        {user.role === "admin" && (
           <MenuItem
             onClick={() => {
               navigate("/ai-integration");
@@ -545,7 +535,6 @@ function PrivateLayout({ themeMode }: PrivateLayoutProps) {
         }}
       >
         <Routes>
-          <Route path="/force-change-password" element={<ForceChangePasswordPage />} />
           <Route
             path="/"
             element={
@@ -626,7 +615,7 @@ export default function App({ themeMode }: AppProps) {
       <Routes>
         <Route
           path="/login"
-          element={user ? <Navigate to={user.must_change_password ? "/force-change-password" : "/"} replace /> : <LoginPage />}
+          element={user ? <Navigate to="/" replace /> : <LoginPage />}
         />
         <Route path="/*" element={<PrivateLayout themeMode={themeMode} />} />
       </Routes>
