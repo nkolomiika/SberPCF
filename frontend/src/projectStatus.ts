@@ -4,6 +4,7 @@ import type { ProjectStatus } from "./types";
 
 export const PROJECT_STATUS_ORDER: ProjectStatus[] = [
   "active",
+  "freeze",
   "handover_to_development",
   "vulnerability_recheck",
   "completed",
@@ -12,6 +13,7 @@ export const PROJECT_STATUS_ORDER: ProjectStatus[] = [
 
 export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   active: "Активен",
+  freeze: "Заморожен",
   handover_to_development: "Передано команде разработки",
   vulnerability_recheck: "На перепроверке уязвимостей",
   completed: "Завершён",
@@ -23,6 +25,11 @@ export const PROJECT_STATUS_CHIP_SX: Record<ProjectStatus, SxProps<Theme>> = {
     bgcolor: "rgba(76,175,80,0.16)",
     color: "#a5d6a7",
     border: "1px solid rgba(76,175,80,0.38)",
+  },
+  freeze: {
+    bgcolor: "rgba(0,188,212,0.18)",
+    color: "#80deea",
+    border: "1px solid rgba(0,188,212,0.4)",
   },
   handover_to_development: {
     bgcolor: "rgba(156,39,176,0.16)",

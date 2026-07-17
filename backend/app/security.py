@@ -1,6 +1,5 @@
 import hashlib
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -32,7 +31,7 @@ def hash_agent_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _encode_token(subject: UUID, token_type: str, expires_delta: timedelta) -> str:
+def _encode_token(subject: int, token_type: str, expires_delta: timedelta) -> str:
     expire_at = datetime.now(UTC) + expires_delta
     payload = {
         "sub": str(subject),
@@ -43,17 +42,17 @@ def _encode_token(subject: UUID, token_type: str, expires_delta: timedelta) -> s
     return jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
 
 
-def create_access_token(user_id: UUID) -> str:
+def create_access_token(user_id: int) -> str:
     """Генерирует короткоживущий access-токен."""
     return _encode_token(user_id, "access", timedelta(minutes=settings.jwt_access_token_expire_minutes))
 
 
-def create_refresh_token(user_id: UUID) -> str:
+def create_refresh_token(user_id: int) -> str:
     """Генерирует долгоживущий refresh-токен."""
     return _encode_token(user_id, "refresh", timedelta(days=settings.jwt_refresh_token_expire_days))
 
 
-def decode_token(token: str, expected_type: str) -> UUID:
+def decode_token(token: str, expected_type: str) -> int:
     """Декодирует JWT и проверяет тип токена."""
     try:
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
@@ -62,6 +61,6 @@ def decode_token(token: str, expected_type: str) -> UUID:
         sub = payload.get("sub")
         if not sub:
             raise UnauthorizedError("В токене отсутствует sub")
-        return UUID(sub)
+        return int(sub)
     except (JWTError, ValueError) as exc:
         raise UnauthorizedError("Токен недействителен или истёк") from exc

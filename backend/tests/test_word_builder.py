@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from datetime import date
 from io import BytesIO
-from uuid import uuid4
+from itertools import count as _id_count
+
+_ids = _id_count(1)
 
 import pytest
 from docx import Document
@@ -15,20 +17,20 @@ from app.reports import build_pp, build_szi
 
 def _make_project(name: str = "DemoApp") -> Project:
     project = Project()
-    project.id = uuid4()
+    project.id = next(_ids)
     project.name = name
     project.folder = ""
     project.description = "Описание"
     project.start_date = date(2026, 1, 10)
     project.end_date = date(2026, 1, 20)
     project.status = ProjectStatus.ACTIVE
-    project.created_by = uuid4()
+    project.created_by = next(_ids)
     return project
 
 
 def _make_host(project: Project, *, hostname: str | None = None, ip: str | None = None) -> Host:
     host = Host()
-    host.id = uuid4()
+    host.id = next(_ids)
     host.project_id = project.id
     host.hostname = hostname
     host.ip_address = ip
@@ -48,7 +50,7 @@ def _make_vuln(
     cwe_id: str | None = None,
 ) -> Vulnerability:
     vuln = Vulnerability()
-    vuln.id = uuid4()
+    vuln.id = next(_ids)
     vuln.project_id = project.id
     vuln.title = title
     vuln.severity = severity
@@ -62,13 +64,13 @@ def _make_vuln(
     vuln.cwe_id = cwe_id
     vuln.workflow_steps = None
     vuln.steps_to_reproduce = None
-    vuln.created_by = uuid4()
+    vuln.created_by = next(_ids)
     return vuln
 
 
 def _make_link(vuln: Vulnerability, host: Host) -> VulnerabilityAsset:
     link = VulnerabilityAsset()
-    link.id = uuid4()
+    link.id = next(_ids)
     link.vulnerability_id = vuln.id
     link.asset_type = AssetType.HOST
     link.asset_id = host.id

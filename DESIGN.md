@@ -24,6 +24,7 @@ Commit to this aesthetic: **industrial-terminal meets modern SaaS** — think Ve
 - No rounded corners on tables, sharp 2px borders on interactive elements
 - Severity colors strictly follow industry standard: Critical=red, High=orange, Medium=yellow, Low=blue, Info=gray
 
+
 ---
 
 ## TECH STACK

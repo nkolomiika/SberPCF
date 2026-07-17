@@ -1,5 +1,4 @@
 from datetime import date, datetime
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationInfo, field_validator, model_validator
 
@@ -10,6 +9,7 @@ from app.enums import (
     HttpMethod,
     OsType,
     PortState,
+    ProjectRole,
     ProjectStatus,
     Protocol,
     Severity,
@@ -47,15 +47,13 @@ class LoginRequest(InputBaseModel):
 
 
 class LoginResponse(BaseModel):
-    id: UUID
+    id: int
     username: str
     role: UserRole
-    must_change_password: bool
 
 
 class RefreshResponse(BaseModel):
     ok: bool = True
-    must_change_password: bool = False
 
 
 class AgentTokenCreate(InputBaseModel):
@@ -63,24 +61,24 @@ class AgentTokenCreate(InputBaseModel):
     # часто описывают токен длинным расшифровывающим именем (для какого скрипта/CI/команды).
     name: str = Field(min_length=1)
     scopes: list[str] = Field(default_factory=list)
-    project_ids: list[UUID] = Field(default_factory=list)
+    project_ids: list[int] = Field(default_factory=list)
     all_projects: bool = False
     expires_at: datetime | None = None
 
 
 class AgentTokenOut(ORMBase):
-    id: UUID
+    id: int
     name: str
     token_prefix: str
     scopes: list[str] = Field(default_factory=list)
     all_projects: bool
-    created_by: UUID
+    created_by: int
     expires_at: datetime | None = None
     revoked_at: datetime | None = None
     last_used_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
-    project_ids: list[UUID] = Field(default_factory=list)
+    project_ids: list[int] = Field(default_factory=list)
 
 
 class AgentTokenCreateResponse(AgentTokenOut):
@@ -93,6 +91,7 @@ class UserCreate(InputBaseModel):
     full_name: str | None = Field(default=None, max_length=255)
     password: str | None = Field(default=None, min_length=8, max_length=128)
     role: UserRole = UserRole.PENTESTER
+    project_role: ProjectRole = ProjectRole.PENTESTER
     send_invite_email: bool = False
 
 
@@ -101,6 +100,7 @@ class UserUpdate(InputBaseModel):
     email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=255)
     role: UserRole | None = None
+    project_role: ProjectRole | None = None
     is_active: bool | None = None
 
 
@@ -115,26 +115,23 @@ class OwnPasswordChangeRequest(InputBaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
-class ForceChangePasswordRequest(InputBaseModel):
-    new_password: str = Field(min_length=8, max_length=128)
-
-
 class PasswordResetOut(BaseModel):
     ok: bool = True
     email_sent_to: EmailStr
-    must_change_password: bool = True
     mail_preview_url: str | None = None
 
 
 class UserOut(ORMBase):
-    id: UUID
+    id: int
     username: str
     email: EmailStr
     full_name: str | None = None
     avatar_url: str | None = None
     role: UserRole
     is_active: bool
-    must_change_password: bool = False
+    # Проектная роль (глобальная, настраивается в /members): lead открывает
+    # доп. возможности в проектах, где пользователь участник.
+    project_role: ProjectRole = ProjectRole.PENTESTER
     password_changed_at: datetime | None = None
     created_at: datetime
 
@@ -169,7 +166,7 @@ class ProjectUpdate(InputBaseModel):
 
 
 class ProjectOut(ORMBase):
-    id: UUID
+    id: int
     name: str
     folder: str
     description: str | None
@@ -177,39 +174,41 @@ class ProjectOut(ORMBase):
     end_date: date | None
     timeline_frozen_at: datetime | None
     status: ProjectStatus
-    created_by: UUID
+    created_by: int
     created_at: datetime
     updated_at: datetime
 
 
 class ProjectFolderCreate(InputBaseModel):
     name: str = Field(min_length=1, max_length=255)
-    parent_id: UUID | None = None
+    parent_id: int | None = None
 
 
 class ProjectFolderMove(InputBaseModel):
-    parent_id: UUID | None = None
+    parent_id: int | None = None
 
 
 class ProjectFolderOut(ORMBase):
-    id: UUID
+    id: int
     name: str
     path: str
-    parent_id: UUID | None
-    created_by: UUID
+    parent_id: int | None
+    created_by: int
     created_at: datetime
     updated_at: datetime
 
 
 class ProjectMemberCreate(InputBaseModel):
-    user_id: UUID
+    user_id: int
 
 
 class ProjectMemberOut(BaseModel):
-    user_id: UUID
+    user_id: int
     username: str
     email: EmailStr
+    # Обе роли — глобальные пользовательские: аккаунтная и проектная.
     role: UserRole
+    project_role: ProjectRole = ProjectRole.PENTESTER
     added_at: datetime
 
 
@@ -223,13 +222,13 @@ class JiraConfigUpsert(InputBaseModel):
 
 
 class JiraConfigOut(ORMBase):
-    id: UUID
+    id: int
     name: str
     base_url: str
     email: EmailStr
     default_issue_type: str
     is_enabled: bool
-    created_by: UUID
+    created_by: int
     created_at: datetime
     updated_at: datetime
 
@@ -239,17 +238,17 @@ class ProjectJiraLinkUpsert(InputBaseModel):
 
 
 class ProjectJiraLinkOut(ORMBase):
-    id: UUID
-    project_id: UUID
+    id: int
+    project_id: int
     jira_project_key: str
-    created_by: UUID
+    created_by: int
     created_at: datetime
     updated_at: datetime
 
 
 class JiraIssueLinkOut(ORMBase):
-    id: UUID
-    vulnerability_id: UUID
+    id: int
+    vulnerability_id: int
     jira_issue_key: str
     jira_issue_url: str
     status: str
@@ -260,7 +259,7 @@ class JiraIssueLinkOut(ORMBase):
 
 class ProjectNoteCreate(InputBaseModel):
     title: str = Field(min_length=1, max_length=255)
-    parent_id: UUID | None = None
+    parent_id: int | None = None
     content: str | None = None
 
 
@@ -270,28 +269,30 @@ class ProjectNoteUpdate(InputBaseModel):
 
 
 class ProjectNoteMove(InputBaseModel):
-    parent_id: UUID | None = None
+    parent_id: int | None = None
 
 
 class ProjectNoteReorderItem(InputBaseModel):
-    id: UUID
+    id: int
     sort_order: int = Field(ge=0, le=100000)
 
 
 class ProjectNoteReorder(InputBaseModel):
-    parent_id: UUID | None = None
+    parent_id: int | None = None
     items: list[ProjectNoteReorderItem] = Field(default_factory=list, min_length=1)
 
 
 class ProjectNoteOut(ORMBase):
-    id: UUID
-    project_id: UUID
-    parent_id: UUID | None
+    id: int
+    project_id: int
+    parent_id: int | None
     title: str
     content: str | None
     sort_order: int
-    created_by: UUID
-    updated_by: UUID | None
+    created_by: int
+    # Имя автора: /users только для админа, поэтому резолвим на бэке.
+    created_by_username: str | None = None
+    updated_by: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -309,8 +310,8 @@ class HostIpAddressUpdate(InputBaseModel):
 
 
 class HostIpAddressOut(ORMBase):
-    id: UUID
-    host_id: UUID
+    id: int
+    host_id: int
     ip_address: str
     label: str | None
     is_primary: bool
@@ -357,8 +358,8 @@ class HostUpdate(InputBaseModel):
 
 
 class HostOut(ORMBase):
-    id: UUID
-    project_id: UUID
+    id: int
+    project_id: int
     ip_address: str | None
     """Primary IP — синоним для is_primary=true записи в ip_addresses."""
     ip_addresses: list[HostIpAddressOut] = Field(default_factory=list)
@@ -371,31 +372,29 @@ class HostOut(ORMBase):
 
 
 class PortCreate(InputBaseModel):
-    ip_address_id: UUID
+    ip_address_id: int
     port_number: int = Field(ge=1, le=65535)
     protocol: Protocol = Protocol.TCP
     state: PortState = PortState.OPEN
 
 
 class PortUpdate(InputBaseModel):
-    ip_address_id: UUID | None = None
+    ip_address_id: int | None = None
     port_number: int | None = Field(default=None, ge=1, le=65535)
     protocol: Protocol | None = None
     state: PortState | None = None
 
 
 class PortOut(ORMBase):
-    id: UUID
-    host_id: UUID
-    ip_address_id: UUID
+    id: int
+    host_id: int
+    ip_address_id: int
     port_number: int
     protocol: Protocol
     state: PortState
+    services: list["ServiceOut"] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
-
-
-HostIpAddressOut.model_rebuild()
 
 
 class ServiceCreate(InputBaseModel):
@@ -411,13 +410,17 @@ class ServiceUpdate(InputBaseModel):
 
 
 class ServiceOut(ORMBase):
-    id: UUID
-    port_id: UUID
+    id: int
+    port_id: int
     name: str
     version: str | None
     banner: str | None
     created_at: datetime
     updated_at: datetime
+
+
+PortOut.model_rebuild()
+HostIpAddressOut.model_rebuild()
 
 
 class EndpointQueryParam(InputBaseModel):
@@ -463,8 +466,8 @@ class EndpointUpdate(InputBaseModel):
 
 
 class EndpointOut(ORMBase):
-    id: UUID
-    host_id: UUID
+    id: int
+    host_id: int
     path: str
     method: HttpMethod | None
     description: str | None
@@ -475,22 +478,22 @@ class EndpointOut(ORMBase):
     created_at: datetime
     updated_at: datetime
 
-    @field_validator("request_headers", mode="before")
+    @field_validator("request_headers", "query_params", mode="before")
     @classmethod
-    def _coerce_request_headers(cls, value: object) -> object:
+    def _coerce_optional_list(cls, value: object) -> object:
         return value if value is not None else []
 
 
 class VulnerabilityWorkflowStep(InputBaseModel):
     id: str = Field(min_length=1, max_length=100)
     description: str | None = None
-    image_file_ids: list[UUID] = Field(default_factory=list)
-    endpoint_id: UUID | None = None
+    image_file_ids: list[int] = Field(default_factory=list)
+    endpoint_id: int | None = None
     endpoint_request_raw: str | None = None
 
 
 class VulnerabilityCreate(InputBaseModel):
-    host_id: UUID
+    host_id: int
     title: str = Field(min_length=1, max_length=500)
     description: str | None = None
     severity: Severity
@@ -539,8 +542,8 @@ class VulnerabilityStatusPatch(InputBaseModel):
 
 
 class VulnerabilityOut(ORMBase):
-    id: UUID
-    project_id: UUID
+    id: int
+    project_id: int
     title: str
     description: str | None
     severity: Severity
@@ -553,29 +556,31 @@ class VulnerabilityOut(ORMBase):
     steps_to_reproduce: str | None
     impact: str | None
     recommendations: str | None
-    created_by: UUID
+    created_by: int
+    # Имя автора: /users только для админа, поэтому резолвим на бэке.
+    created_by_username: str | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class VulnerabilityAssetCreate(InputBaseModel):
     asset_type: AssetType
-    asset_id: UUID
+    asset_id: int
 
 
 class VulnerabilityAssetOut(ORMBase):
-    id: UUID
-    vulnerability_id: UUID
+    id: int
+    vulnerability_id: int
     asset_type: AssetType
-    asset_id: UUID
+    asset_id: int
 
 
 class FileOut(ORMBase):
-    id: UUID
+    id: int
     original_name: str
     content_type: str
     size_bytes: int
-    uploaded_by: UUID
+    uploaded_by: int
     uploaded_at: datetime
 
 
@@ -588,14 +593,14 @@ class CommentUpdate(InputBaseModel):
 
 
 class MentionOut(BaseModel):
-    user_id: UUID
+    user_id: int
     username: str
 
 
 class CommentOut(ORMBase):
-    id: UUID
-    vulnerability_id: UUID
-    user_id: UUID
+    id: int
+    vulnerability_id: int
+    user_id: int
     username: str
     avatar_url: str | None = None
     content: str
@@ -613,10 +618,10 @@ class ProjectNoteCommentUpdate(InputBaseModel):
 
 
 class ProjectNoteCommentOut(ORMBase):
-    id: UUID
-    project_id: UUID
-    note_id: UUID
-    user_id: UUID
+    id: int
+    project_id: int
+    note_id: int
+    user_id: int
     username: str
     avatar_url: str | None = None
     content: str
@@ -625,22 +630,26 @@ class ProjectNoteCommentOut(ORMBase):
 
 
 class NotificationContext(BaseModel):
-    vulnerability_id: UUID | None = None
+    vulnerability_id: int | None = None
     vulnerability_title: str | None = None
     # Поля для упоминаний в комментариях заметок (вместо уязвимостей).
-    note_id: UUID | None = None
+    note_id: int | None = None
     note_title: str | None = None
-    project_id: UUID | None = None
-    host_id: UUID | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    host_id: int | None = None
+    # Кто инициировал событие: автор комментария либо тот, кто сменил статус.
     commenter_username: str | None = None
+    # Выставленный статус — для уведомлений о смене статуса находки/проекта.
+    status: str | None = None
 
 
 class NotificationOut(ORMBase):
-    id: UUID
+    id: int
     type: str
-    comment_id: UUID | None
+    comment_id: int | None
     # ID комментария заметки — для упоминаний в обсуждениях заметок.
-    note_comment_id: UUID | None = None
+    note_comment_id: int | None = None
     is_read: bool
     created_at: datetime
     context: NotificationContext | None = None
@@ -659,7 +668,7 @@ class ImportResult(BaseModel):
 
 
 class OpenApiImportResult(BaseModel):
-    host_id: UUID
+    host_id: int
     spec_host: str | None = None
     endpoints_created: int
     endpoints_skipped: int
@@ -716,12 +725,12 @@ class PcfImportPayload(InputBaseModel):
 
 
 class AuditLogOut(ORMBase):
-    id: UUID
-    user_id: UUID | None
+    id: int
+    user_id: int | None
     username: str | None = None
     action: str
     entity_type: str | None
-    entity_id: UUID | None
+    entity_id: int | None
     details: dict | None
     ip_address: str | None
     created_at: datetime

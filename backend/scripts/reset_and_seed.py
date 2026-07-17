@@ -9,6 +9,7 @@ import base64
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 # Позволяет выполнять файл напрямую без предварительного export PYTHONPATH=/app
 _backend_root = Path(__file__).resolve().parent.parent
@@ -26,6 +27,7 @@ from app.enums import (
     HttpMethod,
     NotificationType,
     PortState,
+    ProjectRole,
     ProjectStatus,
     Protocol,
     Severity,
@@ -91,14 +93,16 @@ async def create_users() -> dict[str, User]:
             raise RuntimeError("Admin user was not created")
         users["admin"] = admin
 
+        # (username, email, аккаунтная роль, проектная роль). Проектная роль
+        # глобальная: лид — обычный юзер, но с доп. возможностями в своих проектах.
         demo_users = [
-            ("alice", "alice@example.com", UserRole.PENTESTER),
-            ("bob", "bob@example.com", UserRole.PENTESTER),
-            ("charlie", "charlie@example.com", UserRole.PENTESTER),
-            ("diana", "diana@example.com", UserRole.PENTESTER),
-            ("eve", "eve@example.com", UserRole.PENTESTER),
+            ("alice", "alice@example.com", UserRole.PENTESTER, ProjectRole.LEAD),
+            ("bob", "bob@example.com", UserRole.PENTESTER, ProjectRole.LEAD),
+            ("charlie", "charlie@example.com", UserRole.PENTESTER, ProjectRole.PENTESTER),
+            ("diana", "diana@example.com", UserRole.PENTESTER, ProjectRole.PENTESTER),
+            ("eve", "eve@example.com", UserRole.PENTESTER, ProjectRole.PENTESTER),
         ]
-        for username, email, role in demo_users:
+        for username, email, role, project_role in demo_users:
             user = await db.scalar(select(User).where(User.username == username))
             if not user:
                 user = await db.scalar(select(User).where(User.email == email))
@@ -108,6 +112,7 @@ async def create_users() -> dict[str, User]:
                     email=email,
                     password_hash=hash_password("admin"),
                     role=role,
+                    project_role=project_role,
                     is_active=True,
                 )
                 db.add(user)
@@ -226,6 +231,17 @@ async def seed_demo_data() -> None:
             db.add(ProjectMember(project_id=project.id, user_id=admin.id))
             for member in members:
                 db.add(ProjectMember(project_id=project.id, user_id=member.id))
+                # Повод №2: их в проект добавил админ — ровно то же уведомление,
+                # что создаёт add_member. Себе админ его не шлёт.
+                db.add(
+                    Notification(
+                        user_id=member.id,
+                        type=NotificationType.PROJECT_MEMBER_ADDED,
+                        project_id=project.id,
+                        actor_id=admin.id,
+                        is_read=False,
+                    )
+                )
             await db.flush()
 
             audit_rows.append(
@@ -351,6 +367,21 @@ async def seed_demo_data() -> None:
                 db.add(host)
                 await db.flush()
 
+                # Сид пишет audit и для инвентаря — иначе созданные хосты/IP/порты
+                # не попадут в ленту активности проекта.
+                audit_rows.append(
+                    {
+                        "user_id": admin.id,
+                        "username": admin.username,
+                        "action": "CREATE",
+                        "entity_type": "host",
+                        "entity_id": host.id,
+                        "details": {"project_id": str(project.id), "hostname": host.hostname, "ip_address": primary_ip},
+                        "ip_address": "127.0.0.1",
+                        "created_at": now - timedelta(days=project_index, hours=host_index),
+                    }
+                )
+
                 # Несколько IP у хоста (внутренний/внешний/management) — проверка таблицы host_ip_addresses.
                 host_ip_rows: dict[str, HostIpAddress] = {}
                 for ip_suffix, label, is_primary in [
@@ -367,6 +398,19 @@ async def seed_demo_data() -> None:
                     db.add(ip_row)
                     host_ip_rows[label] = ip_row
                 await db.flush()
+                for label, ip_row in host_ip_rows.items():
+                    audit_rows.append(
+                        {
+                            "user_id": admin.id,
+                            "username": admin.username,
+                            "action": "CREATE",
+                            "entity_type": "host_ip_address",
+                            "entity_id": ip_row.id,
+                            "details": {"project_id": str(project.id), "ip_address": ip_row.ip_address, "label": label},
+                            "ip_address": "127.0.0.1",
+                            "created_at": now - timedelta(days=project_index, hours=host_index),
+                        }
+                    )
 
                 ports_for_host: list[Port] = []
                 for port_number, protocol, state, service_name, version, ip_label in [
@@ -386,6 +430,22 @@ async def seed_demo_data() -> None:
                     db.add(port)
                     await db.flush()
                     ports_for_host.append(port)
+                    audit_rows.append(
+                        {
+                            "user_id": admin.id,
+                            "username": admin.username,
+                            "action": "CREATE",
+                            "entity_type": "port",
+                            "entity_id": port.id,
+                            "details": {
+                                "project_id": str(project.id),
+                                "port": f"{port_number}/{protocol.value}",
+                                "service": service_name,
+                            },
+                            "ip_address": "127.0.0.1",
+                            "created_at": now - timedelta(days=project_index, hours=host_index),
+                        }
+                    )
                     db.add(
                         Service(
                             port_id=port.id,
@@ -410,6 +470,21 @@ async def seed_demo_data() -> None:
                     db.add(endpoint)
                     await db.flush()
                     endpoints.append(endpoint)
+                    audit_rows.append(
+                        {
+                            "user_id": admin.id,
+                            "username": admin.username,
+                            "action": "CREATE",
+                            "entity_type": "endpoint",
+                            "entity_id": endpoint.id,
+                            "details": {
+                                "project_id": str(project.id),
+                                "endpoint": f"{method.value} {path_suffix}",
+                            },
+                            "ip_address": "127.0.0.1",
+                            "created_at": now - timedelta(days=project_index, hours=host_index),
+                        }
+                    )
 
                 for vuln_index in range(1, 3):
                     vuln = Vulnerability(
@@ -426,7 +501,17 @@ async def seed_demo_data() -> None:
                         ),
                         cwe_id="CWE-79" if vuln_index % 2 else "CWE-89",
                         status=status_cycle[(project_index + vuln_index) % len(status_cycle)],
-                        steps_to_reproduce="1. Выполнить запрос\n2. Получить некорректный ответ\n3. Зафиксировать результат",
+                        # Каждый шаг — отдельная запись: в карточке у него своё поле,
+                        # а номер рисует интерфейс, поэтому в тексте нумерации нет.
+                        workflow_steps=[
+                            {"id": str(uuid4()), "description": text, "image_file_ids": [], "endpoint_id": None, "endpoint_request_raw": None}
+                            for text in (
+                                "Выполнить запрос",
+                                "Получить некорректный ответ",
+                                "Зафиксировать результат",
+                            )
+                        ],
+                        steps_to_reproduce="Выполнить запрос\nПолучить некорректный ответ\nЗафиксировать результат",
                         impact="Компрометация конфиденциальности и/или целостности данных.",
                         recommendations="Ограничить доступ, валидировать входные данные и усилить аутентификацию.",
                         created_by=members[0].id if members else admin.id,

@@ -36,7 +36,7 @@ def test_host_create_accepts_hostname_only_tc_host_002() -> None:
 
 @pytest.mark.parametrize("port", [1, 65535])
 def test_port_create_accepts_boundary_values_tc_port_003_004(port: int) -> None:
-    payload = PortCreate(port_number=port)
+    payload = PortCreate(ip_address_id=1, port_number=port)
 
     assert payload.port_number == port
 
@@ -88,7 +88,7 @@ def test_vulnerability_rejects_invalid_cvss_score_tc_vuln_005() -> None:
 def test_vulnerability_rejects_cvss_31_version() -> None:
     with pytest.raises(PydanticValidationError):
         VulnerabilityCreate(
-            host_id="f4d84c05-c8a5-4e5d-9811-43d0883d773c",
+            host_id=1,
             title="Legacy CVSS",
             severity="high",
             cvss_version="3.1",
@@ -102,7 +102,7 @@ def test_vulnerability_rejects_invalid_status_patch_tc_vuln_010() -> None:
 
 def test_vulnerability_accepts_structured_workflow_steps() -> None:
     payload = VulnerabilityCreate(
-        host_id="f4d84c05-c8a5-4e5d-9811-43d0883d773c",
+        host_id=1,
         title="Stored XSS",
         severity="high",
         workflow_steps=[

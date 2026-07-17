@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +34,7 @@ async def create_agent_token(
 
 @router.delete("/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_agent_token(
-    token_id: UUID,
+    token_id: int,
     _: None = Depends(enforce_csrf),
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),

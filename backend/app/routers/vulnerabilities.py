@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +22,7 @@ router = APIRouter(tags=["vulnerabilities"])
 
 @router.get("/projects/{project_id}/vulnerabilities", response_model=dict)
 async def list_vulnerabilities(
-    project_id: UUID,
+    project_id: int,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
     severity: str | None = None,
@@ -38,8 +37,8 @@ async def list_vulnerabilities(
 
 @router.get("/projects/{project_id}/hosts/{host_id}/vulnerabilities", response_model=dict)
 async def list_host_vulnerabilities(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
     severity: str | None = None,
@@ -54,7 +53,7 @@ async def list_host_vulnerabilities(
 
 @router.post("/projects/{project_id}/vulnerabilities", response_model=VulnerabilityOut, status_code=status.HTTP_201_CREATED)
 async def create_vulnerability(
-    project_id: UUID,
+    project_id: int,
     payload: VulnerabilityCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -68,8 +67,8 @@ async def create_vulnerability(
 
 @router.get("/projects/{project_id}/vulnerabilities/{vuln_id}")
 async def get_vulnerability(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -84,8 +83,8 @@ async def get_vulnerability(
 
 @router.put("/projects/{project_id}/vulnerabilities/{vuln_id}", response_model=VulnerabilityOut)
 async def update_vulnerability(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     payload: VulnerabilityUpdate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -99,8 +98,8 @@ async def update_vulnerability(
 
 @router.patch("/projects/{project_id}/vulnerabilities/{vuln_id}/status", response_model=VulnerabilityOut)
 async def patch_vulnerability_status(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     payload: VulnerabilityStatusPatch,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -114,8 +113,8 @@ async def patch_vulnerability_status(
 
 @router.delete("/projects/{project_id}/vulnerabilities/{vuln_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vulnerability(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),
@@ -127,8 +126,8 @@ async def delete_vulnerability(
 
 @router.get("/projects/{project_id}/vulnerabilities/{vuln_id}/assets", response_model=list[VulnerabilityAssetOut])
 async def list_vulnerability_assets(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> list[VulnerabilityAssetOut]:
@@ -143,8 +142,8 @@ async def list_vulnerability_assets(
     status_code=status.HTTP_201_CREATED,
 )
 async def add_vulnerability_asset(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     payload: VulnerabilityAssetCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -158,9 +157,9 @@ async def add_vulnerability_asset(
 
 @router.delete("/projects/{project_id}/vulnerabilities/{vuln_id}/assets/{asset_link_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vulnerability_asset(
-    project_id: UUID,
-    vuln_id: UUID,
-    asset_link_id: UUID,
+    project_id: int,
+    vuln_id: int,
+    asset_link_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),

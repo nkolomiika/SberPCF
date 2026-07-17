@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +37,7 @@ async def unread_count(
 
 @router.patch("/{notification_id}/read", response_model=NotificationOut)
 async def mark_read(
-    notification_id: UUID,
+    notification_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

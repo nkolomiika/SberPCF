@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from itertools import count as _id_count
+
+_ids = _id_count(1)
 
 import pytest
 
@@ -24,11 +26,11 @@ def test_apply_raw_request_payload_normalizes_uuid_path() -> None:
 
 @pytest.mark.asyncio
 async def test_create_endpoint_checks_duplicate_by_normalized_uuid_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    project_id = uuid4()
-    host_id = uuid4()
-    actor_id = uuid4()
+    project_id = next(_ids)
+    host_id = next(_ids)
+    actor_id = next(_ids)
     existing_endpoint = SimpleNamespace(
-        id=uuid4(),
+        id=next(_ids),
         description=None,
         query_params=[],
         request_body=None,

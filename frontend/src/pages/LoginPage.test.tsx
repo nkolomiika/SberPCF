@@ -49,7 +49,7 @@ describe("LoginPage", () => {
   });
 
   it("navigates to home after successful login", async () => {
-    signIn.mockResolvedValue({ must_change_password: false });
+    signIn.mockResolvedValue({});
 
     renderWithProviders(<LoginPage />);
     await userEvent.type(screen.getByRole("textbox"), "admin");
@@ -58,17 +58,6 @@ describe("LoginPage", () => {
 
     expect(signIn).toHaveBeenCalledWith("admin", "admin");
     expect(navigate).toHaveBeenCalledWith("/");
-  });
-
-  it("navigates to force-change-password for temporary password flow", async () => {
-    signIn.mockResolvedValue({ must_change_password: true });
-
-    renderWithProviders(<LoginPage />);
-    await userEvent.type(screen.getByRole("textbox"), "temp-user");
-    await userEvent.type(screen.getByLabelText(/Пароль/i), "Password123");
-    await userEvent.click(screen.getByRole("button", { name: "Войти" }));
-
-    expect(navigate).toHaveBeenCalledWith("/force-change-password");
   });
 
   it("does not navigate when sign in fails", async () => {

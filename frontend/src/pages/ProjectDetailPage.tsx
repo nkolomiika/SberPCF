@@ -176,7 +176,9 @@ const parseIsoDateTimeToDateOnly = (value: string | null) => {
 };
 
 export function ProjectDetailPage() {
-  const { projectId, noteId: urlNoteId } = useParams<{ projectId: string; noteId?: string }>();
+  const { projectId: projectIdParam, noteId: noteIdParam } = useParams<{ projectId: string; noteId?: string }>();
+  const projectId = Number(projectIdParam);
+  const urlNoteId = noteIdParam != null ? Number(noteIdParam) : undefined;
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -203,19 +205,19 @@ export function ProjectDetailPage() {
   const initialNavState = (location.state ?? null) as
     | {
         section?: DetailSection;
-        noteId?: string | null;
+        noteId?: number | null;
         clearNote?: boolean;
         highlightNoteCommentId?: string | null;
       }
     | null;
-  const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
+  const [selectedHostId, setSelectedHostId] = useState<number | null>(null);
   const [selectedSection, setSelectedSection] = useState<DetailSection>(
     () => sectionFromUrl ?? (initialNavState?.section as DetailSection | undefined) ?? "overview",
   );
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
   const [notesActivity, setNotesActivity] = useState<ProjectNoteActivity[]>([]);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(() => {
+  const [selectedNoteId, setSelectedNoteId] = useState<number | null>(() => {
     // URL имеет приоритет: /projects/:id/notes/:noteId → noteId.
     if (urlNoteId) return urlNoteId;
     if (initialNavState?.section === "notes") {
@@ -227,11 +229,11 @@ export function ProjectDetailPage() {
   // Состояние для платформенного диалога создания/переименования заметки.
   // Заменяет window.prompt — единый стиль с остальными модалками проекта.
   const [noteDialogMode, setNoteDialogMode] = useState<"create" | "rename" | null>(null);
-  const [noteDialogParentId, setNoteDialogParentId] = useState<string | null>(null);
-  const [noteDialogNoteId, setNoteDialogNoteId] = useState<string | null>(null);
+  const [noteDialogParentId, setNoteDialogParentId] = useState<number | null>(null);
+  const [noteDialogNoteId, setNoteDialogNoteId] = useState<number | null>(null);
   const [noteDialogTitle, setNoteDialogTitle] = useState("");
   const [noteDialogBusy, setNoteDialogBusy] = useState(false);
-  const [noteDeleteDialogNoteId, setNoteDeleteDialogNoteId] = useState<string | null>(null);
+  const [noteDeleteDialogNoteId, setNoteDeleteDialogNoteId] = useState<number | null>(null);
   const [noteDeleteBusy, setNoteDeleteBusy] = useState(false);
   // Меню «троеточие» в шапке для секций «Хосты» и «Заметки» (тот же UX,
   // что у actionsAnchorEl для секции «Обзор»).
@@ -247,9 +249,9 @@ export function ProjectDetailPage() {
   const [usersCatalog, setUsersCatalog] = useState<User[]>([]);
   const [membersDialogOpen, setMembersDialogOpen] = useState(false);
   const [removeMembersDialogOpen, setRemoveMembersDialogOpen] = useState(false);
-  const [selectedAvailableMemberIds, setSelectedAvailableMemberIds] = useState<string[]>([]);
+  const [selectedAvailableMemberIds, setSelectedAvailableMemberIds] = useState<number[]>([]);
   const [memberSearchQuery, setMemberSearchQuery] = useState("");
-  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
   const [membersBusy, setMembersBusy] = useState(false);
   const [hostStatsById, setHostStatsById] = useState<Record<string, HostTreeStats>>({});
   const [importOpen, setImportOpen] = useState(false);
@@ -279,7 +281,7 @@ export function ProjectDetailPage() {
   const [hostOpen, setHostOpen] = useState(false);
   const [hostsBulkDeleteMode, setHostsBulkDeleteMode] = useState(false);
   const [hostsBulkDeleting, setHostsBulkDeleting] = useState(false);
-  const [selectedHostIds, setSelectedHostIds] = useState<string[]>([]);
+  const [selectedHostIds, setSelectedHostIds] = useState<number[]>([]);
   const [hostIp, setHostIp] = useState("");
   const [hostName, setHostName] = useState("");
   const [hostNotes, setHostNotes] = useState("");
@@ -290,7 +292,7 @@ export function ProjectDetailPage() {
   const [vulnBusy, setVulnBusy] = useState(false);
   const [vulnEditMode, setVulnEditMode] = useState(false);
   const [editCommentOpen, setEditCommentOpen] = useState(false);
-  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
   const [editingCommentContent, setEditingCommentContent] = useState("");
   const [commentActionsAnchorEl, setCommentActionsAnchorEl] = useState<HTMLElement | null>(null);
   const [activeComment, setActiveComment] = useState<VulnerabilityComment | null>(null);
@@ -356,11 +358,12 @@ export function ProjectDetailPage() {
       setProjectNotes(notesResp);
       setNotesActivity(activityResp);
       setSelectedHostId((previousHostId) => {
-        const storedHostId = storagePrefix ? window.localStorage.getItem(`${storagePrefix}:selectedHostId`) : null;
+        const storedHostIdRaw = storagePrefix ? window.localStorage.getItem(`${storagePrefix}:selectedHostId`) : null;
+        const storedHostId = storedHostIdRaw != null ? Number(storedHostIdRaw) : null;
         if (previousHostId && hostsResp.items.some((host) => host.id === previousHostId)) {
           return previousHostId;
         }
-        if (storedHostId && hostsResp.items.some((host) => host.id === storedHostId)) {
+        if (storedHostId != null && hostsResp.items.some((host) => host.id === storedHostId)) {
           return storedHostId;
         }
         return hostsResp.items[0]?.id ?? null;
@@ -529,10 +532,10 @@ export function ProjectDetailPage() {
   // ID комментария заметки, который надо подсветить — берём прямо из URL-query
   // (?comment=<id>), как сделано для уязвимостей. Это переживает перезагрузку
   // и не зависит от location.state.
-  const highlightNoteCommentId = useMemo(
-    () => new URLSearchParams(location.search).get("comment"),
-    [location.search],
-  );
+  const highlightNoteCommentId = useMemo(() => {
+    const raw = new URLSearchParams(location.search).get("comment");
+    return raw != null ? Number(raw) : null;
+  }, [location.search]);
 
   // Синхронизация state со URL: при back/forward или при прямой загрузке ссылки
   // /projects/:id/notes/:noteId юзер должен попасть в нужный раздел/заметку.
@@ -555,7 +558,7 @@ export function ProjectDetailPage() {
   //   * `onHighlightHandled` — иначе подсветочный 3-секундный таймер
   //     перезапускался бы при каждом рендере родителя.
   const handleSelectNoteInEditor = useCallback(
-    (noteId: string | null) => {
+    (noteId: number | null) => {
       if (!projectId) return;
       if (noteId) navigate(`/projects/${projectId}/notes/${noteId}`);
       else navigate(`/projects/${projectId}/notes`);
@@ -586,7 +589,7 @@ export function ProjectDetailPage() {
     if (!storagePrefix || !selectedHostId) {
       return;
     }
-    window.localStorage.setItem(`${storagePrefix}:selectedHostId`, selectedHostId);
+    window.localStorage.setItem(`${storagePrefix}:selectedHostId`, String(selectedHostId));
   }, [selectedHostId, storagePrefix]);
 
   const severityStats = useMemo(() => {
@@ -802,7 +805,7 @@ export function ProjectDetailPage() {
   const selectedHost = hosts.find((host) => host.id === selectedHostId) ?? null;
   const hostLabel = selectedHost ? selectedHost.hostname || selectedHost.ip_address || "unknown-host" : "Хост не выбран";
 
-  const loadVulnerabilityDetails = async (vulnerabilityId: string) => {
+  const loadVulnerabilityDetails = async (vulnerabilityId: number) => {
     if (!projectId) {
       return;
     }
@@ -883,7 +886,7 @@ export function ProjectDetailPage() {
     }
   };
 
-  const removeCommentFromActiveVuln = async (commentId: string) => {
+  const removeCommentFromActiveVuln = async (commentId: number) => {
     if (!projectId || !activeVuln) {
       return;
     }
@@ -2012,7 +2015,7 @@ export function ProjectDetailPage() {
                       {notesActivity.map((entry) => {
                         const actorName =
                           entry.username ||
-                          (entry.user_id ? `${entry.user_id.slice(0, 8)}…` : "—");
+                          (entry.user_id ? `${String(entry.user_id).slice(0, 8)}…` : "—");
                         const noteTitle = entry.note_title || "(без названия)";
                         const clickable = entry.action !== "DELETE" && Boolean(entry.note_id);
                         return (

@@ -27,7 +27,7 @@ export type DetailSection = "overview" | "notes" | "hosts" | "ports" | "endpoint
 
 interface ProjectTreeNavProps {
   /** Ключ для сохранения состояния раскрытия дерева в localStorage (обычно — projectId). */
-  projectId?: string | null;
+  projectId?: number | null;
   /**
    * "project" — открыт ProjectDetailPage: хост в дереве не подсвечивается даже если selectedHostId
    * выставлен (это нужно только для предзагрузки данных хоста), все секции по умолчанию свёрнуты.
@@ -35,7 +35,7 @@ interface ProjectTreeNavProps {
    */
   viewMode?: "project" | "host";
   hosts: Host[];
-  selectedHostId: string | null;
+  selectedHostId: number | null;
   selectedSection: DetailSection;
   isCollapsed: boolean;
   portsCount: number;
@@ -45,32 +45,32 @@ interface ProjectTreeNavProps {
   onSelectProjectOverview?: () => void;
   notesCount?: number;
   notes?: ProjectNote[];
-  selectedNoteId?: string | null;
+  selectedNoteId?: number | null;
   onToggleCollapsed: () => void;
   onSelectSection: (section: DetailSection) => void;
-  onSelectNote?: (noteId: string) => void;
+  onSelectNote?: (noteId: number) => void;
   /** Клик по самой плашке «Заметки» в дереве — без выбора конкретной заметки.
    *  Используется, чтобы родитель сбросил selectedNoteId и показал статистику. */
   onSelectNotesLabel?: () => void;
-  onCreateNote?: (parentId: string | null) => void;
-  onRenameNote?: (noteId: string) => void;
-  onDeleteNote?: (noteId: string) => void;
-  onMoveNote?: (noteId: string, newParentId: string | null) => Promise<void> | void;
-  onReorderNotes?: (parentId: string | null, orderedIds: string[]) => Promise<void> | void;
-  onSelectHost: (hostId: string | null) => void;
-  onOpenHost?: (hostId: string, section: DetailSection) => void;
+  onCreateNote?: (parentId: number | null) => void;
+  onRenameNote?: (noteId: number) => void;
+  onDeleteNote?: (noteId: number) => void;
+  onMoveNote?: (noteId: number, newParentId: number | null) => Promise<void> | void;
+  onReorderNotes?: (parentId: number | null, orderedIds: number[]) => Promise<void> | void;
+  onSelectHost: (hostId: number | null) => void;
+  onOpenHost?: (hostId: number, section: DetailSection) => void;
 }
 
 type PersistedTreeState = {
   notesExpanded: boolean;
   hostsExpanded: boolean;
-  expandedHostIds: string[];
+  expandedHostIds: number[];
 };
 
-const storageKey = (projectId: string | null | undefined): string | null =>
+const storageKey = (projectId: number | null | undefined): string | null =>
   projectId ? `tree-nav:${projectId}` : null;
 
-const loadPersistedState = (projectId: string | null | undefined): PersistedTreeState | null => {
+const loadPersistedState = (projectId: number | null | undefined): PersistedTreeState | null => {
   const key = storageKey(projectId);
   if (!key || typeof window === "undefined") return null;
   try {
@@ -81,7 +81,7 @@ const loadPersistedState = (projectId: string | null | undefined): PersistedTree
     return {
       notesExpanded: Boolean(parsed.notesExpanded),
       hostsExpanded: Boolean(parsed.hostsExpanded),
-      expandedHostIds: Array.isArray(parsed.expandedHostIds) ? parsed.expandedHostIds.map(String) : [],
+      expandedHostIds: Array.isArray(parsed.expandedHostIds) ? parsed.expandedHostIds.map(Number) : [],
     };
   } catch {
     return null;
@@ -130,9 +130,9 @@ export function ProjectTreeNav({
         selectedSection === "vulns" ||
         viewMode === "host"),
   );
-  const [expandedHostIds, setExpandedHostIds] = useState<Set<string>>(() => {
+  const [expandedHostIds, setExpandedHostIds] = useState<Set<number>>(() => {
     const fromStorage = persisted?.expandedHostIds ?? [];
-    const combined = new Set<string>(fromStorage);
+    const combined = new Set<number>(fromStorage);
     if (viewMode === "host" && selectedHostId) combined.add(selectedHostId);
     return combined;
   });
@@ -164,7 +164,7 @@ export function ProjectTreeNav({
     setExpandedHostIds((prev) => (prev.has(selectedHostId) ? prev : new Set(prev).add(selectedHostId)));
   }, [selectedHostId, viewMode]);
 
-  const selectHostAndSection = (hostId: string, section: DetailSection) => {
+  const selectHostAndSection = (hostId: number, section: DetailSection) => {
     onSelectHost(hostId);
     onSelectSection(section);
     if (onOpenHost) {
@@ -186,7 +186,7 @@ export function ProjectTreeNav({
     setHostsExpanded(true);
   };
 
-  const toggleHostExpanded = (hostId: string) => {
+  const toggleHostExpanded = (hostId: number) => {
     setExpandedHostIds((prev) => {
       const next = new Set(prev);
       if (next.has(hostId)) next.delete(hostId);

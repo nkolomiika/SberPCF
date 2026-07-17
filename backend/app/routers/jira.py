@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +31,7 @@ async def upsert_jira_config(
 
 @router.get("/projects/{project_id}/jira-link", response_model=ProjectJiraLinkOut | None)
 async def get_project_jira_link(
-    project_id: UUID,
+    project_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> ProjectJiraLinkOut | None:
@@ -41,7 +40,7 @@ async def get_project_jira_link(
 
 @router.put("/projects/{project_id}/jira-link", response_model=ProjectJiraLinkOut)
 async def upsert_project_jira_link(
-    project_id: UUID,
+    project_id: int,
     payload: ProjectJiraLinkUpsert,
     _: None = Depends(enforce_csrf),
     admin: User = Depends(require_admin),
@@ -52,8 +51,8 @@ async def upsert_project_jira_link(
 
 @router.get("/projects/{project_id}/vulnerabilities/{vuln_id}/jira", response_model=JiraIssueLinkOut | None)
 async def get_vulnerability_jira_link(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> JiraIssueLinkOut | None:
@@ -63,8 +62,8 @@ async def get_vulnerability_jira_link(
 
 @router.post("/projects/{project_id}/vulnerabilities/{vuln_id}/jira/export", response_model=JiraIssueLinkOut)
 async def export_vulnerability_to_jira(
-    project_id: UUID,
-    vuln_id: UUID,
+    project_id: int,
+    vuln_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),

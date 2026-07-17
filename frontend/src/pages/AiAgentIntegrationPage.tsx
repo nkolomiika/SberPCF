@@ -53,7 +53,7 @@ export function AiAgentIntegrationPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [allProjects, setAllProjects] = useState(true);
-  const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
+  const [selectedProjectIds, setSelectedProjectIds] = useState<number[]>([]);
   const [scopes, setScopes] = useState<string[]>(() => SCOPE_OPTIONS.map((s) => s.id));
   const [revealedToken, setRevealedToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -84,7 +84,7 @@ export function AiAgentIntegrationPage() {
     setScopes((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
   };
 
-  const toggleProject = (id: string) => {
+  const toggleProject = (id: number) => {
     setSelectedProjectIds((prev) => (prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]));
   };
 
@@ -132,7 +132,7 @@ export function AiAgentIntegrationPage() {
     }
   };
 
-  const revoke = async (id: string) => {
+  const revoke = async (id: number) => {
     if (!window.confirm("Отозвать этот токен? клиенты с ним потеряют доступ.")) {
       return;
     }

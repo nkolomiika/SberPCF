@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,7 +74,7 @@ async def create_project_folder(
 
 @router.patch("/folders/{folder_id}/move", response_model=ProjectFolderOut)
 async def move_project_folder(
-    folder_id: UUID,
+    folder_id: int,
     payload: ProjectFolderMove,
     request: Request,
     _: None = Depends(enforce_csrf),
@@ -89,7 +88,7 @@ async def move_project_folder(
 
 @router.delete("/folders/{folder_id}", status_code=status.HTTP_200_OK)
 async def delete_project_folder(
-    folder_id: UUID,
+    folder_id: int,
     request: Request,
     _: None = Depends(enforce_csrf),
     admin: User = Depends(require_admin),
@@ -99,9 +98,19 @@ async def delete_project_folder(
     return await ProjectService(db).delete_folder(folder_id, admin.id, get_client_ip(request))
 
 
+# Объявлен до "/{project_id}", иначе FastAPI попытается разобрать "stats" как id.
+@router.get("/stats", response_model=list[dict])
+async def list_project_stats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Счётчики (хосты/уязвимости) по каждому доступному проекту — одним запросом."""
+    return await ProjectService(db).list_project_stats(current_user)
+
+
 @router.get("/{project_id}", response_model=ProjectOut)
 async def get_project(
-    project_id: UUID,
+    project_id: int,
     _project = Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> ProjectOut:
@@ -112,21 +121,26 @@ async def get_project(
 
 @router.put("/{project_id}", response_model=ProjectOut)
 async def update_project(
-    project_id: UUID,
+    project_id: int,
     payload: ProjectUpdate,
     request: Request,
     _: None = Depends(enforce_csrf),
-    admin: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ProjectOut:
-    """Обновляет проект."""
-    project = await ProjectService(db).update_project(project_id, payload.model_dump(exclude_unset=True), admin.id, get_client_ip(request))
+    """Обновляет карточку проекта: название, описание, сроки.
+
+    Доступно админу, лиду проекта или его создателю (удаление — только админу).
+    """
+    service = ProjectService(db)
+    await service.ensure_can_edit_project(project_id, current_user)
+    project = await service.update_project(project_id, payload.model_dump(exclude_unset=True), current_user.id, get_client_ip(request))
     return ProjectOut.model_validate(project)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
-    project_id: UUID,
+    project_id: int,
     request: Request,
     _: None = Depends(enforce_csrf),
     admin: User = Depends(require_admin),
@@ -138,7 +152,7 @@ async def delete_project(
 
 @router.get("/{project_id}/members", response_model=list[ProjectMemberOut])
 async def list_members(
-    project_id: UUID,
+    project_id: int,
     _project = Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> list[ProjectMemberOut]:
@@ -149,27 +163,42 @@ async def list_members(
 
 @router.post("/{project_id}/members", status_code=status.HTTP_201_CREATED)
 async def add_member(
-    project_id: UUID,
+    project_id: int,
     payload: ProjectMemberCreate,
     request: Request,
     _: None = Depends(enforce_csrf),
-    admin: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Добавляет участника в проект."""
-    return await ProjectService(db).add_member(project_id, payload.user_id, admin.id, get_client_ip(request))
+    """Добавляет участника в проект (админ, лид проекта или его создатель)."""
+    service = ProjectService(db)
+    await service.ensure_can_manage_members(project_id, current_user)
+    return await service.add_member(project_id, payload.user_id, current_user.id, get_client_ip(request))
 
 
 @router.delete("/{project_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_member(
-    project_id: UUID,
-    user_id: UUID,
+    project_id: int,
+    user_id: int,
     request: Request,
     _: None = Depends(enforce_csrf),
-    admin: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Удаляет участника из проекта."""
-    await ProjectService(db).remove_member(project_id, user_id, admin.id, get_client_ip(request))
+    """Удаляет участника из проекта (админ, лид проекта или его создатель)."""
+    service = ProjectService(db)
+    await service.ensure_can_manage_members(project_id, current_user)
+    await service.remove_member(project_id, user_id, current_user.id, get_client_ip(request))
+
+
+@router.get("/{project_id}/activity", response_model=list[dict])
+async def list_project_activity(
+    project_id: int,
+    limit: int = Query(50, ge=1, le=200),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Активность проекта — доступна всем участникам проекта."""
+    return await ProjectService(db).list_project_activity(project_id, limit)
 
 

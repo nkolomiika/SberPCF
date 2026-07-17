@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from jose import JWTError, jwt
@@ -34,7 +33,7 @@ async def _authenticate_websocket_user(websocket: WebSocket) -> User | None:
 
     async with SessionLocal() as db:
         user = await db.scalar(select(User).where(User.id == user_id))
-        if not user or not user.is_active or user.must_change_password:
+        if not user or not user.is_active:
             await websocket.close(code=4403)
             return None
     setattr(websocket.state, "user_id", user_id)
@@ -72,7 +71,7 @@ async def notifications_ws(websocket: WebSocket) -> None:
 
 
 @router.websocket("/ws/projects/{project_id}")
-async def project_ws(websocket: WebSocket, project_id: UUID) -> None:
+async def project_ws(websocket: WebSocket, project_id: int) -> None:
     """WebSocket-канал проекта с авторизацией по access cookie."""
     user = await _authenticate_websocket_user(websocket)
     if not user:

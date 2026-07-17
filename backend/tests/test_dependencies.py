@@ -1,8 +1,12 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from starlette.requests import Request
 
-from app.dependencies import enforce_csrf, is_password_change_allowed_path
+from app.dependencies import enforce_csrf, require_project_access
 from app.exceptions import ForbiddenError
+from app.models import UserRole
 
 
 def _request(method: str) -> Request:
@@ -41,11 +45,32 @@ async def test_enforce_csrf_accepts_allowed_origin() -> None:
     await enforce_csrf(_request("DELETE"), origin="http://localhost:3000")
 
 
-def test_password_change_lock_allows_only_whitelisted_paths() -> None:
-    assert is_password_change_allowed_path("/api/v1/auth/force-change-password", "POST") is True
-    assert is_password_change_allowed_path("/api/v1/auth/logout", "POST") is True
-    assert is_password_change_allowed_path("/api/v1/users/me", "GET") is True
-    assert is_password_change_allowed_path("/api/v1/users/me/profile", "GET") is True
-    assert is_password_change_allowed_path("/api/v1/users/me", "PATCH") is False
-    assert is_password_change_allowed_path("/api/v1/users/me/password", "PATCH") is False
-    assert is_password_change_allowed_path("/api/v1/projects", "GET") is False
+@pytest.mark.asyncio
+async def test_require_project_access_admin_without_membership() -> None:
+    """Админ открывает любой проект, даже не будучи его участником.
+
+    Членство не проверяется вовсе: `db.scalar` возвращает проект первым вызовом
+    и больше не вызывается — до запроса ProjectMember дело не доходит.
+    """
+    project = SimpleNamespace(id=7, name="Project without the admin")
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=project)
+    admin = SimpleNamespace(id=1, role=UserRole.ADMIN)
+
+    result = await require_project_access(project_id=7, db=db, current_user=admin)
+
+    assert result is project
+    assert db.scalar.await_count == 1  # только выборка проекта, без ProjectMember
+
+
+@pytest.mark.asyncio
+async def test_require_project_access_rejects_non_member_pentester() -> None:
+    """Не-админ без членства получает 403 — это и есть правило доступа."""
+    project = SimpleNamespace(id=7, name="Someone else's project")
+    db = AsyncMock()
+    # 1-й scalar — проект, 2-й — поиск членства (его нет).
+    db.scalar = AsyncMock(side_effect=[project, None])
+    user = SimpleNamespace(id=2, role=UserRole.PENTESTER)
+
+    with pytest.raises(ForbiddenError, match="Нет доступа к проекту"):
+        await require_project_access(project_id=7, db=db, current_user=user)

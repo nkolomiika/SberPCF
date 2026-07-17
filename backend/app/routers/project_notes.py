@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +23,7 @@ router = APIRouter(tags=["project-notes"])
 
 @router.get("/projects/{project_id}/notes", response_model=list[ProjectNoteOut])
 async def list_project_notes(
-    project_id: UUID,
+    project_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> list[ProjectNoteOut]:
@@ -34,7 +33,7 @@ async def list_project_notes(
 
 @router.get("/projects/{project_id}/notes-activity", response_model=list[dict])
 async def list_project_notes_activity(
-    project_id: UUID,
+    project_id: int,
     limit: int = Query(30, ge=1, le=200),
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
@@ -48,7 +47,7 @@ async def list_project_notes_activity(
 
 @router.post("/projects/{project_id}/notes", response_model=ProjectNoteOut, status_code=status.HTTP_201_CREATED)
 async def create_project_note(
-    project_id: UUID,
+    project_id: int,
     payload: ProjectNoteCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -61,8 +60,8 @@ async def create_project_note(
 
 @router.get("/projects/{project_id}/notes/{note_id}", response_model=ProjectNoteOut)
 async def get_project_note(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> ProjectNoteOut:
@@ -72,8 +71,8 @@ async def get_project_note(
 
 @router.put("/projects/{project_id}/notes/{note_id}", response_model=ProjectNoteOut)
 async def update_project_note(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     payload: ProjectNoteUpdate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -86,8 +85,8 @@ async def update_project_note(
 
 @router.patch("/projects/{project_id}/notes/{note_id}/move", response_model=ProjectNoteOut)
 async def move_project_note(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     payload: ProjectNoteMove,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -100,7 +99,7 @@ async def move_project_note(
 
 @router.patch("/projects/{project_id}/notes/reorder", response_model=list[ProjectNoteOut])
 async def reorder_project_notes(
-    project_id: UUID,
+    project_id: int,
     payload: ProjectNoteReorder,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -118,8 +117,8 @@ async def reorder_project_notes(
 
 @router.delete("/projects/{project_id}/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project_note(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),
@@ -130,8 +129,8 @@ async def delete_project_note(
 
 @router.get("/projects/{project_id}/notes/{note_id}/comments", response_model=dict)
 async def list_note_comments(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     _project=Depends(require_project_access),
@@ -147,8 +146,8 @@ async def list_note_comments(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_note_comment(
-    project_id: UUID,
-    note_id: UUID,
+    project_id: int,
+    note_id: int,
     payload: ProjectNoteCommentCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -160,9 +159,9 @@ async def create_note_comment(
 
 @router.put("/projects/{project_id}/notes/{note_id}/comments/{comment_id}", response_model=ProjectNoteCommentOut)
 async def update_note_comment(
-    project_id: UUID,
-    note_id: UUID,
-    comment_id: UUID,
+    project_id: int,
+    note_id: int,
+    comment_id: int,
     payload: ProjectNoteCommentUpdate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -174,9 +173,9 @@ async def update_note_comment(
 
 @router.delete("/projects/{project_id}/notes/{note_id}/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_note_comment(
-    project_id: UUID,
-    note_id: UUID,
-    comment_id: UUID,
+    project_id: int,
+    note_id: int,
+    comment_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),

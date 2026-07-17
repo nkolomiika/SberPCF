@@ -1,5 +1,4 @@
 from urllib.parse import quote
-from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -29,7 +28,7 @@ def _content_disposition(project_name: str, suffix: str) -> str:
 
 
 async def _stream_word_report(
-    *, project_id: UUID, project: Project, db: AsyncSession, kind: str
+    *, project_id: int, project: Project, db: AsyncSession, kind: str
 ) -> StreamingResponse:
     content = await ReportService(db).generate(project_id, kind)  # type: ignore[arg-type]
     headers = {"Content-Disposition": _content_disposition(project.name, kind)}
@@ -38,7 +37,7 @@ async def _stream_word_report(
 
 @router.post("/projects/{project_id}/reports/szi")
 async def generate_szi_report(
-    project_id: UUID,
+    project_id: int,
     _: None = Depends(enforce_csrf),
     _user: User = Depends(get_current_user),
     project: Project = Depends(require_project_access),
@@ -50,7 +49,7 @@ async def generate_szi_report(
 
 @router.post("/projects/{project_id}/reports/pp")
 async def generate_pp_report(
-    project_id: UUID,
+    project_id: int,
     _: None = Depends(enforce_csrf),
     _user: User = Depends(get_current_user),
     project: Project = Depends(require_project_access),

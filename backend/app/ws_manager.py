@@ -1,5 +1,4 @@
 from collections import defaultdict
-from uuid import UUID
 
 from fastapi import WebSocket
 
@@ -8,16 +7,16 @@ class ConnectionManager:
     """Менеджер WebSocket-подключений по комнатам проекта."""
 
     def __init__(self) -> None:
-        self.rooms: dict[UUID, set[WebSocket]] = defaultdict(set)
+        self.rooms: dict[int, set[WebSocket]] = defaultdict(set)
         self.projects_index_sockets: set[WebSocket] = set()
-        self.user_sockets: dict[UUID, set[WebSocket]] = defaultdict(set)
+        self.user_sockets: dict[int, set[WebSocket]] = defaultdict(set)
 
-    async def connect(self, project_id: UUID, websocket: WebSocket) -> None:
+    async def connect(self, project_id: int, websocket: WebSocket) -> None:
         """Принимает соединение и регистрирует его в комнате проекта."""
         await websocket.accept()
         self.rooms[project_id].add(websocket)
 
-    def disconnect(self, project_id: UUID, websocket: WebSocket) -> None:
+    def disconnect(self, project_id: int, websocket: WebSocket) -> None:
         """Удаляет соединение из комнаты проекта."""
         self.rooms[project_id].discard(websocket)
         if not self.rooms[project_id]:
@@ -32,18 +31,18 @@ class ConnectionManager:
         """Удаляет сокет из общего канала списка проектов."""
         self.projects_index_sockets.discard(websocket)
 
-    async def connect_user(self, user_id: UUID, websocket: WebSocket) -> None:
+    async def connect_user(self, user_id: int, websocket: WebSocket) -> None:
         """Подключает сокет к персональному каналу уведомлений пользователя."""
         await websocket.accept()
         self.user_sockets[user_id].add(websocket)
 
-    def disconnect_user(self, user_id: UUID, websocket: WebSocket) -> None:
+    def disconnect_user(self, user_id: int, websocket: WebSocket) -> None:
         """Удаляет сокет из персонального канала пользователя."""
         self.user_sockets[user_id].discard(websocket)
         if not self.user_sockets[user_id]:
             self.user_sockets.pop(user_id, None)
 
-    async def broadcast(self, project_id: UUID, payload: dict) -> None:
+    async def broadcast(self, project_id: int, payload: dict) -> None:
         """Рассылает событие всем активным подключениям комнаты."""
         stale: list[WebSocket] = []
         for ws in self.rooms.get(project_id, set()):
@@ -55,7 +54,7 @@ class ConnectionManager:
         for ws in stale:
             self.disconnect(project_id, ws)
 
-    async def notify_user(self, user_id: UUID, payload: dict) -> None:
+    async def notify_user(self, user_id: int, payload: dict) -> None:
         """Рассылает персональное уведомление в персональный и проектные каналы пользователя."""
         stale_user_sockets: list[WebSocket] = []
         for ws in self.user_sockets.get(user_id, set()):

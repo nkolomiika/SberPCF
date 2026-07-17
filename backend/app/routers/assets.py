@@ -1,4 +1,3 @@
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +27,7 @@ router = APIRouter(tags=["assets"])
 
 @router.get("/projects/{project_id}/hosts", response_model=dict)
 async def list_hosts(
-    project_id: UUID,
+    project_id: int,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
     status_filter: str | None = Query(None, alias="status"),
@@ -42,7 +41,7 @@ async def list_hosts(
 
 @router.post("/projects/{project_id}/hosts", response_model=HostOut, status_code=status.HTTP_201_CREATED)
 async def create_host(
-    project_id: UUID,
+    project_id: int,
     payload: HostCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -56,8 +55,8 @@ async def create_host(
 
 @router.get("/projects/{project_id}/hosts/{host_id}")
 async def get_host(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -67,8 +66,8 @@ async def get_host(
 
 @router.put("/projects/{project_id}/hosts/{host_id}", response_model=HostOut)
 async def update_host(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     payload: HostUpdate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -82,8 +81,8 @@ async def update_host(
 
 @router.delete("/projects/{project_id}/hosts/{host_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_host(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),
@@ -95,8 +94,8 @@ async def delete_host(
 
 @router.get("/projects/{project_id}/hosts/{host_id}/ports", response_model=list[PortOut])
 async def list_ports(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> list[PortOut]:
@@ -107,8 +106,8 @@ async def list_ports(
 
 @router.post("/projects/{project_id}/hosts/{host_id}/ports", response_model=PortOut, status_code=status.HTTP_201_CREATED)
 async def create_port(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     payload: PortCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -122,9 +121,9 @@ async def create_port(
 
 @router.get("/projects/{project_id}/hosts/{host_id}/ports/{port_id}", response_model=PortOut)
 async def get_port(
-    project_id: UUID,
-    host_id: UUID,
-    port_id: UUID,
+    project_id: int,
+    host_id: int,
+    port_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> PortOut:
@@ -135,9 +134,9 @@ async def get_port(
 
 @router.put("/projects/{project_id}/hosts/{host_id}/ports/{port_id}", response_model=PortOut)
 async def update_port(
-    project_id: UUID,
-    host_id: UUID,
-    port_id: UUID,
+    project_id: int,
+    host_id: int,
+    port_id: int,
     payload: PortUpdate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -151,9 +150,9 @@ async def update_port(
 
 @router.delete("/projects/{project_id}/hosts/{host_id}/ports/{port_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_port(
-    project_id: UUID,
-    host_id: UUID,
-    port_id: UUID,
+    project_id: int,
+    host_id: int,
+    port_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),
@@ -165,9 +164,9 @@ async def delete_port(
 
 @router.get("/projects/{project_id}/hosts/{host_id}/ports/{port_id}/services", response_model=list[ServiceOut])
 async def list_services(
-    project_id: UUID,
-    host_id: UUID,
-    port_id: UUID,
+    project_id: int,
+    host_id: int,
+    port_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> list[ServiceOut]:
@@ -182,9 +181,9 @@ async def list_services(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_service(
-    project_id: UUID,
-    host_id: UUID,
-    port_id: UUID,
+    project_id: int,
+    host_id: int,
+    port_id: int,
     payload: ServiceCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -198,10 +197,10 @@ async def create_service(
 
 @router.put("/projects/{project_id}/hosts/{host_id}/ports/{port_id}/services/{service_id}", response_model=ServiceOut)
 async def update_service(
-    project_id: UUID,
-    host_id: UUID,
-    port_id: UUID,
-    service_id: UUID,
+    project_id: int,
+    host_id: int,
+    port_id: int,
+    service_id: int,
     payload: ServiceUpdate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -222,10 +221,10 @@ async def update_service(
 
 @router.delete("/projects/{project_id}/hosts/{host_id}/ports/{port_id}/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_service(
-    project_id: UUID,
-    host_id: UUID,
-    port_id: UUID,
-    service_id: UUID,
+    project_id: int,
+    host_id: int,
+    port_id: int,
+    service_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),
@@ -237,8 +236,8 @@ async def delete_service(
 
 @router.get("/projects/{project_id}/hosts/{host_id}/endpoints", response_model=list[EndpointOut])
 async def list_endpoints(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> list[EndpointOut]:
@@ -249,8 +248,8 @@ async def list_endpoints(
 
 @router.post("/projects/{project_id}/hosts/{host_id}/endpoints", response_model=EndpointOut, status_code=status.HTTP_201_CREATED)
 async def create_endpoint(
-    project_id: UUID,
-    host_id: UUID,
+    project_id: int,
+    host_id: int,
     payload: EndpointCreate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -264,9 +263,9 @@ async def create_endpoint(
 
 @router.put("/projects/{project_id}/hosts/{host_id}/endpoints/{endpoint_id}", response_model=EndpointOut)
 async def update_endpoint(
-    project_id: UUID,
-    host_id: UUID,
-    endpoint_id: UUID,
+    project_id: int,
+    host_id: int,
+    endpoint_id: int,
     payload: EndpointUpdate,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
@@ -280,9 +279,9 @@ async def update_endpoint(
 
 @router.delete("/projects/{project_id}/hosts/{host_id}/endpoints/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_endpoint(
-    project_id: UUID,
-    host_id: UUID,
-    endpoint_id: UUID,
+    project_id: int,
+    host_id: int,
+    endpoint_id: int,
     _: None = Depends(enforce_csrf),
     current_user: User = Depends(get_current_user),
     _project=Depends(require_project_access),

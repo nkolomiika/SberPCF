@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from typing import Literal
 from urllib.parse import parse_qsl, urlparse, urlsplit
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import ipaddress
 import socket
@@ -28,7 +28,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.config import get_settings
-from app.enums import AssetType, NotificationType, ProjectStatus, Severity, UserRole
+from app.enums import AssetType, NotificationType, ProjectRole, ProjectStatus, Severity, UserRole, VulnerabilityStatus
 from app.reports import ReportKind, build_pp, build_szi
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError
 from app.models import (
@@ -124,9 +124,9 @@ class AuditService:
         self,
         action: str,
         *,
-        user_id: UUID | None = None,
+        user_id: int | None = None,
         entity_type: str | None = None,
-        entity_id: UUID | None = None,
+        entity_id: int | None = None,
         details: dict | None = None,
         ip_address: str | None = None,
     ) -> None:
@@ -155,14 +155,14 @@ class AgentTokenService:
         self.db = db
         self.audit = AuditService(db)
 
-    async def _project_ids_for_token(self, token_id: UUID) -> list[UUID]:
+    async def _project_ids_for_token(self, token_id: int) -> list[int]:
         rows = await self.db.scalars(
             select(AgentApiTokenProjectGrant.project_id).where(AgentApiTokenProjectGrant.token_id == token_id)
         )
         return list(rows.all())
 
     @staticmethod
-    def _serialize_token(token: AgentApiToken, project_ids: list[UUID]) -> dict:
+    def _serialize_token(token: AgentApiToken, project_ids: list[int]) -> dict:
         """Сериализует AgentApiToken в dict со всеми полями (включая nullable, отсутствующие в __dict__)."""
         return {
             "id": token.id,
@@ -186,7 +186,7 @@ class AgentTokenService:
             result.append(self._serialize_token(token, await self._project_ids_for_token(token.id)))
         return result
 
-    async def create_token(self, payload: dict, actor_id: UUID) -> tuple[dict, str]:
+    async def create_token(self, payload: dict, actor_id: int) -> tuple[dict, str]:
         raw_token = f"pcf_v2_{secrets.token_urlsafe(32)}"
         token = AgentApiToken(
             name=payload["name"],
@@ -207,7 +207,7 @@ class AgentTokenService:
         await self.audit.log("CREATE", user_id=actor_id, entity_type="agent_api_token", entity_id=token.id)
         return self._serialize_token(token, await self._project_ids_for_token(token.id)), raw_token
 
-    async def revoke_token(self, token_id: UUID, actor_id: UUID) -> None:
+    async def revoke_token(self, token_id: int, actor_id: int) -> None:
         token = await self.db.scalar(select(AgentApiToken).where(AgentApiToken.id == token_id))
         if not token:
             raise NotFoundError("Agent API token не найден")
@@ -313,7 +313,7 @@ class JiraIntegrationService:
     async def get_config(self) -> JiraInstance | None:
         return await self.db.scalar(select(JiraInstance).order_by(JiraInstance.created_at.desc()))
 
-    async def upsert_config(self, payload: dict, actor_id: UUID) -> JiraInstance:
+    async def upsert_config(self, payload: dict, actor_id: int) -> JiraInstance:
         config = await self.get_config()
         token = payload.pop("api_token", None)
         if not config:
@@ -343,7 +343,7 @@ class JiraIntegrationService:
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="jira_config", entity_id=config.id)
         return config
 
-    async def upsert_project_link(self, project_id: UUID, jira_project_key: str, actor_id: UUID) -> ProjectJiraLink:
+    async def upsert_project_link(self, project_id: int, jira_project_key: str, actor_id: int) -> ProjectJiraLink:
         project = await self.db.scalar(select(Project).where(Project.id == project_id))
         if not project:
             raise NotFoundError("Проект не найден")
@@ -358,7 +358,7 @@ class JiraIntegrationService:
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="project_jira_link", entity_id=link.id)
         return link
 
-    async def get_project_link(self, project_id: UUID) -> ProjectJiraLink | None:
+    async def get_project_link(self, project_id: int) -> ProjectJiraLink | None:
         return await self.db.scalar(select(ProjectJiraLink).where(ProjectJiraLink.project_id == project_id))
 
     @staticmethod
@@ -369,10 +369,10 @@ class JiraIntegrationService:
             "content": [{"type": "paragraph", "content": [{"type": "text", "text": text[:30000]}]}],
         }
 
-    async def get_issue_link(self, vulnerability_id: UUID) -> JiraIssueLink | None:
+    async def get_issue_link(self, vulnerability_id: int) -> JiraIssueLink | None:
         return await self.db.scalar(select(JiraIssueLink).where(JiraIssueLink.vulnerability_id == vulnerability_id))
 
-    async def _claim_issue_link(self, vuln_id: UUID) -> tuple[JiraIssueLink, bool]:
+    async def _claim_issue_link(self, vuln_id: int) -> tuple[JiraIssueLink, bool]:
         """Бронирует JiraIssueLink с status='pending' перед HTTP-вызовом.
 
         Возвращает (link, created). Если параллельный запрос уже забронировал
@@ -406,7 +406,7 @@ class JiraIntegrationService:
         link.last_error = error[:500]
         await self.db.commit()
 
-    async def export_vulnerability(self, project_id: UUID, vuln_id: UUID, actor_id: UUID) -> JiraIssueLink:
+    async def export_vulnerability(self, project_id: int, vuln_id: int, actor_id: int) -> JiraIssueLink:
         config = await self.get_config()
         if not config or not config.is_enabled:
             raise ValidationError("Jira не настроена или отключена")
@@ -523,10 +523,10 @@ class AuthService:
         await self.audit.log("LOGIN", user_id=user.id, ip_address=ip_address)
         return access_token, refresh_token, user
 
-    async def refresh(self, refresh_token: str | None, ip_address: str | None = None) -> tuple[str, str, bool]:
+    async def refresh(self, refresh_token: str | None, ip_address: str | None = None) -> tuple[str, str]:
         """Обновляет access-токен по валидному refresh-cookie с ротацией refresh-токена.
 
-        Возвращает (new_access_token, new_refresh_token, must_change_password).
+        Возвращает (new_access_token, new_refresh_token).
         Старый refresh-токен помечается как revoked. Если приходит уже отозванный токен —
         отзываем все активные токены пользователя как защиту от token reuse / replay-атаки.
         """
@@ -564,9 +564,9 @@ class AuthService:
         new_expires_at = now + timedelta(days=settings.jwt_refresh_token_expire_days)
         self.db.add(RefreshToken(user_id=user_id, token_hash=hash_refresh_token(new_refresh), expires_at=new_expires_at))
         await self.db.commit()
-        return new_access, new_refresh, user.must_change_password
+        return new_access, new_refresh
 
-    async def logout(self, user_id: UUID, ip_address: str | None = None) -> None:
+    async def logout(self, user_id: int, ip_address: str | None = None) -> None:
         """Отзывает все активные refresh-токены пользователя."""
         await self.db.execute(
             update(RefreshToken)
@@ -603,7 +603,7 @@ class UserService:
             raise ValidationError("Отправка email отключена. Включите SMTP/mail worker или задайте пароль вручную.")
 
     @staticmethod
-    def ensure_can_view_avatar(requester: User, target_user_id: UUID) -> None:
+    def ensure_can_view_avatar(requester: User, target_user_id: int) -> None:
         if requester.role != UserRole.ADMIN and requester.id != target_user_id:
             raise ForbiddenError("Недостаточно прав для просмотра чужого аватара")
 
@@ -612,7 +612,7 @@ class UserService:
         *,
         username: str | None = None,
         email: str | None = None,
-        exclude_user_id: UUID | None = None,
+        exclude_user_id: int | None = None,
     ) -> None:
         clauses = []
         if username:
@@ -633,7 +633,7 @@ class UserService:
         *,
         user: User,
         temporary_password: str,
-        actor_id: UUID | None,
+        actor_id: int | None,
     ) -> MailJob:
         subject, body = build_temporary_password_email(username=user.full_name or user.username, temporary_password=temporary_password)
         job = MailJob(
@@ -660,7 +660,7 @@ class UserService:
             job.published_at = datetime.now(UTC)
         await self.db.commit()
 
-    async def get_user_profile(self, user_id: UUID) -> User:
+    async def get_user_profile(self, user_id: int) -> User:
         return await self.get_user(user_id)
 
     async def bootstrap_admin(self) -> None:
@@ -681,15 +681,12 @@ class UserService:
                 admin_user.email = normalized_email
                 await self.db.commit()
             return
-        weak_default = settings.initial_admin_password.strip().lower() in {"admin", "password", "12345678"}
-        must_change = weak_default
         admin = User(
             username=settings.initial_admin_username,
             email=normalized_email,
             full_name="Administrator",
             password_hash=hash_password(settings.initial_admin_password),
-            must_change_password=must_change,
-            password_changed_at=None if must_change else datetime.now(UTC),
+            password_changed_at=datetime.now(UTC),
             role=UserRole.ADMIN,
             is_active=True,
         )
@@ -704,14 +701,14 @@ class UserService:
         ).all()
         return list(items), total
 
-    async def get_user(self, user_id: UUID) -> User:
+    async def get_user(self, user_id: int) -> User:
         """Возвращает пользователя по идентификатору."""
         user = await self.db.scalar(select(User).where(User.id == user_id))
         if not user:
             raise NotFoundError("Пользователь не найден")
         return user
 
-    async def create_user(self, payload: dict, actor_id: UUID, ip_address: str | None = None) -> User:
+    async def create_user(self, payload: dict, actor_id: int, ip_address: str | None = None) -> User:
         """Создаёт нового пользователя."""
         await self._ensure_unique_identity(username=payload["username"], email=payload["email"])
         send_invite_email = bool(payload.get("send_invite_email"))
@@ -720,19 +717,16 @@ class UserService:
             self._ensure_mail_delivery_enabled()
         if not temporary_password and not send_invite_email:
             raise ValidationError("Нужно указать пароль или включить отправку приглашения на email")
-        generated_password = False
         if not temporary_password:
             temporary_password = self._generate_temporary_password()
-            generated_password = True
-        must_change_password = send_invite_email or generated_password
         user = User(
             username=payload["username"],
             email=payload["email"],
             full_name=payload.get("full_name"),
             password_hash=hash_password(temporary_password),
-            must_change_password=must_change_password,
-            password_changed_at=None if must_change_password else datetime.now(UTC),
+            password_changed_at=datetime.now(UTC),
             role=payload.get("role", UserRole.PENTESTER),
+            project_role=payload.get("project_role", ProjectRole.PENTESTER),
             is_active=True,
         )
         self.db.add(user)
@@ -747,14 +741,14 @@ class UserService:
             user_id=actor_id,
             entity_type="user",
             entity_id=user.id,
-            details={"email": user.email, "invite_sent": send_invite_email, "must_change_password": must_change_password},
+            details={"email": user.email, "invite_sent": send_invite_email},
             ip_address=ip_address,
         )
         if mail_job:
             await self._publish_mail_job(mail_job)
         return user
 
-    async def update_user(self, user_id: UUID, payload: dict, actor_id: UUID, ip_address: str | None = None) -> User:
+    async def update_user(self, user_id: int, payload: dict, actor_id: int, ip_address: str | None = None) -> User:
         """Обновляет данные пользователя."""
         user = await self.get_user(user_id)
         submitted_email = payload.pop("email", None)
@@ -770,7 +764,7 @@ class UserService:
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="user", entity_id=user.id, ip_address=ip_address)
         return user
 
-    async def update_own_profile(self, user_id: UUID, payload: dict, ip_address: str | None = None) -> User:
+    async def update_own_profile(self, user_id: int, payload: dict, ip_address: str | None = None) -> User:
         user = await self.get_user(user_id)
         username = payload.get("username", user.username)
         email = payload.get("email", user.email)
@@ -783,7 +777,7 @@ class UserService:
         await self.audit.log("UPDATE", user_id=user_id, entity_type="user_profile", entity_id=user.id, ip_address=ip_address)
         return user
 
-    async def delete_user(self, user_id: UUID, actor_id: UUID, ip_address: str | None = None) -> None:
+    async def delete_user(self, user_id: int, actor_id: int, ip_address: str | None = None) -> None:
         """Удаляет пользователя."""
         if user_id == actor_id:
             raise ValidationError("Нельзя удалить самого себя")
@@ -792,13 +786,12 @@ class UserService:
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="user", entity_id=user_id, ip_address=ip_address)
 
-    async def reset_password(self, user_id: UUID, actor_id: UUID, ip_address: str | None = None) -> User:
+    async def reset_password(self, user_id: int, actor_id: int, ip_address: str | None = None) -> User:
         """Сбрасывает пароль пользователя, выставляет временный пароль и отправляет его по почте."""
         self._ensure_mail_delivery_enabled()
         user = await self.get_user(user_id)
         temporary_password = self._generate_temporary_password()
         user.password_hash = hash_password(temporary_password)
-        user.must_change_password = True
         user.password_changed_at = None
         await self.db.execute(
             update(RefreshToken)
@@ -812,7 +805,7 @@ class UserService:
             user_id=actor_id,
             entity_type="user_password_reset",
             entity_id=user_id,
-            details={"email": user.email, "must_change_password": True},
+            details={"email": user.email},
             ip_address=ip_address,
         )
         await self._publish_mail_job(mail_job)
@@ -820,7 +813,7 @@ class UserService:
 
     async def change_own_password(
         self,
-        user_id: UUID,
+        user_id: int,
         *,
         current_password: str,
         new_password: str,
@@ -830,7 +823,6 @@ class UserService:
         if not verify_password(current_password, user.password_hash):
             raise UnauthorizedError("Текущий пароль указан неверно")
         user.password_hash = hash_password(new_password)
-        user.must_change_password = False
         user.password_changed_at = datetime.now(UTC)
         await self.db.execute(
             update(RefreshToken)
@@ -842,30 +834,7 @@ class UserService:
         await self.db.refresh(user)
         return user
 
-    async def force_change_password(self, user_id: UUID, *, new_password: str, ip_address: str | None = None) -> User:
-        user = await self.get_user(user_id)
-        if not user.must_change_password:
-            raise ForbiddenError("Принудительная смена пароля не требуется")
-        user.password_hash = hash_password(new_password)
-        user.must_change_password = False
-        user.password_changed_at = datetime.now(UTC)
-        await self.db.execute(
-            update(RefreshToken)
-            .where(and_(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)))
-            .values(revoked_at=datetime.now(UTC))
-        )
-        await self.db.commit()
-        await self.audit.log(
-            "UPDATE",
-            user_id=user.id,
-            entity_type="user_force_password_change",
-            entity_id=user.id,
-            ip_address=ip_address,
-        )
-        await self.db.refresh(user)
-        return user
-
-    async def upload_avatar(self, user_id: UUID, upload: UploadFile, ip_address: str | None = None) -> User:
+    async def upload_avatar(self, user_id: int, upload: UploadFile, ip_address: str | None = None) -> User:
         user = await self.get_user(user_id)
         content = await upload.read()
         if len(content) > 5 * 1024 * 1024:
@@ -886,7 +855,7 @@ class UserService:
         await self.audit.log("FILE_UPLOAD", user_id=user.id, entity_type="user_avatar", entity_id=user.id, ip_address=ip_address)
         return user
 
-    async def download_avatar(self, user_id: UUID) -> tuple[User, bytes]:
+    async def download_avatar(self, user_id: int) -> tuple[User, bytes]:
         user = await self.get_user(user_id)
         if not user.avatar_minio_key:
             raise NotFoundError("Аватар не найден")
@@ -932,14 +901,14 @@ class ProjectService:
         items = (await self.db.scalars(query.order_by(Project.created_at.desc()).offset((page - 1) * size).limit(size))).all()
         return list(items), total
 
-    async def get_project(self, project_id: UUID) -> Project:
+    async def get_project(self, project_id: int) -> Project:
         """Возвращает проект по ID."""
         project = await self.db.scalar(select(Project).where(Project.id == project_id))
         if not project:
             raise NotFoundError("Проект не найден")
         return project
 
-    async def create_project(self, payload: dict, actor_id: UUID, ip_address: str | None = None) -> Project:
+    async def create_project(self, payload: dict, actor_id: int, ip_address: str | None = None) -> Project:
         """Создаёт новый проект."""
         self._validate_project_dates(payload.get("start_date"), payload.get("end_date"))
         payload["folder"] = self._normalize_project_folder(payload.get("folder"))
@@ -953,7 +922,7 @@ class ProjectService:
         )
         return project
 
-    async def update_project(self, project_id: UUID, payload: dict, actor_id: UUID, ip_address: str | None = None) -> Project:
+    async def update_project(self, project_id: int, payload: dict, actor_id: int, ip_address: str | None = None) -> Project:
         """Обновляет проект."""
         project = await self.get_project(project_id)
         if "folder" in payload:
@@ -991,9 +960,49 @@ class ProjectService:
                 details={"old_status": old_status.value, "new_status": project.status.value},
                 ip_address=ip_address,
             )
+            await self._notify_project_status_changed(project, actor_id)
         return project
 
-    async def delete_project(self, project_id: UUID, actor_id: UUID, ip_address: str | None = None) -> None:
+    async def _notify_project_status_changed(self, project: Project, actor_id: int) -> None:
+        """Повод №4: статус проекта изменился — сообщаем его участникам.
+
+        Кроме того, кто менял: он и так знает.
+        """
+        member_ids = list(
+            (await self.db.scalars(select(ProjectMember.user_id).where(ProjectMember.project_id == project.id))).all()
+        )
+        recipients = [uid for uid in member_ids if uid != actor_id]
+        if not recipients:
+            return
+        status_value = getattr(project.status, "value", project.status)
+        for user_id in recipients:
+            self.db.add(
+                Notification(
+                    user_id=user_id,
+                    type=NotificationType.PROJECT_STATUS_CHANGED,
+                    project_id=project.id,
+                    actor_id=actor_id,
+                    status=status_value,
+                    is_read=False,
+                )
+            )
+        await self.db.commit()
+        for user_id in recipients:
+            await ws_manager.notify_user(
+                user_id,
+                {
+                    "event": "notification",
+                    "entity": "notification",
+                    "data": {
+                        "type": NotificationType.PROJECT_STATUS_CHANGED.value,
+                        "is_read": False,
+                        "project_id": str(project.id),
+                        "status": status_value,
+                    },
+                },
+            )
+
+    async def delete_project(self, project_id: int, actor_id: int, ip_address: str | None = None) -> None:
         """Удаляет проект и связанные сущности."""
         project = await self.get_project(project_id)
         await self.db.delete(project)
@@ -1004,7 +1013,57 @@ class ProjectService:
             {"event": "deleted", "entity": "project", "project_id": str(project_id), "data": {"id": str(project_id)}}
         )
 
-    async def list_members(self, project_id: UUID) -> list[dict]:
+    async def list_project_stats(self, current_user: User) -> list[dict]:
+        """Счётчики по каждому доступному проекту одним запросом.
+
+        Возвращает hosts_count / open_findings / total_findings + статус, чтобы
+        UI мог агрегировать по вкладке (активные/архивные) без N+1 запросов.
+        Видимость та же, что и у списка проектов: не-админ видит только свои.
+        """
+        hosts_sq = (
+            select(Host.project_id.label("project_id"), func.count().label("hosts_count"))
+            .group_by(Host.project_id)
+            .subquery()
+        )
+        vulns_sq = (
+            select(
+                Vulnerability.project_id.label("project_id"),
+                func.count().label("total_findings"),
+                func.count()
+                .filter(Vulnerability.status.in_((VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS)))
+                .label("open_findings"),
+            )
+            .group_by(Vulnerability.project_id)
+            .subquery()
+        )
+        stmt = (
+            select(
+                Project.id,
+                Project.status,
+                func.coalesce(hosts_sq.c.hosts_count, 0),
+                func.coalesce(vulns_sq.c.total_findings, 0),
+                func.coalesce(vulns_sq.c.open_findings, 0),
+            )
+            .outerjoin(hosts_sq, hosts_sq.c.project_id == Project.id)
+            .outerjoin(vulns_sq, vulns_sq.c.project_id == Project.id)
+        )
+        if current_user.role != UserRole.ADMIN:
+            stmt = stmt.join(ProjectMember, ProjectMember.project_id == Project.id).where(
+                ProjectMember.user_id == current_user.id
+            )
+        rows = (await self.db.execute(stmt)).all()
+        return [
+            {
+                "project_id": project_id,
+                "status": getattr(status, "value", status),
+                "hosts_count": hosts_count,
+                "total_findings": total_findings,
+                "open_findings": open_findings,
+            }
+            for project_id, status, hosts_count, total_findings, open_findings in rows
+        ]
+
+    async def list_members(self, project_id: int) -> list[dict]:
         """Возвращает список участников проекта."""
         rows = (
             await self.db.execute(
@@ -1020,12 +1079,47 @@ class ProjectService:
                 "username": user.username,
                 "email": user.email,
                 "role": user.role,
+                "project_role": user.project_role,
                 "added_at": member.added_at,
             }
             for member, user in rows
         ]
 
-    async def add_member(self, project_id: UUID, user_id: UUID, actor_id: UUID, ip_address: str | None = None) -> dict:
+    async def _is_project_manager(self, project: Project, actor: User) -> bool:
+        """Админ, создатель проекта или лид-участник.
+
+        Роль лида глобальная (User.project_role), но возможности она открывает
+        только внутри проектов, где пользователь действительно состоит.
+        """
+        if actor.role == UserRole.ADMIN or project.created_by == actor.id:
+            return True
+        if actor.project_role == ProjectRole.LEAD:
+            membership = await self.db.scalar(
+                select(ProjectMember).where(
+                    and_(ProjectMember.project_id == project.id, ProjectMember.user_id == actor.id)
+                )
+            )
+            return membership is not None
+        return False
+
+    async def ensure_can_manage_members(self, project_id: int, actor: User) -> Project:
+        """Составом команды управляют: админ, создатель проекта или лид-участник."""
+        project = await self.get_project(project_id)
+        if await self._is_project_manager(project, actor):
+            return project
+        raise ForbiddenError("Управлять участниками может админ, лид проекта или его создатель")
+
+    async def ensure_can_edit_project(self, project_id: int, actor: User) -> Project:
+        """Карточку проекта (название/описание/сроки) правят те же роли, что и состав команды.
+
+        Удаление проекта при этом остаётся строго за админом.
+        """
+        project = await self.get_project(project_id)
+        if await self._is_project_manager(project, actor):
+            return project
+        raise ForbiddenError("Изменять проект может админ, лид проекта или его создатель")
+
+    async def add_member(self, project_id: int, user_id: int, actor_id: int, ip_address: str | None = None) -> dict:
         """Добавляет пользователя в участники проекта."""
         await self.get_project(project_id)
         user = await self.db.scalar(select(User).where(User.id == user_id))
@@ -1038,28 +1132,137 @@ class ProjectService:
             raise ConflictError("Пользователь уже участник проекта")
         member = ProjectMember(project_id=project_id, user_id=user_id)
         self.db.add(member)
+        # Повод №2: человека добавили в проект — он об этом узнаёт.
+        # Себя добавивший не уведомляем.
+        if user_id != actor_id:
+            self.db.add(
+                Notification(
+                    user_id=user_id,
+                    type=NotificationType.PROJECT_MEMBER_ADDED,
+                    project_id=project_id,
+                    actor_id=actor_id,
+                    is_read=False,
+                )
+            )
         await self.db.commit()
         await self.db.refresh(member)
-        await self.audit.log("CREATE", user_id=actor_id, entity_type="project_member", entity_id=member.id, ip_address=ip_address)
-        return {"user_id": user.id, "username": user.username, "added_at": member.added_at}
+        await self.audit.log(
+            "CREATE",
+            user_id=actor_id,
+            entity_type="project_member",
+            entity_id=member.id,
+            details={"project_id": str(project_id), "username": user.username},
+            ip_address=ip_address,
+        )
+        if user_id != actor_id:
+            await ws_manager.notify_user(
+                user_id,
+                {
+                    "event": "notification",
+                    "entity": "notification",
+                    "data": {"type": NotificationType.PROJECT_MEMBER_ADDED.value, "is_read": False, "project_id": str(project_id)},
+                },
+            )
+        return {
+            "user_id": user.id,
+            "username": user.username,
+            "project_role": user.project_role,
+            "added_at": member.added_at,
+        }
 
-    async def remove_member(self, project_id: UUID, user_id: UUID, actor_id: UUID, ip_address: str | None = None) -> None:
+    async def remove_member(self, project_id: int, user_id: int, actor_id: int, ip_address: str | None = None) -> None:
         """Удаляет пользователя из участников проекта."""
         member = await self.db.scalar(
             select(ProjectMember).where(and_(ProjectMember.project_id == project_id, ProjectMember.user_id == user_id))
         )
         if not member:
             raise NotFoundError("Участник не найден")
+        # Имя забираем до удаления: entity_id у записи — это id строки
+        # project_members, по нему потом никого не найти, а сама связь исчезнет.
+        # Без username в активности осталось бы «удалил участника #17».
+        username = await self.db.scalar(select(User.username).where(User.id == user_id))
         await self.db.delete(member)
         await self.db.commit()
-        await self.audit.log("DELETE", user_id=actor_id, entity_type="project_member", entity_id=member.id, ip_address=ip_address)
+        await self.audit.log(
+            "DELETE",
+            user_id=actor_id,
+            entity_type="project_member",
+            entity_id=member.id,
+            details={"project_id": str(project_id), "user_id": str(user_id), "username": username},
+            ip_address=ip_address,
+        )
+
+    async def list_project_activity(self, project_id: int, limit: int = 50) -> list[dict]:
+        """Активность проекта: события по всем его сущностям.
+
+        Доступна любому участнику проекта (в отличие от глобального журнала
+        `/audit-logs`, который остаётся админским). Скоуп собирается по
+        entity_id каждой сущности проекта + fallback на details.project_id.
+        """
+        await self.get_project(project_id)
+
+        host_ids = select(Host.id).where(Host.project_id == project_id)
+        scope = or_(
+            and_(AuditLog.entity_type == "project", AuditLog.entity_id == project_id),
+            and_(AuditLog.entity_type == "vulnerability", AuditLog.entity_id.in_(select(Vulnerability.id).where(Vulnerability.project_id == project_id))),
+            and_(AuditLog.entity_type == "host", AuditLog.entity_id.in_(host_ids)),
+            and_(AuditLog.entity_type == "port", AuditLog.entity_id.in_(select(Port.id).where(Port.host_id.in_(host_ids)))),
+            and_(
+                AuditLog.entity_type == "service",
+                AuditLog.entity_id.in_(select(Service.id).where(Service.port_id.in_(select(Port.id).where(Port.host_id.in_(host_ids))))),
+            ),
+            and_(AuditLog.entity_type == "endpoint", AuditLog.entity_id.in_(select(Endpoint.id).where(Endpoint.host_id.in_(host_ids)))),
+            and_(AuditLog.entity_type == "project_note", AuditLog.entity_id.in_(select(ProjectNote.id).where(ProjectNote.project_id == project_id))),
+            and_(AuditLog.entity_type == "project_member", AuditLog.entity_id.in_(select(ProjectMember.id).where(ProjectMember.project_id == project_id))),
+            AuditLog.details["project_id"].as_string() == str(project_id),
+        )
+        stmt = (
+            select(AuditLog, User.username)
+            .outerjoin(User, User.id == AuditLog.user_id)
+            .where(AuditLog.entity_type.is_not(None))
+            .where(scope)
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+        )
+        rows = (await self.db.execute(stmt)).all()
+
+        # Уязвимости обогащаем названием/severity и ссылкой на карточку.
+        vuln_ids = [entry.entity_id for entry, _ in rows if entry.entity_type == "vulnerability" and entry.entity_id]
+        vulns_by_id: dict[int, Vulnerability] = {}
+        if vuln_ids:
+            vulns_by_id = {
+                v.id: v for v in (await self.db.scalars(select(Vulnerability).where(Vulnerability.id.in_(vuln_ids)))).all()
+            }
+
+        out: list[dict] = []
+        for entry, username in rows:
+            item: dict = {
+                "id": entry.id,
+                "action": entry.action,
+                "entity_type": entry.entity_type,
+                "entity_id": entry.entity_id,
+                "user_id": entry.user_id,
+                "username": username,
+                "title": None,
+                "severity": None,
+                "url": None,
+                "details": entry.details,
+                "created_at": entry.created_at.isoformat() if entry.created_at else None,
+            }
+            vuln = vulns_by_id.get(entry.entity_id) if entry.entity_type == "vulnerability" else None
+            if vuln is not None:
+                item["title"] = vuln.title
+                item["severity"] = getattr(vuln.severity, "value", vuln.severity)
+                item["url"] = f"/projects/{project_id}/vulns/{vuln.id}"
+            out.append(item)
+        return out
 
     async def list_folders(self) -> list[ProjectFolder]:
         """Возвращает список папок проектов."""
         rows = await self.db.scalars(select(ProjectFolder).order_by(ProjectFolder.path.asc()))
         return list(rows.all())
 
-    async def create_folder(self, name: str, parent_id: UUID | None, actor_id: UUID, ip_address: str | None = None) -> ProjectFolder:
+    async def create_folder(self, name: str, parent_id: int | None, actor_id: int, ip_address: str | None = None) -> ProjectFolder:
         """Создаёт новую папку проекта (в т.ч. вложенную)."""
         segment = self._normalize_folder_segment(name)
         parent: ProjectFolder | None = None
@@ -1082,7 +1285,7 @@ class ProjectService:
         return folder
 
     async def move_folder(
-        self, folder_id: UUID, new_parent_id: UUID | None, actor_id: UUID, ip_address: str | None = None
+        self, folder_id: int, new_parent_id: int | None, actor_id: int, ip_address: str | None = None
     ) -> ProjectFolder:
         """Перемещает папку и пересчитывает пути дочерних папок и проектов."""
         folder = await self.db.scalar(select(ProjectFolder).where(ProjectFolder.id == folder_id))
@@ -1154,7 +1357,7 @@ class ProjectService:
         )
         return folder
 
-    async def delete_folder(self, folder_id: UUID, actor_id: UUID, ip_address: str | None = None) -> dict:
+    async def delete_folder(self, folder_id: int, actor_id: int, ip_address: str | None = None) -> dict:
         """Каскадно удаляет папку, все её подпапки и все проекты внутри.
 
         Возвращает счётчики удалённых сущностей для аудита.
@@ -1416,10 +1619,10 @@ class AssetService:
         if not endpoint.request_headers and endpoint_payload.get("request_headers"):
             endpoint.request_headers = endpoint_payload["request_headers"]
 
-    async def _get_host(self, project_id: UUID, host_id: UUID) -> Host:
+    async def _get_host(self, project_id: int, host_id: int) -> Host:
         host = await self.db.scalar(
             select(Host)
-            .options(selectinload(Host.ip_addresses).selectinload(HostIpAddress.ports))
+            .options(selectinload(Host.ip_addresses).selectinload(HostIpAddress.ports).selectinload(Port.services))
             .where(and_(Host.id == host_id, Host.project_id == project_id))
         )
         if not host:
@@ -1505,19 +1708,19 @@ class AssetService:
         )
         set_committed_value(host, "ip_addresses", result_rows)
 
-    async def _get_port(self, host_id: UUID, port_id: UUID) -> Port:
+    async def _get_port(self, host_id: int, port_id: int) -> Port:
         port = await self.db.scalar(select(Port).where(and_(Port.id == port_id, Port.host_id == host_id)))
         if not port:
             raise NotFoundError("Порт не найден")
         return port
 
-    async def list_hosts(self, project_id: UUID, page: int, size: int, status: str | None) -> tuple[list[Host], int]:
+    async def list_hosts(self, project_id: int, page: int, size: int, status: str | None) -> tuple[list[Host], int]:
         base_query = select(Host).where(Host.project_id == project_id)
         if status:
             base_query = base_query.where(Host.status == status)
         total = await self.db.scalar(select(func.count()).select_from(base_query.subquery())) or 0
         items_query = (
-            base_query.options(selectinload(Host.ip_addresses).selectinload(HostIpAddress.ports))
+            base_query.options(selectinload(Host.ip_addresses).selectinload(HostIpAddress.ports).selectinload(Port.services))
             .order_by(Host.created_at.desc())
             .offset((page - 1) * size)
             .limit(size)
@@ -1525,18 +1728,22 @@ class AssetService:
         items = (await self.db.scalars(items_query)).all()
         return list(items), total
 
-    async def create_host(self, project_id: UUID, payload: dict, actor_id: UUID) -> Host:
+    async def create_host(self, project_id: int, payload: dict, actor_id: int) -> Host:
         ip_entries = self._normalize_host_ip_entries(payload.pop("ip_address", None), payload.pop("ip_addresses", None))
         host = Host(project_id=project_id, ip_address=ip_entries[0]["ip_address"] if ip_entries else None, **payload)
         self.db.add(host)
         await self.db.flush()
+        # Хост только что создан — коллекция IP пуста; проставляем её явно, чтобы
+        # _replace_host_ip_addresses не пытался лениво подгрузить связь вне greenlet
+        # (async SQLAlchemy: ленивый lazy-load здесь падает с MissingGreenlet).
+        set_committed_value(host, "ip_addresses", [])
         await self._replace_host_ip_addresses(host, ip_entries)
         await self.db.commit()
         await self.audit.log("CREATE", user_id=actor_id, entity_type="host", entity_id=host.id)
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
         return await self._get_host(project_id, host.id)
 
-    async def get_host(self, project_id: UUID, host_id: UUID) -> dict:
+    async def get_host(self, project_id: int, host_id: int) -> dict:
         host = await self._get_host(project_id, host_id)
         endpoints = (await self.db.scalars(select(Endpoint).where(Endpoint.host_id == host.id))).all()
         return {
@@ -1558,6 +1765,18 @@ class AssetService:
                             "port_number": port.port_number,
                             "protocol": port.protocol,
                             "state": port.state,
+                            "services": [
+                                {
+                                    "id": svc.id,
+                                    "port_id": svc.port_id,
+                                    "name": svc.name,
+                                    "version": svc.version,
+                                    "banner": svc.banner,
+                                    "created_at": svc.created_at,
+                                    "updated_at": svc.updated_at,
+                                }
+                                for svc in port.services
+                            ],
                             "created_at": port.created_at,
                             "updated_at": port.updated_at,
                         }
@@ -1592,7 +1811,7 @@ class AssetService:
             ],
         }
 
-    async def update_host(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Host:
+    async def update_host(self, project_id: int, host_id: int, payload: dict, actor_id: int) -> Host:
         host = await self._get_host(project_id, host_id)
         has_ip_payload = "ip_addresses" in payload or "ip_address" in payload
         raw_ip_entries = payload.pop("ip_addresses", None)
@@ -1610,20 +1829,22 @@ class AssetService:
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
         return await self._get_host(project_id, host.id)
 
-    async def delete_host(self, project_id: UUID, host_id: UUID, actor_id: UUID) -> None:
+    async def delete_host(self, project_id: int, host_id: int, actor_id: int) -> None:
         host = await self._get_host(project_id, host_id)
+        # Имя фиксируем до удаления: после него в активности остался бы «#12».
+        details = {"project_id": str(project_id), "hostname": host.hostname, "ip_address": host.ip_address}
         await self.db.delete(host)
         await self.db.commit()
-        await self.audit.log("DELETE", user_id=actor_id, entity_type="host", entity_id=host.id)
+        await self.audit.log("DELETE", user_id=actor_id, entity_type="host", entity_id=host.id, details=details)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
 
-    async def list_ports(self, host_id: UUID, ip_address_id: UUID | None = None) -> list[Port]:
+    async def list_ports(self, host_id: int, ip_address_id: int | None = None) -> list[Port]:
         query = select(Port).where(Port.host_id == host_id).order_by(Port.port_number)
         if ip_address_id is not None:
             query = query.where(Port.ip_address_id == ip_address_id)
         return list((await self.db.scalars(query)).all())
 
-    async def _get_host_ip(self, host_id: UUID, ip_address_id: UUID) -> HostIpAddress:
+    async def _get_host_ip(self, host_id: int, ip_address_id: int) -> HostIpAddress:
         ip = await self.db.scalar(
             select(HostIpAddress).where(
                 and_(HostIpAddress.id == ip_address_id, HostIpAddress.host_id == host_id)
@@ -1633,7 +1854,7 @@ class AssetService:
             raise ValidationError("IP-адрес не принадлежит указанному хосту")
         return ip
 
-    async def create_port(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Port:
+    async def create_port(self, project_id: int, host_id: int, payload: dict, actor_id: int) -> Port:
         await self._get_host(project_id, host_id)
         ip_address_id = payload["ip_address_id"]
         await self._get_host_ip(host_id, ip_address_id)
@@ -1656,10 +1877,10 @@ class AssetService:
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "port", "project_id": str(project_id), "data": {"id": str(port.id)}})
         return port
 
-    async def get_port(self, host_id: UUID, port_id: UUID) -> Port:
+    async def get_port(self, host_id: int, port_id: int) -> Port:
         return await self._get_port(host_id, port_id)
 
-    async def update_port(self, project_id: UUID, host_id: UUID, port_id: UUID, payload: dict, actor_id: UUID) -> Port:
+    async def update_port(self, project_id: int, host_id: int, port_id: int, payload: dict, actor_id: int) -> Port:
         port = await self._get_port(host_id, port_id)
         next_port_number = payload.get("port_number", port.port_number)
         next_protocol = payload.get("protocol", port.protocol)
@@ -1687,17 +1908,17 @@ class AssetService:
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "port", "project_id": str(project_id), "data": {"id": str(port.id)}})
         return port
 
-    async def delete_port(self, project_id: UUID, host_id: UUID, port_id: UUID, actor_id: UUID) -> None:
+    async def delete_port(self, project_id: int, host_id: int, port_id: int, actor_id: int) -> None:
         port = await self._get_port(host_id, port_id)
         await self.db.delete(port)
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="port", entity_id=port.id)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "port", "project_id": str(project_id), "data": {"id": str(port.id)}})
 
-    async def list_services(self, port_id: UUID) -> list[Service]:
+    async def list_services(self, port_id: int) -> list[Service]:
         return list((await self.db.scalars(select(Service).where(Service.port_id == port_id).order_by(Service.created_at.desc()))).all())
 
-    async def create_service(self, project_id: UUID, host_id: UUID, port_id: UUID, payload: dict, actor_id: UUID) -> Service:
+    async def create_service(self, project_id: int, host_id: int, port_id: int, payload: dict, actor_id: int) -> Service:
         await self._get_host(project_id, host_id)
         await self._get_port(host_id, port_id)
         service = Service(port_id=port_id, **payload)
@@ -1709,7 +1930,7 @@ class AssetService:
         return service
 
     async def update_service(
-        self, project_id: UUID, host_id: UUID, port_id: UUID, service_id: UUID, payload: dict, actor_id: UUID
+        self, project_id: int, host_id: int, port_id: int, service_id: int, payload: dict, actor_id: int
     ) -> Service:
         await self._get_host(project_id, host_id)
         await self._get_port(host_id, port_id)
@@ -1725,7 +1946,7 @@ class AssetService:
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "service", "project_id": str(project_id), "data": {"id": str(service.id)}})
         return service
 
-    async def delete_service(self, project_id: UUID, port_id: UUID, service_id: UUID, actor_id: UUID) -> None:
+    async def delete_service(self, project_id: int, port_id: int, service_id: int, actor_id: int) -> None:
         service = await self.db.scalar(select(Service).where(and_(Service.id == service_id, Service.port_id == port_id)))
         if not service:
             raise NotFoundError("Сервис не найден")
@@ -1734,10 +1955,10 @@ class AssetService:
         await self.audit.log("DELETE", user_id=actor_id, entity_type="service", entity_id=service.id)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "service", "project_id": str(project_id), "data": {"id": str(service.id)}})
 
-    async def list_endpoints(self, host_id: UUID) -> list[Endpoint]:
+    async def list_endpoints(self, host_id: int) -> list[Endpoint]:
         return list((await self.db.scalars(select(Endpoint).where(Endpoint.host_id == host_id).order_by(Endpoint.created_at.desc()))).all())
 
-    async def create_endpoint(self, project_id: UUID, host_id: UUID, payload: dict, actor_id: UUID) -> Endpoint:
+    async def create_endpoint(self, project_id: int, host_id: int, payload: dict, actor_id: int) -> Endpoint:
         await self._get_host(project_id, host_id)
         payload = self._apply_structured_request_payload(self._apply_raw_request_payload(dict(payload)))
         if payload.get("request_headers") is None:
@@ -1766,7 +1987,7 @@ class AssetService:
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "endpoint", "project_id": str(project_id), "data": {"id": str(endpoint.id)}})
         return endpoint
 
-    async def update_endpoint(self, project_id: UUID, host_id: UUID, endpoint_id: UUID, payload: dict, actor_id: UUID) -> Endpoint:
+    async def update_endpoint(self, project_id: int, host_id: int, endpoint_id: int, payload: dict, actor_id: int) -> Endpoint:
         await self._get_host(project_id, host_id)
         payload = self._apply_structured_request_payload(self._apply_raw_request_payload(dict(payload)))
         endpoint = await self.db.scalar(select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id)))
@@ -1795,13 +2016,14 @@ class AssetService:
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "endpoint", "project_id": str(project_id), "data": {"id": str(endpoint.id)}})
         return endpoint
 
-    async def delete_endpoint(self, project_id: UUID, host_id: UUID, endpoint_id: UUID, actor_id: UUID) -> None:
+    async def delete_endpoint(self, project_id: int, host_id: int, endpoint_id: int, actor_id: int) -> None:
         endpoint = await self.db.scalar(select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id)))
         if not endpoint:
             raise NotFoundError("Endpoint не найден")
+        details = {"project_id": str(project_id), "endpoint": f"{endpoint.method.value if endpoint.method else ''} {endpoint.path}".strip()}
         await self.db.delete(endpoint)
         await self.db.commit()
-        await self.audit.log("DELETE", user_id=actor_id, entity_type="endpoint", entity_id=endpoint.id)
+        await self.audit.log("DELETE", user_id=actor_id, entity_type="endpoint", entity_id=endpoint.id, details=details)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "endpoint", "project_id": str(project_id), "data": {"id": str(endpoint.id)}})
 
 
@@ -1812,28 +2034,52 @@ class VulnerabilityService:
         self.db = db
         self.audit = AuditService(db)
 
-    async def _get_vuln(self, project_id: UUID, vuln_id: UUID) -> Vulnerability:
+    async def _get_vuln(self, project_id: int, vuln_id: int) -> Vulnerability:
         vuln = await self.db.scalar(select(Vulnerability).where(and_(Vulnerability.id == vuln_id, Vulnerability.project_id == project_id)))
         if not vuln:
             raise NotFoundError("Уязвимость не найдена")
         self._hydrate_workflow_steps(vuln)
         return vuln
 
+    # «1. Шаг» / «2) Шаг» / «- Шаг» — нумерацию/маркер убираем: номер шага рисует UI.
+    _STEP_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s*")
+
+    @staticmethod
+    def _split_steps_text(text: str) -> list[str]:
+        """Разбивает текстовые шаги воспроизведения на отдельные шаги.
+
+        Каждый пункт («1. …») — отдельный шаг: на фронте у него своя карточка.
+        Если нумерации нет, абзацы/строки тоже считаем отдельными шагами, а весь
+        текст одной строкой остаётся одним шагом.
+        """
+        lines = [line.strip() for line in text.replace("\r", "").split("\n")]
+        steps: list[str] = []
+        for line in lines:
+            if not line:
+                continue
+            stripped = VulnerabilityService._STEP_MARKER_RE.sub("", line).strip()
+            if not stripped:
+                continue
+            # Продолжение предыдущего шага: строка без маркера дописывается к нему.
+            if steps and stripped == line:
+                steps[-1] = f"{steps[-1]}\n{stripped}"
+            else:
+                steps.append(stripped)
+        return steps
+
     @staticmethod
     def _hydrate_workflow_steps(vuln: Vulnerability) -> None:
+        """Достраивает workflow_steps для находок, у которых есть только текст.
+
+        Такое приходит из старых данных, импорта и агентов: раскладываем текст по
+        отдельным шагам, иначе весь список схлопывается в одно поле в карточке.
+        """
         if vuln.workflow_steps is not None:
             return
-        hydrated_steps: list[dict]
-        if vuln.steps_to_reproduce:
-            hydrated_steps = [
-                {
-                    "id": str(uuid4()),
-                    "description": vuln.steps_to_reproduce,
-                    "image_file_ids": [],
-                }
-            ]
-        else:
-            hydrated_steps = []
+        hydrated_steps: list[dict] = [
+            {"id": str(uuid4()), "description": description, "image_file_ids": []}
+            for description in VulnerabilityService._split_steps_text(vuln.steps_to_reproduce or "")
+        ]
         if hasattr(vuln, "_sa_instance_state"):
             set_committed_value(vuln, "workflow_steps", hydrated_steps)
         else:
@@ -1847,7 +2093,7 @@ class VulnerabilityService:
             description = str(raw_step.get("description", "")).strip()
             endpoint_request_raw = str(raw_step.get("endpoint_request_raw", "")).strip()
             endpoint_id = raw_step.get("endpoint_id")
-            image_file_ids = [str(file_id) for file_id in raw_step.get("image_file_ids", []) if file_id]
+            image_file_ids = [int(file_id) for file_id in raw_step.get("image_file_ids", []) if file_id]
             if not description and not image_file_ids and not endpoint_id and not endpoint_request_raw:
                 continue
             normalized.append(
@@ -1855,7 +2101,7 @@ class VulnerabilityService:
                     "id": str(raw_step.get("id") or uuid4()),
                     "description": description or None,
                     "image_file_ids": image_file_ids,
-                    "endpoint_id": str(endpoint_id) if endpoint_id else None,
+                    "endpoint_id": int(endpoint_id) if endpoint_id else None,
                     "endpoint_request_raw": endpoint_request_raw or None,
                 }
             )
@@ -1949,19 +2195,19 @@ class VulnerabilityService:
             return Severity.LOW
         return Severity.INFO
 
-    async def _resolve_workflow_step_endpoints(self, project_id: UUID, host_id: UUID, steps: list[dict]) -> list[dict]:
+    async def _resolve_workflow_step_endpoints(self, project_id: int, host_id: int, steps: list[dict]) -> list[dict]:
         resolved_steps: list[dict] = []
         for step in steps:
             next_step = dict(step)
             endpoint_id_raw = next_step.get("endpoint_id")
             endpoint_request_raw = next_step.get("endpoint_request_raw")
-            endpoint_id = UUID(str(endpoint_id_raw)) if endpoint_id_raw else None
+            endpoint_id = int(endpoint_id_raw) if endpoint_id_raw else None
             if endpoint_id:
                 endpoint = await self.db.scalar(
                     select(Endpoint).where(and_(Endpoint.id == endpoint_id, Endpoint.host_id == host_id))
                 )
                 if endpoint:
-                    next_step["endpoint_id"] = str(endpoint.id)
+                    next_step["endpoint_id"] = endpoint.id
                 else:
                     # Endpoint указывать необязательно — невалидную привязку просто сбрасываем,
                     # вместо того чтобы возвращать 400.
@@ -1993,12 +2239,12 @@ class VulnerabilityService:
                     endpoint = Endpoint(host_id=host_id, **endpoint_payload)
                     self.db.add(endpoint)
                     await self.db.flush()
-                next_step["endpoint_id"] = str(endpoint.id)
+                next_step["endpoint_id"] = endpoint.id
                 next_step["endpoint_request_raw"] = str(endpoint_request_raw).strip()
             resolved_steps.append(next_step)
         return resolved_steps
 
-    async def _get_primary_host_id(self, vuln_id: UUID) -> UUID:
+    async def _get_primary_host_id(self, vuln_id: int) -> int:
         host_id = await self.db.scalar(
             select(VulnerabilityAsset.asset_id)
             .where(and_(VulnerabilityAsset.vulnerability_id == vuln_id, VulnerabilityAsset.asset_type == AssetType.HOST))
@@ -2008,9 +2254,9 @@ class VulnerabilityService:
             raise ValidationError("Уязвимость должна быть привязана хотя бы к одному хосту")
         return host_id
 
-    async def _validate_workflow_step_images(self, vulnerability_id: UUID | None, steps: list[dict] | None) -> None:
+    async def _validate_workflow_step_images(self, vulnerability_id: int | None, steps: list[dict] | None) -> None:
         image_ids = {
-            UUID(str(file_id))
+            int(file_id)
             for step in steps or []
             for file_id in step.get("image_file_ids", [])
             if file_id
@@ -2032,7 +2278,7 @@ class VulnerabilityService:
                 f"workflow_steps.image_file_ids содержат файлы, не принадлежащие уязвимости: {', '.join(missing_ids)}"
             )
 
-    async def list(self, project_id: UUID, page: int, size: int, severity: str | None, status: str | None) -> tuple[list[Vulnerability], int]:
+    async def list(self, project_id: int, page: int, size: int, severity: str | None, status: str | None) -> tuple[list[Vulnerability], int]:
         query = select(Vulnerability).where(Vulnerability.project_id == project_id)
         if severity:
             query = query.where(Vulnerability.severity == severity)
@@ -2045,7 +2291,7 @@ class VulnerabilityService:
         return list(items), total
 
     async def list_for_host(
-        self, project_id: UUID, host_id: UUID, page: int, size: int, severity: str | None, status: str | None
+        self, project_id: int, host_id: int, page: int, size: int, severity: str | None, status: str | None
     ) -> tuple[list[Vulnerability], int]:
         host_exists = await self.db.scalar(select(Host.id).where(and_(Host.id == host_id, Host.project_id == project_id)))
         if not host_exists:
@@ -2072,7 +2318,7 @@ class VulnerabilityService:
             self._hydrate_workflow_steps(item)
         return list(items), total
 
-    async def create(self, project_id: UUID, payload: dict, actor_id: UUID) -> Vulnerability:
+    async def create(self, project_id: int, payload: dict, actor_id: int) -> Vulnerability:
         host_id = payload.pop("host_id", None)
         if not host_id:
             raise ValidationError("Уязвимость должна быть привязана к конкретному хосту")
@@ -2101,15 +2347,18 @@ class VulnerabilityService:
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "vulnerability", "project_id": str(project_id), "data": {"id": str(vuln.id)}})
         return vuln
 
-    async def get(self, project_id: UUID, vuln_id: UUID) -> dict:
+    async def get(self, project_id: int, vuln_id: int) -> dict:
         vuln = await self._get_vuln(project_id, vuln_id)
         links = (await self.db.scalars(select(VulnerabilityAsset).where(VulnerabilityAsset.vulnerability_id == vuln.id))).all()
         files = (await self.db.scalars(select(File).where(File.vulnerability_id == vuln.id))).all()
         comments_count = await self.db.scalar(select(func.count()).select_from(Comment).where(Comment.vulnerability_id == vuln.id)) or 0
         return {"vulnerability": vuln, "assets": list(links), "files": list(files), "comments_count": comments_count}
 
-    async def update(self, project_id: UUID, vuln_id: UUID, payload: dict, actor_id: UUID) -> Vulnerability:
+    async def update(self, project_id: int, vuln_id: int, payload: dict, actor_id: int) -> Vulnerability:
         vuln = await self._get_vuln(project_id, vuln_id)
+        # Статус меняют и здесь (карточка находки шлёт его в общем PUT), а не
+        # только через patch_status — уведомление автору нужно в обоих путях.
+        old_status = vuln.status
         self._apply_calculated_cvss_fields(
             payload,
             current_version=vuln.cvss_version.value if vuln.cvss_version else None,
@@ -2134,9 +2383,11 @@ class VulnerabilityService:
         await self.db.refresh(vuln)
         await self.audit.log("UPDATE", user_id=actor_id, entity_type="vulnerability", entity_id=vuln.id)
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "vulnerability", "project_id": str(project_id), "data": {"id": str(vuln.id)}})
+        if old_status != vuln.status:
+            await self._notify_vuln_status_changed(vuln, actor_id)
         return vuln
 
-    async def patch_status(self, project_id: UUID, vuln_id: UUID, status: str, actor_id: UUID) -> Vulnerability:
+    async def patch_status(self, project_id: int, vuln_id: int, status: str, actor_id: int) -> Vulnerability:
         vuln = await self._get_vuln(project_id, vuln_id)
         old_status = vuln.status
         vuln.status = status
@@ -2150,20 +2401,58 @@ class VulnerabilityService:
             details={"old_status": old_status.value, "new_status": vuln.status.value},
         )
         await ws_manager.broadcast(project_id, {"event": "updated", "entity": "vulnerability", "project_id": str(project_id), "data": {"id": str(vuln.id)}})
+        if old_status != vuln.status:
+            await self._notify_vuln_status_changed(vuln, actor_id)
         return vuln
 
-    async def delete(self, project_id: UUID, vuln_id: UUID, actor_id: UUID) -> None:
+    async def _notify_vuln_status_changed(self, vuln: Vulnerability, actor_id: int) -> None:
+        """Повод №3: статус находки изменился — сообщаем тому, кто её завёл.
+
+        Автору находки, и только если статус менял кто-то другой.
+        """
+        if vuln.created_by == actor_id:
+            return
+        status_value = getattr(vuln.status, "value", vuln.status)
+        self.db.add(
+            Notification(
+                user_id=vuln.created_by,
+                type=NotificationType.VULN_STATUS_CHANGED,
+                vulnerability_id=vuln.id,
+                project_id=vuln.project_id,
+                actor_id=actor_id,
+                status=status_value,
+                is_read=False,
+            )
+        )
+        await self.db.commit()
+        await ws_manager.notify_user(
+            vuln.created_by,
+            {
+                "event": "notification",
+                "entity": "notification",
+                "data": {
+                    "type": NotificationType.VULN_STATUS_CHANGED.value,
+                    "is_read": False,
+                    "vulnerability_id": str(vuln.id),
+                    "project_id": str(vuln.project_id),
+                    "status": status_value,
+                },
+            },
+        )
+
+    async def delete(self, project_id: int, vuln_id: int, actor_id: int) -> None:
         vuln = await self._get_vuln(project_id, vuln_id)
+        details = {"project_id": str(project_id), "title": vuln.title, "severity": vuln.severity.value}
         await self.db.delete(vuln)
         await self.db.commit()
-        await self.audit.log("DELETE", user_id=actor_id, entity_type="vulnerability", entity_id=vuln_id)
+        await self.audit.log("DELETE", user_id=actor_id, entity_type="vulnerability", entity_id=vuln_id, details=details)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "vulnerability", "project_id": str(project_id), "data": {"id": str(vuln_id)}})
 
-    async def list_assets(self, project_id: UUID, vuln_id: UUID) -> list[VulnerabilityAsset]:
+    async def list_assets(self, project_id: int, vuln_id: int) -> list[VulnerabilityAsset]:
         await self._get_vuln(project_id, vuln_id)
         return list((await self.db.scalars(select(VulnerabilityAsset).where(VulnerabilityAsset.vulnerability_id == vuln_id))).all())
 
-    async def _assert_asset_in_project(self, project_id: UUID, asset_type: AssetType, asset_id: UUID) -> None:
+    async def _assert_asset_in_project(self, project_id: int, asset_type: AssetType, asset_id: int) -> None:
         if asset_type == AssetType.HOST:
             found = await self.db.scalar(select(Host.id).where(and_(Host.id == asset_id, Host.project_id == project_id)))
         elif asset_type == AssetType.PORT:
@@ -2184,7 +2473,7 @@ class VulnerabilityService:
         if not found:
             raise ValidationError("Актив не найден или принадлежит другому проекту")
 
-    async def add_asset(self, project_id: UUID, vuln_id: UUID, asset_type: AssetType, asset_id: UUID, actor_id: UUID) -> VulnerabilityAsset:
+    async def add_asset(self, project_id: int, vuln_id: int, asset_type: AssetType, asset_id: int, actor_id: int) -> VulnerabilityAsset:
         await self._get_vuln(project_id, vuln_id)
         await self._assert_asset_in_project(project_id, asset_type, asset_id)
         duplicate = await self.db.scalar(
@@ -2214,7 +2503,7 @@ class VulnerabilityService:
         )
         return link
 
-    async def delete_asset(self, project_id: UUID, vuln_id: UUID, link_id: UUID, actor_id: UUID) -> None:
+    async def delete_asset(self, project_id: int, vuln_id: int, link_id: int, actor_id: int) -> None:
         await self._get_vuln(project_id, vuln_id)
         link = await self.db.scalar(
             select(VulnerabilityAsset).where(and_(VulnerabilityAsset.id == link_id, VulnerabilityAsset.vulnerability_id == vuln_id))
@@ -2252,17 +2541,17 @@ class FileService:
         self.storage = storage or MinioStorage()
         self.storage.ensure_bucket()
 
-    async def _ensure_vuln(self, project_id: UUID, vuln_id: UUID) -> Vulnerability:
+    async def _ensure_vuln(self, project_id: int, vuln_id: int) -> Vulnerability:
         vuln = await self.db.scalar(select(Vulnerability).where(and_(Vulnerability.id == vuln_id, Vulnerability.project_id == project_id)))
         if not vuln:
             raise NotFoundError("Уязвимость не найдена")
         return vuln
 
-    async def list(self, project_id: UUID, vuln_id: UUID) -> list[File]:
+    async def list(self, project_id: int, vuln_id: int) -> list[File]:
         await self._ensure_vuln(project_id, vuln_id)
         return list((await self.db.scalars(select(File).where(File.vulnerability_id == vuln_id).order_by(File.uploaded_at.desc()))).all())
 
-    async def upload(self, project_id: UUID, vuln_id: UUID, upload: UploadFile, actor_id: UUID) -> File:
+    async def upload(self, project_id: int, vuln_id: int, upload: UploadFile, actor_id: int) -> File:
         await self._ensure_vuln(project_id, vuln_id)
         content = await upload.read()
         if len(content) > MAX_FILE_SIZE:
@@ -2288,7 +2577,7 @@ class FileService:
         await ws_manager.broadcast(project_id, {"event": "created", "entity": "file", "project_id": str(project_id), "data": {"id": str(file_meta.id)}})
         return file_meta
 
-    async def download(self, file_id: UUID, current_user: User) -> tuple[File, bytes]:
+    async def download(self, file_id: int, current_user: User) -> tuple[File, bytes]:
         file_meta = await self.db.scalar(select(File).where(File.id == file_id))
         if not file_meta:
             raise NotFoundError("Файл не найден")
@@ -2306,7 +2595,7 @@ class FileService:
         blob = await asyncio.to_thread(self.storage.download_bytes, file_meta.minio_key)
         return file_meta, blob
 
-    async def delete(self, project_id: UUID, vuln_id: UUID, file_id: UUID, actor_id: UUID) -> None:
+    async def delete(self, project_id: int, vuln_id: int, file_id: int, actor_id: int) -> None:
         await self._ensure_vuln(project_id, vuln_id)
         file_meta = await self.db.scalar(
             select(File).where(and_(File.id == file_id, File.vulnerability_id == vuln_id))
@@ -2327,13 +2616,13 @@ class CommentService:
         self.db = db
         self.audit = AuditService(db)
 
-    async def _ensure_vuln(self, project_id: UUID, vuln_id: UUID) -> Vulnerability:
+    async def _ensure_vuln(self, project_id: int, vuln_id: int) -> Vulnerability:
         vuln = await self.db.scalar(select(Vulnerability).where(and_(Vulnerability.id == vuln_id, Vulnerability.project_id == project_id)))
         if not vuln:
             raise NotFoundError("Уязвимость не найдена")
         return vuln
 
-    async def _extract_mentions(self, project_id: UUID, content: str) -> list[User]:
+    async def _extract_mentions(self, project_id: int, content: str) -> list[User]:
         usernames = set(MENTION_RE.findall(content))
         if not usernames:
             return []
@@ -2357,7 +2646,7 @@ class CommentService:
         ).all()
         return list(rows)
 
-    async def list(self, vuln_id: UUID, page: int, size: int) -> tuple[list[CommentOut], int]:
+    async def list(self, vuln_id: int, page: int, size: int) -> tuple[list[CommentOut], int]:
         total = await self.db.scalar(select(func.count()).select_from(Comment).where(Comment.vulnerability_id == vuln_id)) or 0
         rows = (
             await self.db.execute(
@@ -2394,7 +2683,7 @@ class CommentService:
             )
         return result, total
 
-    async def create(self, project_id: UUID, vuln_id: UUID, content: str, actor: User) -> CommentOut:
+    async def create(self, project_id: int, vuln_id: int, content: str, actor: User) -> CommentOut:
         vuln = await self._ensure_vuln(project_id, vuln_id)
         comment = Comment(vulnerability_id=vuln.id, user_id=actor.id, content=content)
         self.db.add(comment)
@@ -2403,12 +2692,24 @@ class CommentService:
         mention_models: list[MentionOut] = []
         for user in mentioned_users:
             self.db.add(CommentMention(comment_id=comment.id, user_id=user.id))
-            notification = Notification(user_id=user.id, type=NotificationType.MENTION, comment_id=comment.id, is_read=False)
-            self.db.add(notification)
+            # Упоминание себя подсвечиваем в тексте, но не уведомляем: человек
+            # только что сам это и написал.
+            if user.id != actor.id:
+                self.db.add(
+                    Notification(
+                        user_id=user.id,
+                        type=NotificationType.MENTION,
+                        comment_id=comment.id,
+                        actor_id=actor.id,
+                        is_read=False,
+                    )
+                )
             mention_models.append(MentionOut(user_id=user.id, username=user.username))
         await self.db.commit()
         await self.db.refresh(comment)
         for user in mentioned_users:
+            if user.id == actor.id:
+                continue
             await ws_manager.notify_user(
                 user.id,
                 {
@@ -2439,7 +2740,7 @@ class CommentService:
             updated_at=comment.updated_at,
         )
 
-    async def update(self, project_id: UUID, vuln_id: UUID, comment_id: UUID, content: str, actor: User) -> CommentOut:
+    async def update(self, project_id: int, vuln_id: int, comment_id: int, content: str, actor: User) -> CommentOut:
         await self._ensure_vuln(project_id, vuln_id)
         comment = await self.db.scalar(
             select(Comment).where(and_(Comment.id == comment_id, Comment.vulnerability_id == vuln_id))
@@ -2471,7 +2772,7 @@ class CommentService:
             updated_at=comment.updated_at,
         )
 
-    async def delete(self, project_id: UUID, vuln_id: UUID, comment_id: UUID, actor: User) -> None:
+    async def delete(self, project_id: int, vuln_id: int, comment_id: int, actor: User) -> None:
         await self._ensure_vuln(project_id, vuln_id)
         comment = await self.db.scalar(
             select(Comment).where(and_(Comment.id == comment_id, Comment.vulnerability_id == vuln_id))
@@ -2493,19 +2794,19 @@ class ProjectNoteService:
         self.db = db
         self.audit = AuditService(db)
 
-    async def _ensure_project(self, project_id: UUID) -> Project:
+    async def _ensure_project(self, project_id: int) -> Project:
         project = await self.db.scalar(select(Project).where(Project.id == project_id))
         if not project:
             raise NotFoundError("Проект не найден")
         return project
 
-    async def _get_note(self, project_id: UUID, note_id: UUID) -> ProjectNote:
+    async def _get_note(self, project_id: int, note_id: int) -> ProjectNote:
         note = await self.db.scalar(select(ProjectNote).where(and_(ProjectNote.id == note_id, ProjectNote.project_id == project_id)))
         if not note:
             raise NotFoundError("Страница заметки не найдена")
         return note
 
-    async def _ensure_parent(self, project_id: UUID, parent_id: UUID | None) -> ProjectNote | None:
+    async def _ensure_parent(self, project_id: int, parent_id: int | None) -> ProjectNote | None:
         if not parent_id:
             return None
         parent = await self.db.scalar(
@@ -2517,11 +2818,11 @@ class ProjectNoteService:
 
     async def _ensure_unique_title(
         self,
-        project_id: UUID,
-        parent_id: UUID | None,
+        project_id: int,
+        parent_id: int | None,
         title: str,
         *,
-        exclude_note_id: UUID | None = None,
+        exclude_note_id: int | None = None,
     ) -> None:
         query = select(ProjectNote).where(
             and_(
@@ -2536,7 +2837,7 @@ class ProjectNoteService:
         if duplicate:
             raise ConflictError("В этом разделе уже есть страница с таким названием")
 
-    async def _next_sort_order(self, project_id: UUID, parent_id: UUID | None) -> int:
+    async def _next_sort_order(self, project_id: int, parent_id: int | None) -> int:
         max_sort = await self.db.scalar(
             select(func.max(ProjectNote.sort_order)).where(
                 and_(
@@ -2547,9 +2848,9 @@ class ProjectNoteService:
         )
         return int(max_sort or 0) + 1
 
-    async def _ensure_not_descendant_move(self, project_id: UUID, note_id: UUID, new_parent_id: UUID | None) -> None:
+    async def _ensure_not_descendant_move(self, project_id: int, note_id: int, new_parent_id: int | None) -> None:
         cursor = new_parent_id
-        visited: set[UUID] = set()
+        visited: set[int] = set()
         while cursor is not None:
             if cursor == note_id:
                 raise ValidationError("Нельзя переместить страницу в её дочернюю страницу")
@@ -2561,7 +2862,7 @@ class ProjectNoteService:
             )
             cursor = parent
 
-    async def list_notes(self, project_id: UUID) -> list[ProjectNote]:
+    async def list_notes(self, project_id: int) -> list[ProjectNote]:
         await self._ensure_project(project_id)
         rows = await self.db.scalars(
             select(ProjectNote)
@@ -2570,7 +2871,7 @@ class ProjectNoteService:
         )
         return list(rows.all())
 
-    async def list_activity(self, project_id: UUID, limit: int = 30) -> list[dict]:
+    async def list_activity(self, project_id: int, limit: int = 30) -> list[dict]:
         """Журнал CREATE/UPDATE/DELETE действий с заметками этого проекта.
 
         Подцепляем audit-записи двумя путями, чтобы покрыть и новые, и старые
@@ -2609,21 +2910,21 @@ class ProjectNoteService:
             title = details.get("title") or note_title
             out.append(
                 {
-                    "id": str(entry.id),
+                    "id": entry.id,
                     "action": entry.action,
-                    "note_id": str(entry.entity_id) if entry.entity_id else None,
+                    "note_id": entry.entity_id,
                     "note_title": title,
-                    "user_id": str(entry.user_id) if entry.user_id else None,
+                    "user_id": entry.user_id,
                     "username": username,
                     "created_at": entry.created_at.isoformat() if entry.created_at else None,
                 }
             )
         return out
 
-    async def get_note(self, project_id: UUID, note_id: UUID) -> ProjectNote:
+    async def get_note(self, project_id: int, note_id: int) -> ProjectNote:
         return await self._get_note(project_id, note_id)
 
-    async def create_note(self, project_id: UUID, payload: dict, actor_id: UUID) -> ProjectNote:
+    async def create_note(self, project_id: int, payload: dict, actor_id: int) -> ProjectNote:
         await self._ensure_project(project_id)
         title = str(payload["title"]).strip()
         parent_id = payload.get("parent_id")
@@ -2657,7 +2958,7 @@ class ProjectNoteService:
         )
         return note
 
-    async def update_note(self, project_id: UUID, note_id: UUID, payload: dict, actor_id: UUID) -> ProjectNote:
+    async def update_note(self, project_id: int, note_id: int, payload: dict, actor_id: int) -> ProjectNote:
         note = await self._get_note(project_id, note_id)
         next_title = payload.get("title")
         if next_title is not None:
@@ -2683,7 +2984,7 @@ class ProjectNoteService:
         )
         return note
 
-    async def move_note(self, project_id: UUID, note_id: UUID, parent_id: UUID | None, actor_id: UUID) -> ProjectNote:
+    async def move_note(self, project_id: int, note_id: int, parent_id: int | None, actor_id: int) -> ProjectNote:
         note = await self._get_note(project_id, note_id)
         if parent_id == note.id:
             raise ValidationError("Нельзя переместить страницу в саму себя")
@@ -2702,7 +3003,7 @@ class ProjectNoteService:
         )
         return note
 
-    async def reorder_notes(self, project_id: UUID, parent_id: UUID | None, items: list[dict], actor_id: UUID) -> list[ProjectNote]:
+    async def reorder_notes(self, project_id: int, parent_id: int | None, items: list[dict], actor_id: int) -> list[ProjectNote]:
         await self._ensure_parent(project_id, parent_id)
         siblings = (
             await self.db.scalars(
@@ -2742,7 +3043,7 @@ class ProjectNoteService:
         ).all()
         return list(updated)
 
-    async def delete_note(self, project_id: UUID, note_id: UUID, actor_id: UUID) -> None:
+    async def delete_note(self, project_id: int, note_id: int, actor_id: int) -> None:
         note = await self._get_note(project_id, note_id)
         deleted_title = note.title  # запоминаем заголовок ДО удаления для журнала
         await self.db.delete(note)
@@ -2759,7 +3060,7 @@ class ProjectNoteService:
             {"event": "deleted", "entity": "project_note", "project_id": str(project_id), "data": {"id": str(note_id)}},
         )
 
-    async def _get_comment(self, project_id: UUID, note_id: UUID, comment_id: UUID) -> ProjectNoteComment:
+    async def _get_comment(self, project_id: int, note_id: int, comment_id: int) -> ProjectNoteComment:
         comment = await self.db.scalar(
             select(ProjectNoteComment).where(
                 and_(
@@ -2773,7 +3074,7 @@ class ProjectNoteService:
             raise NotFoundError("Комментарий не найден")
         return comment
 
-    async def list_comments(self, project_id: UUID, note_id: UUID, page: int, size: int) -> tuple[list[ProjectNoteCommentOut], int]:
+    async def list_comments(self, project_id: int, note_id: int, page: int, size: int) -> tuple[list[ProjectNoteCommentOut], int]:
         await self._get_note(project_id, note_id)
         total = await self.db.scalar(
             select(func.count()).select_from(ProjectNoteComment).where(
@@ -2808,7 +3109,7 @@ class ProjectNoteService:
             int(total),
         )
 
-    async def create_comment(self, project_id: UUID, note_id: UUID, content: str, actor: User) -> ProjectNoteCommentOut:
+    async def create_comment(self, project_id: int, note_id: int, content: str, actor: User) -> ProjectNoteCommentOut:
         note = await self._get_note(project_id, note_id)
         comment = ProjectNoteComment(project_id=project_id, note_id=note.id, user_id=actor.id, content=content)
         self.db.add(comment)
@@ -2816,15 +3117,15 @@ class ProjectNoteService:
         # Уведомления @username (упоминания) — тот же экстрактор, что у уязвимостей.
         # Создаём Notification с note_comment_id (а не comment_id), чтобы NotificationService
         # знал, что это упоминание в заметке и подгрузил соответствующий контекст.
-        # Самоупоминания тоже отправляем (как в vuln-комментариях) — это полезно
-        # для проверки и закладок.
-        mentioned_users = await CommentService(self.db)._extract_mentions(project_id, content)
+        # Себя не уведомляем: автор комментария и так знает, что написал.
+        mentioned_users = [u for u in await CommentService(self.db)._extract_mentions(project_id, content) if u.id != actor.id]
         for user in mentioned_users:
             self.db.add(
                 Notification(
                     user_id=user.id,
                     type=NotificationType.MENTION,
                     note_comment_id=comment.id,
+                    actor_id=actor.id,
                     is_read=False,
                 )
             )
@@ -2871,9 +3172,9 @@ class ProjectNoteService:
 
     async def update_comment(
         self,
-        project_id: UUID,
-        note_id: UUID,
-        comment_id: UUID,
+        project_id: int,
+        note_id: int,
+        comment_id: int,
         content: str,
         actor: User,
     ) -> ProjectNoteCommentOut:
@@ -2905,7 +3206,7 @@ class ProjectNoteService:
             updated_at=comment.updated_at,
         )
 
-    async def delete_comment(self, project_id: UUID, note_id: UUID, comment_id: UUID, actor: User) -> None:
+    async def delete_comment(self, project_id: int, note_id: int, comment_id: int, actor: User) -> None:
         comment = await self._get_comment(project_id, note_id, comment_id)
         if comment.user_id != actor.id:
             raise ForbiddenError("Можно удалить только свой комментарий")
@@ -2929,7 +3230,39 @@ class NotificationService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
-    async def list(self, user_id: UUID, page: int, size: int, is_read: bool | None) -> tuple[list[NotificationOut], int]:
+    async def _context_for_event(self, item: Notification) -> NotificationContext | None:
+        """Контекст уведомлений, не связанных с комментарием.
+
+        Это добавление в проект и смены статусов: предмет записан прямо в
+        notification (project_id / vulnerability_id), названия и имя инициатора
+        подтягиваем здесь.
+        """
+        if item.project_id is None and item.vulnerability_id is None:
+            return None
+        actor_username = None
+        if item.actor_id:
+            actor_username = await self.db.scalar(select(User.username).where(User.id == item.actor_id))
+        project_id = item.project_id
+        vuln_title = None
+        if item.vulnerability_id:
+            row = (
+                await self.db.execute(
+                    select(Vulnerability.title, Vulnerability.project_id).where(Vulnerability.id == item.vulnerability_id)
+                )
+            ).first()
+            if row:
+                vuln_title, project_id = row
+        project_name = await self.db.scalar(select(Project.name).where(Project.id == project_id)) if project_id else None
+        return NotificationContext(
+            vulnerability_id=item.vulnerability_id,
+            vulnerability_title=vuln_title,
+            project_id=project_id,
+            project_name=project_name,
+            commenter_username=actor_username,
+            status=item.status,
+        )
+
+    async def list(self, user_id: int, page: int, size: int, is_read: bool | None) -> tuple[list[NotificationOut], int]:
         query = select(Notification).where(Notification.user_id == user_id)
         if is_read is not None:
             query = query.where(Notification.is_read == is_read)
@@ -2987,6 +3320,10 @@ class NotificationService:
                         project_id=note.project_id,
                         commenter_username=commenter.username,
                     )
+            else:
+                # Уведомления о проекте и статусах: предмет лежит прямо на записи,
+                # названия подтягиваем сейчас, чтобы фронт не ходил за ними отдельно.
+                context = await self._context_for_event(item)
             result.append(
                 NotificationOut(
                     id=item.id,
@@ -3000,12 +3337,12 @@ class NotificationService:
             )
         return result, total
 
-    async def unread_count(self, user_id: UUID) -> int:
+    async def unread_count(self, user_id: int) -> int:
         return await self.db.scalar(
             select(func.count()).select_from(Notification).where(and_(Notification.user_id == user_id, Notification.is_read.is_(False)))
         ) or 0
 
-    async def mark_read(self, notification_id: UUID, user_id: UUID) -> Notification:
+    async def mark_read(self, notification_id: int, user_id: int) -> Notification:
         notification = await self.db.scalar(
             select(Notification).where(and_(Notification.id == notification_id, Notification.user_id == user_id))
         )
@@ -3016,7 +3353,7 @@ class NotificationService:
         await self.db.refresh(notification)
         return notification
 
-    async def mark_all_read(self, user_id: UUID) -> None:
+    async def mark_all_read(self, user_id: int) -> None:
         await self.db.execute(update(Notification).where(Notification.user_id == user_id).values(is_read=True))
         await self.db.commit()
 
@@ -3027,7 +3364,7 @@ class ImportService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
-    async def _find_matching_host(self, project_id: UUID, host_data) -> Host | None:
+    async def _find_matching_host(self, project_id: int, host_data) -> Host | None:
         clauses = []
         if host_data.ip_address:
             clauses.append(Host.ip_address == host_data.ip_address)
@@ -3527,7 +3864,7 @@ class ImportService:
             return content_type, body_text or None
         return None, None
 
-    async def import_openapi(self, project_id: UUID, host_id: UUID, payload: bytes, actor_id: UUID) -> OpenApiImportResult:
+    async def import_openapi(self, project_id: int, host_id: int, payload: bytes, actor_id: int) -> OpenApiImportResult:
         host = await self.db.scalar(select(Host).where(and_(Host.id == host_id, Host.project_id == project_id)))
         if not host:
             raise NotFoundError("Хост не найден")
@@ -3646,7 +3983,7 @@ class ImportService:
         )
         return result
 
-    async def export_openapi(self, project_id: UUID, host_id: UUID) -> dict:
+    async def export_openapi(self, project_id: int, host_id: int) -> dict:
         """Собирает OpenAPI 3.0 документ из эндпоинтов хоста."""
         host = await self.db.scalar(select(Host).where(and_(Host.id == host_id, Host.project_id == project_id)))
         if not host:
@@ -3734,7 +4071,7 @@ class ImportService:
             path_item[method_value] = operation
         return document
 
-    async def import_json(self, project_id: UUID, payload: bytes, actor_id: UUID) -> ImportResult:
+    async def import_json(self, project_id: int, payload: bytes, actor_id: int) -> ImportResult:
         """Импортирует данные атомарно: при ошибке откатывает всё."""
         try:
             parsed = json.loads(payload.decode("utf-8"))
@@ -3882,7 +4219,7 @@ class ReportService:
         self.db = db
         self.storage = MinioStorage()
 
-    async def _collect_project_data(self, project_id: UUID) -> dict:
+    async def _collect_project_data(self, project_id: int) -> dict:
         project = await self.db.scalar(select(Project).where(Project.id == project_id))
         if not project:
             raise NotFoundError("Проект не найден")
@@ -3929,13 +4266,13 @@ class ReportService:
         vulnerability_assets: list[VulnerabilityAsset] = data["vulnerability_assets"]
         files: list[File] = data["files"]
         host_by_id = {host.id: host for host in hosts}
-        ports_by_host_id: dict[UUID, list[Port]] = {}
+        ports_by_host_id: dict[int, list[Port]] = {}
         for port in ports:
             ports_by_host_id.setdefault(port.host_id, []).append(port)
-        assets_by_vuln_id: dict[UUID, list[VulnerabilityAsset]] = {}
+        assets_by_vuln_id: dict[int, list[VulnerabilityAsset]] = {}
         for asset in vulnerability_assets:
             assets_by_vuln_id.setdefault(asset.vulnerability_id, []).append(asset)
-        files_by_vuln_id: dict[UUID, list[File]] = {}
+        files_by_vuln_id: dict[int, list[File]] = {}
         for file_meta in files:
             files_by_vuln_id.setdefault(file_meta.vulnerability_id, []).append(file_meta)
         files_by_id = {file_meta.id: file_meta for file_meta in files}
@@ -3955,11 +4292,11 @@ class ReportService:
         }
 
     @staticmethod
-    def _resolve_step_files(step: dict, files_by_id: dict[UUID, File]) -> list[File]:
+    def _resolve_step_files(step: dict, files_by_id: dict[int, File]) -> list[File]:
         resolved: list[File] = []
         for raw_file_id in step.get("image_file_ids", []):
             try:
-                file_id = UUID(str(raw_file_id))
+                file_id = int(raw_file_id)
             except (TypeError, ValueError):
                 continue
             file_meta = files_by_id.get(file_id)
@@ -3988,8 +4325,8 @@ class ReportService:
         except (UnidentifiedImageError, OSError, ValueError):
             return None
 
-    async def _download_report_images(self, files: list[File]) -> dict[UUID, bytes]:
-        image_bytes: dict[UUID, bytes] = {}
+    async def _download_report_images(self, files: list[File]) -> dict[int, bytes]:
+        image_bytes: dict[int, bytes] = {}
         for file_meta in files:
             if not self._is_image_file(file_meta):
                 continue
@@ -4002,7 +4339,7 @@ class ReportService:
                 image_bytes[file_meta.id] = normalized_bytes
         return image_bytes
 
-    async def generate(self, project_id: UUID, kind: Literal["szi", "pp"]) -> bytes:
+    async def generate(self, project_id: int, kind: Literal["szi", "pp"]) -> bytes:
         """Генерирует Word-отчёт указанного типа.
 
         ``kind`` — `szi` (отчёт на сертификацию) или `pp` (внутренняя приёмка).

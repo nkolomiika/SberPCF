@@ -13,11 +13,14 @@ import type {
   ImportResult,
   OpenApiImportResult,
   Notification,
+  OsType,
   PaginatedResponse,
   Port,
   Project,
+  ProjectActivityItem,
   ProjectFolder,
   ProjectMember,
+  ProjectStats,
   PasswordResetResult,
   User,
   ProjectNote,
@@ -59,13 +62,40 @@ const normalizeDetailMessage = (detail: unknown): string | null => {
   return null;
 };
 
+/** HTTP-статус ошибки axios, если он есть (403 → показываем экран «нет доступа»). */
+export const getApiErrorStatus = (error: unknown): number | null =>
+  axios.isAxiosError(error) ? (error.response?.status ?? null) : null;
+
 export const getApiErrorMessage = (error: unknown, fallback: string): string => {
   if (axios.isAxiosError(error)) {
-    return (
-      normalizeDetailMessage(error.response?.data) ||
-      normalizeDetailMessage(error.message) ||
-      fallback
-    );
+    const detail = normalizeDetailMessage(error.response?.data);
+    const status = error.response?.status;
+
+    // Нет ответа вовсе — сеть/прокси/бэкенд недоступен. Самый частый случай при
+    // локальном `npm run dev`, когда прокси указывает на несуществующий хост.
+    if (!error.response) {
+      if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
+        return "Превышено время ожидания ответа сервера.";
+      }
+      return "Сервер недоступен — не удалось подключиться к бэкенду. Проверьте, что бэкенд запущен.";
+    }
+
+    if (status === 401) return detail || "Неверный логин или пароль.";
+    if (status === 403) return detail || "Недостаточно прав для этого действия.";
+    if (status === 404) return detail || "Запрашиваемый ресурс не найден.";
+    if (status === 409) return detail || "Конфликт: ресурс уже существует или изменён.";
+    if (status === 422) return detail || "Проверьте правильность заполнения полей.";
+    if (status === 429) return detail || "Слишком много попыток. Попробуйте позже.";
+    if (status && status >= 500) {
+      // 500/502/503/504 — на сервере/прокси. Если это заглушка прокси Vite,
+      // тела с detail обычно нет, поэтому даём понятную подсказку.
+      const isGeneric = !detail || detail === "Internal Server Error";
+      return isGeneric
+        ? `Ошибка сервера (${status}). Возможно, бэкенд недоступен или упал.`
+        : `Ошибка сервера (${status}): ${detail}`;
+    }
+
+    return detail || normalizeDetailMessage(error.message) || fallback;
   }
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -139,6 +169,7 @@ export async function createUser(payload: {
   full_name?: string;
   password?: string;
   role: User["role"];
+  project_role?: User["project_role"];
   send_invite_email?: boolean;
 }): Promise<User> {
   assertRequired(payload.username, "Имя пользователя");
@@ -148,11 +179,12 @@ export async function createUser(payload: {
 }
 
 export async function updateUser(
-  userId: string,
+  userId: number,
   payload: {
     username?: string;
     full_name?: string;
     role?: User["role"];
+    project_role?: User["project_role"];
     is_active?: boolean;
   }
 ): Promise<User> {
@@ -160,12 +192,12 @@ export async function updateUser(
   return data;
 }
 
-export async function resetUserPassword(userId: string): Promise<PasswordResetResult> {
+export async function resetUserPassword(userId: number): Promise<PasswordResetResult> {
   const { data } = await api.patch<PasswordResetResult>(`/users/${userId}/password`);
   return data;
 }
 
-export async function deleteUser(userId: string): Promise<void> {
+export async function deleteUser(userId: number): Promise<void> {
   await api.delete(`/users/${userId}`);
 }
 
@@ -182,12 +214,6 @@ export async function changeMyPassword(payload: { current_password: string; new_
   assertRequired(payload.current_password, "Текущий пароль");
   assertRequired(payload.new_password, "Новый пароль");
   const { data } = await api.patch<User>("/users/me/password", payload);
-  return data;
-}
-
-export async function forceChangePassword(newPassword: string): Promise<User> {
-  assertRequired(newPassword, "Новый пароль");
-  const { data } = await api.post<User>("/auth/force-change-password", { new_password: newPassword });
   return data;
 }
 
@@ -208,18 +234,23 @@ export async function getProjects(page = 1, size = 20, status?: Project["status"
   return data;
 }
 
+export async function getProjectStats(): Promise<ProjectStats[]> {
+  const { data } = await api.get<ProjectStats[]>("/projects/stats");
+  return data;
+}
+
 export async function getProjectFolders(): Promise<ProjectFolder[]> {
   const { data } = await api.get<ProjectFolder[]>("/projects/folders");
   return data;
 }
 
-export async function createProjectFolder(payload: { name: string; parent_id?: string | null }): Promise<ProjectFolder> {
+export async function createProjectFolder(payload: { name: string; parent_id?: number | null }): Promise<ProjectFolder> {
   assertRequired(payload.name, "Название папки");
   const { data } = await api.post<ProjectFolder>("/projects/folders", payload);
   return data;
 }
 
-export async function moveProjectFolder(folderId: string, payload: { parent_id?: string | null }): Promise<ProjectFolder> {
+export async function moveProjectFolder(folderId: number, payload: { parent_id?: number | null }): Promise<ProjectFolder> {
   const { data } = await api.patch<ProjectFolder>(`/projects/folders/${folderId}/move`, payload);
   return data;
 }
@@ -230,7 +261,7 @@ export interface DeleteProjectFolderResult {
   deleted_projects: number;
 }
 
-export async function deleteProjectFolder(folderId: string): Promise<DeleteProjectFolderResult> {
+export async function deleteProjectFolder(folderId: number): Promise<DeleteProjectFolderResult> {
   const { data } = await api.delete<DeleteProjectFolderResult>(`/projects/folders/${folderId}`);
   return data;
 }
@@ -247,13 +278,13 @@ export async function createProject(payload: {
   return data;
 }
 
-export async function getProject(projectId: string): Promise<Project> {
+export async function getProject(projectId: number): Promise<Project> {
   const { data } = await api.get<Project>(`/projects/${projectId}`);
   return data;
 }
 
 export async function updateProject(
-  projectId: string,
+  projectId: number,
   payload: {
     name?: string;
     folder?: string;
@@ -267,39 +298,45 @@ export async function updateProject(
   return data;
 }
 
-export async function getProjectMembers(projectId: string): Promise<ProjectMember[]> {
+export async function getProjectMembers(projectId: number): Promise<ProjectMember[]> {
   const { data } = await api.get<ProjectMember[]>(`/projects/${projectId}/members`);
   return data;
 }
 
-export async function addProjectMember(projectId: string, userId: string): Promise<void> {
+export async function addProjectMember(projectId: number, userId: number): Promise<void> {
   if (!userId) {
     throw new Error("Нужно выбрать пользователя");
   }
   await api.post(`/projects/${projectId}/members`, { user_id: userId });
 }
 
-export async function removeProjectMember(projectId: string, userId: string): Promise<void> {
+export async function removeProjectMember(projectId: number, userId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/members/${userId}`);
 }
 
-export async function listProjectNotes(projectId: string): Promise<ProjectNote[]> {
+/** Лента активности проекта — доступна любому участнику (в отличие от админского /audit-logs). */
+export async function getProjectActivity(projectId: number, limit = 50): Promise<ProjectActivityItem[]> {
+  const { data } = await api.get<ProjectActivityItem[]>(`/projects/${projectId}/activity`, { params: { limit } });
+  return data;
+}
+
+export async function listProjectNotes(projectId: number): Promise<ProjectNote[]> {
   const { data } = await api.get<ProjectNote[]>(`/projects/${projectId}/notes`);
   return data;
 }
 
 export type ProjectNoteActivity = {
-  id: string;
+  id: number;
   action: "CREATE" | "UPDATE" | "DELETE";
-  note_id: string | null;
+  note_id: number | null;
   note_title: string | null;
-  user_id: string | null;
+  user_id: number | null;
   username: string | null;
   created_at: string;
 };
 
 export async function listProjectNotesActivity(
-  projectId: string,
+  projectId: number,
   limit = 30,
 ): Promise<ProjectNoteActivity[]> {
   const { data } = await api.get<ProjectNoteActivity[]>(
@@ -309,14 +346,14 @@ export async function listProjectNotesActivity(
   return data;
 }
 
-export async function getProjectNote(projectId: string, noteId: string): Promise<ProjectNote> {
+export async function getProjectNote(projectId: number, noteId: number): Promise<ProjectNote> {
   const { data } = await api.get<ProjectNote>(`/projects/${projectId}/notes/${noteId}`);
   return data;
 }
 
 export async function createProjectNote(
-  projectId: string,
-  payload: { title: string; parent_id?: string | null; content?: string | null }
+  projectId: number,
+  payload: { title: string; parent_id?: number | null; content?: string | null }
 ): Promise<ProjectNote> {
   assertRequired(payload.title, "Название страницы");
   const { data } = await api.post<ProjectNote>(`/projects/${projectId}/notes`, payload);
@@ -324,8 +361,8 @@ export async function createProjectNote(
 }
 
 export async function updateProjectNote(
-  projectId: string,
-  noteId: string,
+  projectId: number,
+  noteId: number,
   payload: { title?: string; content?: string | null }
 ): Promise<ProjectNote> {
   if (payload.title !== undefined) {
@@ -336,17 +373,17 @@ export async function updateProjectNote(
 }
 
 export async function moveProjectNote(
-  projectId: string,
-  noteId: string,
-  payload: { parent_id?: string | null }
+  projectId: number,
+  noteId: number,
+  payload: { parent_id?: number | null }
 ): Promise<ProjectNote> {
   const { data } = await api.patch<ProjectNote>(`/projects/${projectId}/notes/${noteId}/move`, payload);
   return data;
 }
 
 export async function reorderProjectNotes(
-  projectId: string,
-  payload: { parent_id?: string | null; items: Array<{ id: string; sort_order: number }> }
+  projectId: number,
+  payload: { parent_id?: number | null; items: Array<{ id: number; sort_order: number }> }
 ): Promise<ProjectNote[]> {
   if (!payload.items.length) {
     throw new Error("Нужно передать хотя бы одну страницу для сортировки");
@@ -355,11 +392,11 @@ export async function reorderProjectNotes(
   return data;
 }
 
-export async function deleteProjectNote(projectId: string, noteId: string): Promise<void> {
+export async function deleteProjectNote(projectId: number, noteId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/notes/${noteId}`);
 }
 
-export async function listProjectNoteComments(projectId: string, noteId: string): Promise<PaginatedResponse<ProjectNoteComment>> {
+export async function listProjectNoteComments(projectId: number, noteId: number): Promise<PaginatedResponse<ProjectNoteComment>> {
   const { data } = await api.get<PaginatedResponse<ProjectNoteComment>>(`/projects/${projectId}/notes/${noteId}/comments`, {
     params: { page: 1, size: 100 },
   });
@@ -367,8 +404,8 @@ export async function listProjectNoteComments(projectId: string, noteId: string)
 }
 
 export async function createProjectNoteComment(
-  projectId: string,
-  noteId: string,
+  projectId: number,
+  noteId: number,
   content: string
 ): Promise<ProjectNoteComment> {
   assertRequired(content, "Комментарий");
@@ -377,9 +414,9 @@ export async function createProjectNoteComment(
 }
 
 export async function updateProjectNoteComment(
-  projectId: string,
-  noteId: string,
-  commentId: string,
+  projectId: number,
+  noteId: number,
+  commentId: number,
   content: string
 ): Promise<ProjectNoteComment> {
   assertRequired(content, "Комментарий");
@@ -387,15 +424,15 @@ export async function updateProjectNoteComment(
   return data;
 }
 
-export async function deleteProjectNoteComment(projectId: string, noteId: string, commentId: string): Promise<void> {
+export async function deleteProjectNoteComment(projectId: number, noteId: number, commentId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/notes/${noteId}/comments/${commentId}`);
 }
 
-export async function deleteProject(projectId: string): Promise<void> {
+export async function deleteProject(projectId: number): Promise<void> {
   await api.delete(`/projects/${projectId}`);
 }
 
-export async function getHosts(projectId: string): Promise<PaginatedResponse<Host>> {
+export async function getHosts(projectId: number): Promise<PaginatedResponse<Host>> {
   const { data } = await api.get<PaginatedResponse<Host>>(`/projects/${projectId}/hosts`, {
     params: { page: 1, size: 100 },
   });
@@ -403,13 +440,14 @@ export async function getHosts(projectId: string): Promise<PaginatedResponse<Hos
 }
 
 export async function createHost(
-  projectId: string,
+  projectId: number,
   payload: {
     ip_address?: string;
     ip_addresses?: string[];
     hostname?: string;
     notes?: string;
     status?: "up" | "down" | "unknown";
+    os_type?: OsType;
   }
 ): Promise<Host> {
   if (isBlank(payload.ip_address) && isBlank(payload.hostname)) {
@@ -419,40 +457,41 @@ export async function createHost(
   return data;
 }
 
-export async function getHost(projectId: string, hostId: string): Promise<HostDetails> {
+export async function getHost(projectId: number, hostId: number): Promise<HostDetails> {
   const { data } = await api.get<HostDetails>(`/projects/${projectId}/hosts/${hostId}`);
   return data;
 }
 
 export async function updateHost(
-  projectId: string,
-  hostId: string,
+  projectId: number,
+  hostId: number,
   payload: {
     ip_address?: string;
     ip_addresses?: Array<{ ip_address: string; label?: string | null; is_primary?: boolean }>;
     hostname?: string;
     notes?: string | null;
     status?: "up" | "down" | "unknown";
+    os_type?: OsType;
   }
 ): Promise<Host> {
   const { data } = await api.put<Host>(`/projects/${projectId}/hosts/${hostId}`, payload);
   return data;
 }
 
-export async function deleteHost(projectId: string, hostId: string): Promise<void> {
+export async function deleteHost(projectId: number, hostId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/hosts/${hostId}`);
 }
 
-export async function getPorts(projectId: string, hostId: string): Promise<Port[]> {
+export async function getPorts(projectId: number, hostId: number): Promise<Port[]> {
   const { data } = await api.get<Port[]>(`/projects/${projectId}/hosts/${hostId}/ports`);
   return data;
 }
 
 export async function createPort(
-  projectId: string,
-  hostId: string,
+  projectId: number,
+  hostId: number,
   payload: {
-    ip_address_id: string;
+    ip_address_id: number;
     port_number: number;
     protocol?: "tcp" | "udp";
     state?: "open" | "closed" | "filtered";
@@ -469,11 +508,11 @@ export async function createPort(
 }
 
 export async function updatePort(
-  projectId: string,
-  hostId: string,
-  portId: string,
+  projectId: number,
+  hostId: number,
+  portId: number,
   payload: {
-    ip_address_id?: string;
+    ip_address_id?: number;
     port_number?: number;
     protocol?: "tcp" | "udp";
     state?: "open" | "closed" | "filtered";
@@ -483,19 +522,19 @@ export async function updatePort(
   return data;
 }
 
-export async function deletePort(projectId: string, hostId: string, portId: string): Promise<void> {
+export async function deletePort(projectId: number, hostId: number, portId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}`);
 }
 
-export async function getServices(projectId: string, hostId: string, portId: string): Promise<Service[]> {
+export async function getServices(projectId: number, hostId: number, portId: number): Promise<Service[]> {
   const { data } = await api.get<Service[]>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`);
   return data;
 }
 
 export async function createService(
-  projectId: string,
-  hostId: string,
-  portId: string,
+  projectId: number,
+  hostId: number,
+  portId: number,
   payload: { name: string; version?: string; banner?: string }
 ): Promise<Service> {
   assertRequired(payload.name, "Название сервиса");
@@ -504,10 +543,10 @@ export async function createService(
 }
 
 export async function updateService(
-  projectId: string,
-  hostId: string,
-  portId: string,
-  serviceId: string,
+  projectId: number,
+  hostId: number,
+  portId: number,
+  serviceId: number,
   payload: { name?: string; version?: string; banner?: string }
 ): Promise<Service> {
   if (payload.name !== undefined) {
@@ -517,21 +556,21 @@ export async function updateService(
   return data;
 }
 
-export async function deleteService(projectId: string, hostId: string, portId: string, serviceId: string): Promise<void> {
+export async function deleteService(projectId: number, hostId: number, portId: number, serviceId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`);
 }
 
-export async function getEndpoints(projectId: string, hostId: string): Promise<Endpoint[]> {
+export async function getEndpoints(projectId: number, hostId: number): Promise<Endpoint[]> {
   const { data } = await api.get<Endpoint[]>(`/projects/${projectId}/hosts/${hostId}/endpoints`);
   return data;
 }
 
 export async function createEndpoint(
-  projectId: string,
-  hostId: string,
+  projectId: number,
+  hostId: number,
   payload: {
     path?: string;
-    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | "QUERY";
     description?: string | null;
     request_raw?: string;
     query_params?: { name: string; value?: string | null; required?: boolean; description?: string | null }[];
@@ -548,12 +587,12 @@ export async function createEndpoint(
 }
 
 export async function updateEndpoint(
-  projectId: string,
-  hostId: string,
-  endpointId: string,
+  projectId: number,
+  hostId: number,
+  endpointId: number,
   payload: {
     path?: string;
-    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | "QUERY";
     description?: string | null;
     request_raw?: string;
     query_params?: { name: string; value?: string | null; required?: boolean; description?: string | null }[];
@@ -569,11 +608,11 @@ export async function updateEndpoint(
   return data;
 }
 
-export async function deleteEndpoint(projectId: string, hostId: string, endpointId: string): Promise<void> {
+export async function deleteEndpoint(projectId: number, hostId: number, endpointId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`);
 }
 
-export async function getVulnerabilities(projectId: string): Promise<PaginatedResponse<Vulnerability>> {
+export async function getVulnerabilities(projectId: number): Promise<PaginatedResponse<Vulnerability>> {
   const { data } = await api.get<PaginatedResponse<Vulnerability>>(`/projects/${projectId}/vulnerabilities`, {
     params: { page: 1, size: 100 },
   });
@@ -581,9 +620,9 @@ export async function getVulnerabilities(projectId: string): Promise<PaginatedRe
 }
 
 export async function createVulnerability(
-  projectId: string,
+  projectId: number,
   payload: {
-    host_id: string;
+    host_id: number;
     title: string;
     description?: string | null;
     severity: "critical" | "high" | "medium" | "low" | "info";
@@ -595,8 +634,8 @@ export async function createVulnerability(
     workflow_steps?: Array<{
       id: string;
       description?: string | null;
-      image_file_ids?: string[];
-      endpoint_id?: string | null;
+      image_file_ids?: number[];
+      endpoint_id?: number | null;
       endpoint_request_raw?: string | null;
     }>;
     steps_to_reproduce?: string | null;
@@ -613,8 +652,8 @@ export async function createVulnerability(
 }
 
 export async function updateVulnerability(
-  projectId: string,
-  vulnerabilityId: string,
+  projectId: number,
+  vulnerabilityId: number,
   payload: {
     title?: string;
     description?: string | null;
@@ -627,8 +666,8 @@ export async function updateVulnerability(
     workflow_steps?: Array<{
       id: string;
       description?: string | null;
-      image_file_ids?: string[];
-      endpoint_id?: string | null;
+      image_file_ids?: number[];
+      endpoint_id?: number | null;
       endpoint_request_raw?: string | null;
     }>;
     steps_to_reproduce?: string | null;
@@ -643,16 +682,16 @@ export async function updateVulnerability(
   return data;
 }
 
-export async function deleteVulnerability(projectId: string, vulnerabilityId: string): Promise<void> {
+export async function deleteVulnerability(projectId: number, vulnerabilityId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
 }
 
-export async function getVulnerability(projectId: string, vulnerabilityId: string): Promise<VulnerabilityDetails> {
+export async function getVulnerability(projectId: number, vulnerabilityId: number): Promise<VulnerabilityDetails> {
   const { data } = await api.get<VulnerabilityDetails>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
   return data;
 }
 
-export async function getHostVulnerabilities(projectId: string, hostId: string): Promise<PaginatedResponse<Vulnerability>> {
+export async function getHostVulnerabilities(projectId: number, hostId: number): Promise<PaginatedResponse<Vulnerability>> {
   const { data } = await api.get<PaginatedResponse<Vulnerability>>(`/projects/${projectId}/hosts/${hostId}/vulnerabilities`, {
     params: { page: 1, size: 100 },
   });
@@ -660,27 +699,27 @@ export async function getHostVulnerabilities(projectId: string, hostId: string):
 }
 
 export async function addVulnerabilityAsset(
-  projectId: string,
-  vulnerabilityId: string,
+  projectId: number,
+  vulnerabilityId: number,
   payload: {
     asset_type: "host" | "port" | "service" | "endpoint";
-    asset_id: string;
+    asset_id: number;
   }
 ): Promise<VulnerabilityAsset> {
   const { data } = await api.post<VulnerabilityAsset>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets`, payload);
   return data;
 }
 
-export async function deleteVulnerabilityAsset(projectId: string, vulnerabilityId: string, assetLinkId: string): Promise<void> {
+export async function deleteVulnerabilityAsset(projectId: number, vulnerabilityId: number, assetLinkId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/assets/${assetLinkId}`);
 }
 
-export async function listVulnerabilityFiles(projectId: string, vulnerabilityId: string): Promise<VulnerabilityFile[]> {
+export async function listVulnerabilityFiles(projectId: number, vulnerabilityId: number): Promise<VulnerabilityFile[]> {
   const { data } = await api.get<VulnerabilityFile[]>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files`);
   return data;
 }
 
-export async function uploadVulnerabilityFile(projectId: string, vulnerabilityId: string, file: File): Promise<VulnerabilityFile> {
+export async function uploadVulnerabilityFile(projectId: number, vulnerabilityId: number, file: File): Promise<VulnerabilityFile> {
   if (!file) {
     throw new Error("Нужно выбрать файл");
   }
@@ -692,27 +731,27 @@ export async function uploadVulnerabilityFile(projectId: string, vulnerabilityId
   return data;
 }
 
-export async function deleteVulnerabilityFile(projectId: string, vulnerabilityId: string, fileId: string): Promise<void> {
+export async function deleteVulnerabilityFile(projectId: number, vulnerabilityId: number, fileId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/files/${fileId}`);
 }
 
-export async function listVulnerabilityComments(projectId: string, vulnerabilityId: string): Promise<PaginatedResponse<VulnerabilityComment>> {
+export async function listVulnerabilityComments(projectId: number, vulnerabilityId: number): Promise<PaginatedResponse<VulnerabilityComment>> {
   const { data } = await api.get<PaginatedResponse<VulnerabilityComment>>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, {
     params: { page: 1, size: 100 },
   });
   return data;
 }
 
-export async function createVulnerabilityComment(projectId: string, vulnerabilityId: string, content: string): Promise<VulnerabilityComment> {
+export async function createVulnerabilityComment(projectId: number, vulnerabilityId: number, content: string): Promise<VulnerabilityComment> {
   assertRequired(content, "Комментарий");
   const { data } = await api.post<VulnerabilityComment>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, { content });
   return data;
 }
 
 export async function updateVulnerabilityComment(
-  projectId: string,
-  vulnerabilityId: string,
-  commentId: string,
+  projectId: number,
+  vulnerabilityId: number,
+  commentId: number,
   content: string
 ): Promise<VulnerabilityComment> {
   assertRequired(content, "Комментарий");
@@ -720,11 +759,11 @@ export async function updateVulnerabilityComment(
   return data;
 }
 
-export async function deleteVulnerabilityComment(projectId: string, vulnerabilityId: string, commentId: string): Promise<void> {
+export async function deleteVulnerabilityComment(projectId: number, vulnerabilityId: number, commentId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`);
 }
 
-export async function importProjectData(projectId: string, file: File): Promise<ImportResult> {
+export async function importProjectData(projectId: number, file: File): Promise<ImportResult> {
   const formData = new FormData();
   formData.append("file", file);
   const { data } = await api.post<ImportResult>(`/projects/${projectId}/import`, formData, {
@@ -733,7 +772,7 @@ export async function importProjectData(projectId: string, file: File): Promise<
   return data;
 }
 
-export async function importOpenApiFile(projectId: string, hostId: string, file: File): Promise<OpenApiImportResult> {
+export async function importOpenApiFile(projectId: number, hostId: number, file: File): Promise<OpenApiImportResult> {
   if (!file) {
     throw new Error("Нужно выбрать Swagger/OpenAPI файл");
   }
@@ -745,21 +784,21 @@ export async function importOpenApiFile(projectId: string, hostId: string, file:
   return data;
 }
 
-export async function exportOpenApiFile(projectId: string, hostId: string): Promise<Blob> {
+export async function exportOpenApiFile(projectId: number, hostId: number): Promise<Blob> {
   const { data } = await api.get(`/projects/${projectId}/hosts/${hostId}/export-openapi`, {
     responseType: "blob",
   });
   return data as Blob;
 }
 
-export async function downloadProjectCertificationReport(projectId: string): Promise<Blob> {
+export async function downloadProjectCertificationReport(projectId: number): Promise<Blob> {
   const { data } = await api.post(`/projects/${projectId}/reports/szi`, null, {
     responseType: "blob",
   });
   return data as Blob;
 }
 
-export async function downloadProjectAcceptanceReport(projectId: string): Promise<Blob> {
+export async function downloadProjectAcceptanceReport(projectId: number): Promise<Blob> {
   const { data } = await api.post(`/projects/${projectId}/reports/pp`, null, {
     responseType: "blob",
   });
@@ -774,7 +813,7 @@ export async function listAgentTokens(): Promise<AgentApiToken[]> {
 export async function createAgentToken(payload: {
   name: string;
   scopes: string[];
-  project_ids: string[];
+  project_ids: number[];
   all_projects: boolean;
   expires_at?: string | null;
 }): Promise<AgentApiToken & { token: string }> {
@@ -782,7 +821,7 @@ export async function createAgentToken(payload: {
   return data;
 }
 
-export async function revokeAgentToken(tokenId: string): Promise<void> {
+export async function revokeAgentToken(tokenId: number): Promise<void> {
   await api.delete(`/agent-tokens/${tokenId}`);
 }
 
@@ -800,8 +839,12 @@ export async function unreadCount(): Promise<number> {
   return data.count;
 }
 
-export async function markNotificationRead(notificationId: string): Promise<void> {
+export async function markNotificationRead(notificationId: number): Promise<void> {
   await api.patch(`/notifications/${notificationId}/read`);
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  await api.patch("/notifications/read-all");
 }
 
 export async function getAuditLogs(

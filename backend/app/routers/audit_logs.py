@@ -1,5 +1,4 @@
 from datetime import datetime
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import Text, and_, cast, func, not_, or_, select
@@ -18,11 +17,11 @@ router = APIRouter(prefix="/audit-logs", tags=["audit"])
 async def list_audit_logs(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
-    user_id: UUID | None = None,
+    user_id: int | None = None,
     username: str | None = None,
     action: str | None = None,
     entity_type: str | None = None,
-    entity_id: UUID | None = None,
+    entity_id: int | None = None,
     ip_address: str | None = None,
     query: str | None = None,
     created_from: str | None = None,

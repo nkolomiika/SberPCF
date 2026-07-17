@@ -8,7 +8,7 @@ type Props = {
   anchorEl: Element | null;
   hosts: Host[];
   onClose: () => void;
-  onSelectHost: (hostId: string) => void;
+  onSelectHost: (hostId: number) => void;
 };
 
 export function ProjectHostsTreePopover({ open, anchorEl, hosts, onClose, onSelectHost }: Props) {

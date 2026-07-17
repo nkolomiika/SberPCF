@@ -11,7 +11,27 @@
       "Bash(python -m pytest tests/test_security.py tests/test_dependencies.py tests/test_auth_cookies.py tests/test_schemas.py --tb=short)",
       "Bash(xargs grep -l \"severityChipSx\\\\|severity.*color\\\\|SEVERITY_COLORS\")",
       "Bash(python -m pytest tests/test_schemas.py tests/test_security.py tests/test_dependencies.py tests/test_auth_cookies.py tests/test_pagination.py --tb=short)",
-      "Bash(python -m pytest tests/ --tb=line -q)"
+      "Bash(python -m pytest tests/ --tb=line -q)",
+      "Bash(docker compose *)",
+      "Bash(ls -la .design-sync/)",
+      "Bash(ls -la design-sync.config.json)",
+      "Bash(find . -name package.json -not -path '*/node_modules/*' -maxdepth 3)",
+      "Bash(ls node_modules/@mui)",
+      "Bash(ls node_modules/@emotion)",
+      "Bash(ls node_modules/react/package.json)",
+      "Bash(npm -v)",
+      "Bash(cat .nvmrc)",
+      "Bash(grep -vE 'from|@mui|^\\\\s*$')",
+      "Bash(node -e ' *)",
+      "Bash(echo \"=== exit $? ===\")",
+      "Bash(npm i *)",
+      "Bash(node -e \"const e=require\\('esbuild'\\); e.transform\\('const x=1', {loader:'ts'}\\).then\\(r=>console.log\\('esbuild OK:',r.code\\)\\).catch\\(err=>{console.error\\('esbuild FAIL:',err.message\\)}\\)\")",
+      "Read(//Users/nkolomiika/.cache/**)",
+      "Read(//Users/nkolomiika/Library/Caches/**)",
+      "Read(//Applications/Google Chrome.app/**)",
+      "Bash(awk '/export function storyImportPlugins/,/^}/' .ds-sync/lib/*.mjs)",
+      "Bash(grep -E '^\\(Button|Card|TextField\\)$')",
+      "Bash(grep -vE '^\\(Button|Card|TextField\\)$')"
     ]
   }
 }

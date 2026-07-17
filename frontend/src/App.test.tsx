@@ -40,10 +40,6 @@ vi.mock("./pages/LoginPage", () => ({
   LoginPage: () => <div>Login page</div>,
 }));
 
-vi.mock("./pages/ForceChangePasswordPage", () => ({
-  ForceChangePasswordPage: () => <div>Force change password page</div>,
-}));
-
 vi.mock("./pages/ProjectsPage", () => ({
   ProjectsPage: () => <div>Projects page</div>,
 }));
@@ -109,35 +105,16 @@ describe("App routing", () => {
     expect(unreadCount).not.toHaveBeenCalled();
   });
 
-  it("redirects user with must_change_password to forced password page", async () => {
-    authState.user = {
-      id: "u-1",
-      username: "alice",
-      email: "alice@example.com",
-      full_name: null,
-      avatar_url: null,
-      role: "pentester",
-      is_active: true,
-      must_change_password: true,
-      password_changed_at: null,
-      created_at: new Date().toISOString(),
-    };
-
-    renderWithProviders(<App themeMode="dark" />, "/login");
-
-    expect(await screen.findByText("Force change password page")).toBeInTheDocument();
-  });
-
   it("redirects non-admin away from admin route", async () => {
     authState.user = {
-      id: "u-2",
+      id: 2,
       username: "bob",
       email: "bob@example.com",
       full_name: null,
       avatar_url: null,
       role: "pentester",
+      project_role: "lead",
       is_active: true,
-      must_change_password: false,
       password_changed_at: null,
       created_at: new Date().toISOString(),
     };

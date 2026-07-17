@@ -14,24 +14,25 @@ describe("ProjectTreeNav", () => {
         viewMode="host"
         hosts={[
           {
-            id: "host-b",
-            project_id: "project-1",
+            id: 2,
+            project_id: 1,
             ip_address: "10.0.0.2",
             ip_addresses: [],
             hostname: "host-b",
             status: "up",
+            os_type: "linux",
             notes: null,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           },
         ]}
-        selectedHostId="host-b"
+        selectedHostId={2}
         selectedSection="hosts"
         isCollapsed={false}
         portsCount={0}
         endpointsCount={0}
         vulnerabilitiesCount={0}
-        hostStatsById={{ "host-b": { portsCount: 4, ipAddressesCount: 2, endpointsCount: 2, vulnerabilitiesCount: 1 } }}
+        hostStatsById={{ 2: { portsCount: 4, ipAddressesCount: 2, endpointsCount: 2, vulnerabilitiesCount: 1 } }}
         onToggleCollapsed={() => undefined}
         onSelectSection={onSelectSection}
         onSelectHost={onSelectHost}
@@ -41,9 +42,9 @@ describe("ProjectTreeNav", () => {
 
     await userEvent.click(screen.getByText("IP-адреса (2)"));
 
-    expect(onSelectHost).toHaveBeenCalledWith("host-b");
+    expect(onSelectHost).toHaveBeenCalledWith(2);
     expect(onSelectSection).toHaveBeenCalledWith("ports");
-    expect(onOpenHost).toHaveBeenCalledWith("host-b", "ports");
+    expect(onOpenHost).toHaveBeenCalledWith(2, "ports");
   });
 
   it("selects notes section from root navigation", async () => {

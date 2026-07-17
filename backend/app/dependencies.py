@@ -1,7 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
 
 from fastapi import Cookie, Depends, Header, Request
 from sqlalchemy import and_, select
@@ -16,22 +15,16 @@ from app.security import decode_token, hash_agent_token
 
 settings = get_settings()
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-PASSWORD_CHANGE_ALLOWED_ROUTES = {
-    ("POST", "/api/v1/auth/force-change-password"),
-    ("POST", "/api/v1/auth/logout"),
-    ("GET", "/api/v1/users/me"),
-    ("GET", "/api/v1/users/me/profile"),
-}
 
 
 @dataclass(frozen=True)
 class AgentTokenContext:
-    token_id: UUID
-    created_by: UUID
+    token_id: int
+    created_by: int
     name: str
     scopes: set[str]
     all_projects: bool
-    project_ids: set[UUID]
+    project_ids: set[int]
 
 
 def get_client_ip(request: Request) -> str | None:
@@ -51,12 +44,7 @@ async def enforce_csrf(request: Request, origin: str | None = Header(default=Non
         raise ForbiddenError("Недопустимый Origin")
 
 
-def is_password_change_allowed_path(path: str, method: str = "GET") -> bool:
-    return (method.upper(), path) in PASSWORD_CHANGE_ALLOWED_ROUTES
-
-
 async def get_current_user(
-    request: Request,
     db: AsyncSession = Depends(get_db),
     access_token: str | None = Cookie(default=None),
 ) -> User:
@@ -67,8 +55,6 @@ async def get_current_user(
     user = await db.scalar(select(User).where(User.id == user_id))
     if not user or not user.is_active:
         raise UnauthorizedError("Пользователь не найден или деактивирован")
-    if user.must_change_password and not is_password_change_allowed_path(request.url.path, request.method):
-        raise ForbiddenError("Требуется сначала сменить временный пароль")
     return user
 
 
@@ -80,7 +66,7 @@ async def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 
 async def require_project_access(
-    project_id: UUID,
+    project_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Project:
@@ -155,7 +141,7 @@ def require_agent_scope(scope: str):
 
 
 async def require_agent_project_access(
-    project_id: UUID,
+    project_id: int,
     context: AgentTokenContext = Depends(get_agent_token_context),
     db: AsyncSession = Depends(get_db),
 ) -> Project:
