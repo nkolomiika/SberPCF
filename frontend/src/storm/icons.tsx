@@ -243,9 +243,9 @@ export function Icon({ name, size = 16, color = "currentColor", sw = 2, style }:
   );
 }
 
-/** SberTech logomark — the circle-with-check glyph extracted from the brand
-   SVG ("logo SBT.svg"), recoloured grey. Only the two logomark subpaths (the
-   broken ring + the swoosh/check) are kept; the "SBERTECH" wordmark is dropped. */
+/** SberTech logomark — the circle-with-check glyph: the broken ring and the
+   swoosh, without the "SBERTECH" wordmark. Inlined as a path so the app carries
+   no image asset (the brand file itself is kept out of the repo). */
 const SBER_MARK_PATH =
   "M47.59 23.48L47.59 23.51L47.58 23.5L47.58 23.52C47.58 28.85 45.75 34.02 42.39 38.18C39.02 42.36 34.32 45.27 29.06 46.45C23.8 47.63 18.29 47.01 13.43 44.69C8.57 42.37 4.66 38.48 2.33 33.67C0.78 30.48 0 27.01 0 23.52C0 21.74 0.2 19.96 0.61 18.21C1.83 13.01 4.8 8.38 9.03 5.07C13.26 1.76 18.51 -0.03 23.9 0C29.3 0.02 34.53 1.86 38.73 5.21L34.1 8.58C30.72 6.3 26.66 5.2 22.58 5.46C18.49 5.72 14.61 7.33 11.56 10.02C8.5 12.72 6.45 16.35 5.72 20.33C5.53 21.39 5.43 22.47 5.43 23.54C5.43 26.47 6.16 29.38 7.56 32C9.47 35.58 12.54 38.42 16.28 40.08C20.02 41.73 24.21 42.09 28.18 41.12C32.16 40.14 35.69 37.88 38.21 34.69C40.72 31.5 42.09 27.58 42.09 23.54L42.09 23.51L42.09 23.03L47.21 19.3C47.47 20.68 47.59 22.08 47.59 23.48ZM42.63 9.13C43.76 10.57 44.72 12.14 45.48 13.81L23.79 29.61L14.73 23.99L14.73 17.23L23.79 22.85L42.63 9.13Z";
 
