@@ -1,4 +1,4 @@
-# Тест-кейсы PCF
+# Тест-кейсы STORM
 
 > Pentest Collaboration Framework — система совместной работы над пентест-проектами.
 > Документ описывает актуальное тестовое покрытие приложения и предложенные сценарии для расширения покрытия.
@@ -55,7 +55,6 @@
 | TC-AUTH-008 | CSRF: POST без Origin → 403 | — | `enforce_csrf(request_POST, origin=None)` | `ForbiddenError("Отсутствует заголовок Origin")` | Реализован |
 | TC-AUTH-009 | CSRF: чужой Origin → 403 | — | `enforce_csrf(request_PATCH, origin="http://evil.local")` | `ForbiddenError("Недопустимый Origin")` | Реализован |
 | TC-AUTH-010 | CSRF: разрешённый Origin принимается | — | `enforce_csrf(request_DELETE, origin="http://localhost:3000")` | Запрос проходит | Реализован |
-| TC-AUTH-011 | Lock: смена пароля разрешает только whitelist endpoints | Пользователь с `must_change_password=True` | `is_password_change_allowed_path(path, method)` для серии комбинаций | True для `/api/v1/auth/force-change-password POST`, `/api/v1/auth/logout POST`, `/api/v1/users/me GET`, `/api/v1/users/me/profile GET`; False для `/api/v1/users/me PATCH`, `/api/v1/users/me/password PATCH`, `/api/v1/projects GET` | Реализован |
 | TC-AUTH-012 | Login: пустые credentials отклоняются | — | `LoginRequest(username="", password="")` (`tests/test_additional_validations.py`) | `pydantic.ValidationError` | Реализован |
 | TC-AUTH-013 | Login: успешный логин выставляет cookie | Существует пользователь admin | POST `/api/v1/auth/login` с валидными credentials | 200; в `Set-Cookie` есть `access_token` (Path=/) и `refresh_token` (Path=/api/v1/auth/refresh); ответ не содержит token-полей | Запланирован |
 | TC-AUTH-014 | Login: неверный пароль → 401 | Существует пользователь | POST `/api/v1/auth/login` с неверным паролем | 401 `UnauthorizedError` | Запланирован |
@@ -63,7 +62,6 @@
 | TC-AUTH-016 | Refresh: ротация — старый токен отзывается | Есть refresh cookie | POST `/api/v1/auth/refresh` | 200; новые `access_token`+`refresh_token`; `RefreshTokenRecord.revoked_at` старого выставлен | Запланирован |
 | TC-AUTH-017 | Refresh: повторное использование отзывает все токены пользователя (reuse detection) | Refresh уже был обменен | POST `/api/v1/auth/refresh` со старым refresh-токеном | 401; все `RefreshTokenRecord` пользователя помечены revoked | Запланирован |
 | TC-AUTH-018 | Logout: токены отзываются и cookie очищаются | Авторизован | POST `/api/v1/auth/logout` | 204; cookie с `Max-Age=0`; запись аудита `LOGOUT` | Запланирован |
-| TC-AUTH-019 | Force-change-password: блокирует, если флаг не установлен | `must_change_password=False` | `UserService.force_change_password(user_id, "Pass...")` (`tests/test_user_service_security.py`) | `ForbiddenError("не требуется")` | Реализован |
 | TC-AUTH-020 | Force-change-password: требует длину ≥ 8 | — | `ForceChangePasswordRequest(new_password="short")` | `pydantic.ValidationError` | Запланирован |
 | TC-AUTH-021 | JWT: слишком короткий jwt_secret_key отклоняется в Settings | — | `Settings(jwt_secret_key="short-secret", ...)` (`tests/test_additional_validations.py`) | `pydantic.ValidationError` | Реализован |
 
@@ -77,8 +75,8 @@
 | TC-USER-002 | UserCreate принимает роль admin | — | `UserCreate(..., role="admin")` (`tests/test_additional_validations.py`) | `payload.role.value == "admin"` | Реализован |
 | TC-USER-003 | Admin не может менять email другого пользователя | Целевой user existing | `UserService.update_user(user_id, {"email": "new@..."}, actor_id=other)` (`tests/test_user_service_security.py`) | `ValidationError("не может менять email")` | Реализован |
 | TC-USER-004 | Аватар: запрет просмотра чужого аватара пентестером | requester role=PENTESTER, target_id != requester.id | `UserService.ensure_can_view_avatar(requester, target_id)` | `ForbiddenError("чужого аватара")` | Реализован |
-| TC-USER-005 | Создание admin / lead / pentester / developer через POST /users | Логин admin | POST `/api/v1/users` с разными ролями | 201, поля пользователя без `password_hash` | Запланирован |
-| TC-USER-006 | Reset password (admin) генерирует временный пароль и письмо | Admin авторизован | PATCH `/api/v1/users/{user_id}/password` | 200, `must_change_password=True`, `email_sent_to=<email>`, опционально `mail_preview_url` | Запланирован |
+| TC-USER-005 | Создание admin / pentester через POST /users | Логин admin | POST `/api/v1/users` с разными ролями | 201, поля пользователя без `password_hash` | Запланирован |
+| TC-USER-006 | Reset password (admin) генерирует временный пароль и письмо | Admin авторизован | PATCH `/api/v1/users/{user_id}/password` | 200, `ok=true`, `email_sent_to=<email>`, опционально `mail_preview_url`; активные refresh-токены отозваны | Запланирован |
 | TC-USER-007 | Self-update profile (PATCH /users/me) меняет full_name/tags | Любой пользователь | PATCH `/api/v1/users/me` с `{full_name, tags}` | 200, обновлённый профиль | Запланирован |
 | TC-USER-008 | Загрузка аватара POST /users/me/avatar | Авторизован | POST `/api/v1/users/me/avatar` с файлом изображения | 200, `avatar_url` обновлён | Запланирован |
 | TC-USER-009 | Самоудаление запрещено (DELETE /users/{self_id}) | Admin | DELETE `/api/v1/users/{admin_id}` под admin | 400/403 | Запланирован |
@@ -334,11 +332,9 @@
 | TC-UI-001 | App: показывает прогресс-бар, пока auth не инициализирован | `isInitialized=false` | `renderWithProviders(<App themeMode="dark"/>, "/login")` (`src/App.test.tsx`) | `screen.getByRole("progressbar")`; `initialize()` вызван | Реализован |
 | TC-UI-002 | App: рендерит LoginPage для анонимного пользователя | `user=null` | renderWithProviders в `/login` | Видно «Login page» | Реализован |
 | TC-UI-003 | App: не запрашивает unread notifications для анонимного | `user=null` | render | `unreadCount` не вызван | Реализован |
-| TC-UI-004 | App: пользователь с `must_change_password=true` → /force-change-password | user.must_change_password=true | render `/login` | Видно «Force change password page» | Реализован |
 | TC-UI-005 | App: non-admin не видит admin-роут (/users) | role=pentester | render `/users` | Редирект на «Projects page» | Реализован |
 | TC-UI-006 | LoginPage стартует с пустыми credentials | — | render LoginPage (`src/pages/LoginPage.test.tsx`) | username и password пустые | Реализован |
-| TC-UI-007 | LoginPage: успешный логин ведёт на `/` | `signIn` resolves `{must_change_password:false}` | заполнить, кликнуть «Войти» | `signIn("admin","admin")`, `navigate("/")` | Реализован |
-| TC-UI-008 | LoginPage: temp password ведёт на `/force-change-password` | `signIn` resolves с `must_change_password:true` | submit | `navigate("/force-change-password")` | Реализован |
+| TC-UI-007 | LoginPage: успешный логин ведёт на `/` | `signIn` resolves | заполнить, кликнуть «Войти» | `signIn("admin","admin")`, `navigate("/")` | Реализован |
 | TC-UI-009 | LoginPage: при ошибке navigate не вызывается | `signIn` rejects | submit | `navigate` не вызван | Реализован |
 | TC-UI-010 | ForceChangePasswordPage: кнопка disabled пока пароли не совпадают | — | type "Password123" + "Mismatch123" → match (`src/pages/ForceChangePasswordPage.test.tsx`) | enabled только при совпадении | Реализован |
 | TC-UI-011 | ForceChangePasswordPage: submit вызывает API, setUser, navigate("/") replace | — | заполнить, click «Сохранить пароль» | `forceChangePassword("Password123")`, `setUser`, `navigate("/", {replace:true})` | Реализован |

@@ -1,4 +1,4 @@
-# Архитектура PCF (Pentest Collaboration Framework)
+# Архитектура STORM (Offensive Security Research & Management)
 
 > Документ описывает АКТУАЛЬНОЕ состояние кода в репозитории. Структура backend — плоская: один `app/services.py`, один `app/schemas.py`, один `app/models.py` (без Repository pattern и без подкаталога `repositories/`).
 >
@@ -87,7 +87,6 @@ backend/
 │   ├── mail.py                    # build_temporary_password_email (рендер шаблона)
 │   ├── routers/
 │   │   ├── auth.py                # /auth — login, refresh (rotation), logout,
-│   │   │                          # force-change-password
 │   │   ├── users.py               # /users — CRUD, /me, /me/profile, /me/avatar,
 │   │   │                          # password reset (admin)
 │   │   ├── projects.py            # /projects — CRUD проектов и папок (folders + move),
@@ -218,11 +217,10 @@ frontend/src/
 ### Bootstrap admin
 
 - При запуске, если таблица `users` пуста, создаётся пользователь из `initial_admin_username` / `initial_admin_email` / `initial_admin_password`.
-- Если пароль — слабый дефолт (`admin`, `password`, `12345678`), флаг `must_change_password=True`. До смены пароля разрешены только: `POST /auth/force-change-password`, `POST /auth/logout`, `GET /users/me`, `GET /users/me/profile`.
 
 ### Роли
 
-`UserRole`: `admin`, `lead`, `pentester`, `developer`.
+`UserRole` (аккаунтная): `admin`, `pentester`. `ProjectRole` (проектная, глобальная, задаётся в /members): `lead`, `pentester`.
 
 ### Доступ к проектам
 
@@ -267,7 +265,7 @@ frontend/src/
 |                                   | vulnerabilities, comments, notes                                    |
 | `/ws/projects-index`              | Общий канал списка проектов (обновления при создании/изменении)    |
 
-Аутентификация WS — через `access_token` cookie (JWT). При `must_change_password=True` соединение закрывается. Доступ к каналу проекта — через `ProjectMember` (или admin).
+Аутентификация WS — через `access_token` cookie (JWT). Доступ к каналу проекта — через `ProjectMember` (или admin).
 
 `ws_manager` (`app/ws_manager.py`):
 - `connect(project_id, ws)` / `broadcast(project_id, event)` — события проекта.
@@ -316,7 +314,7 @@ frontend/src/
 
 | Группа                                          | Описание                                                       |
 |-------------------------------------------------|----------------------------------------------------------------|
-| `/api/v1/auth/*`                                | login, refresh (rotation), logout, force-change-password       |
+| `/api/v1/auth/*`                                | login, refresh (rotation), logout                              |
 | `/api/v1/users/*`                               | CRUD пользователей, `/me`, `/me/profile`, `/me/avatar`,        |
 |                                                 | сброс пароля админом (`PATCH /users/{id}/password`)            |
 | `/api/v1/projects/*`                            | CRUD проектов, `/projects/folders` (CRUD папок + move),        |

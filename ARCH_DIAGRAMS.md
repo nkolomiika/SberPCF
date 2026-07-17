@@ -1,4 +1,4 @@
-# ARCH_DIAGRAMS — Подробные диаграммы PCF
+# ARCH_DIAGRAMS — Подробные диаграммы STORM
 
 > Дополняет [ARCH.md](ARCH.md). Все диаграммы — Mermaid (рендерятся в GitHub / VSCode / Markdown-просмотрщиках с поддержкой Mermaid).
 >
@@ -8,7 +8,7 @@
 
 ## 1. System Context (C4-L1)
 
-Кто и как взаимодействует с PCF.
+Кто и как взаимодействует со STORM.
 
 ```mermaid
 flowchart LR
@@ -17,7 +17,7 @@ flowchart LR
     Admin(["Администратор<br/>(браузер)"])
     AIAgent(["AI-агент<br/>(внешний процесс)"])
 
-    subgraph PCF["PCF — Pentest Collaboration Framework"]
+    subgraph STORM["STORM — Offensive Security Research & Management"]
         Frontend["Frontend<br/>React + Vite<br/>:3000"]
         Backend["Backend<br/>FastAPI<br/>:8000"]
         Worker["mail-worker<br/>(sidecar)"]
@@ -205,27 +205,7 @@ sequenceDiagram
 
 ---
 
-## 5. Force change password — первый вход или после сброса
-
-Пока `users.must_change_password = true`, фронт разрешает только `/force-change-password`.
-
-```mermaid
-stateDiagram-v2
-    [*] --> LoggedIn: login успешен
-    LoggedIn --> ForceChange: must_change_password=true
-    LoggedIn --> Normal: must_change_password=false
-
-    ForceChange --> ChangePasswordRoute: фронт жёстко<br/>редиректит на /force-change-password
-    ChangePasswordRoute --> ValidatePolicy: ввод нового пароля
-    ValidatePolicy --> SaveNew: passing policy
-    ValidatePolicy --> ChangePasswordRoute: too weak / 422
-    SaveNew --> Normal: password_hash updated<br/>must_change_password=false<br/>password_changed_at=now
-    Normal --> [*]
-```
-
----
-
-## 6. Управление сессией — refresh rotation детальнее
+## 5. Управление сессией — refresh rotation детальнее
 
 Защита от replay и кражи refresh-токена.
 
@@ -244,7 +224,7 @@ flowchart TB
 
 ---
 
-## 7. CSRF + Origin защита
+## 6. CSRF + Origin защита
 
 `SameSite=Strict` блокирует cross-site cookies; дополнительно проверяем заголовок `Origin`.
 
@@ -263,9 +243,9 @@ flowchart LR
 
 ---
 
-## 8. Доступ к проекту — IDOR-проверки
+## 7. Доступ к проекту — IDOR-проверки
 
-`require_project_access` гарантирует, что pentester/developer видит только свои проекты, admin — все.
+`require_project_access` гарантирует, что pentester видит только свои проекты, admin — все.
 
 ```mermaid
 flowchart TB
@@ -275,14 +255,14 @@ flowchart TB
     Lookup -->|нет проекта| NotFound["404 NotFoundError"]
     Lookup -->|проект найден| Role{"User.role?"}
     Role -->|admin| Allow["проект передаётся в роут"]
-    Role -->|pentester / developer| Member["SELECT project_members<br/>WHERE project_id=? AND user_id=?"]
+    Role -->|pentester| Member["SELECT project_members<br/>WHERE project_id=? AND user_id=?"]
     Member -->|строка есть| Allow
     Member -->|нет| Forbid["403 ForbiddenError"]
 ```
 
 ---
 
-## 9. Жизненный цикл уязвимости
+## 8. Жизненный цикл уязвимости
 
 Статусы и workflow_steps (этапы воспроизведения).
 
@@ -310,7 +290,7 @@ stateDiagram-v2
 
 ---
 
-## 10. Загрузка evidence-файла в MinIO
+## 9. Загрузка evidence-файла в MinIO
 
 Конвейер с валидацией и transaction outbox (метаданные в Postgres → объект в MinIO).
 
@@ -346,7 +326,7 @@ sequenceDiagram
 
 ---
 
-## 11. Mail outbox + worker
+## 10. Mail outbox + worker
 
 Outbox pattern: письмо сначала сохраняется в БД как `MailJob`, потом ID публикуется в RabbitMQ. Воркер потребляет ID, забирает `MailJob` из БД и шлёт по SMTP.
 
@@ -391,7 +371,7 @@ sequenceDiagram
 
 ---
 
-## 12. Jira export — все защитные слои
+## 11. Jira export — все защитные слои
 
 Самая «тяжёлая» по защитам цепочка: SSRF + DNS rebind + race condition + сетевые ошибки.
 
@@ -468,7 +448,7 @@ sequenceDiagram
 
 ---
 
-## 13. SSRF & DNS-rebind защита — внутренности
+## 12. SSRF & DNS-rebind защита — внутренности
 
 ```mermaid
 flowchart TB
@@ -495,7 +475,7 @@ flowchart TB
 
 ---
 
-## 14. WebSocket — каналы и события
+## 13. WebSocket — каналы и события
 
 Backend держит три типа каналов через `ConnectionManager`.
 
@@ -539,11 +519,10 @@ flowchart TB
 ```
 
 Подписка происходит вместе с handshake, аутентификация — `access_token` из cookie.
-При `must_change_password=true` соединение закрывается с кодом 1008.
 
 ---
 
-## 15. AI Agent API `/api/v2` — scoping и проверка доступа
+## 14. AI Agent API `/api/v2` — scoping и проверка доступа
 
 Отдельное FastAPI-приложение, смонтированное на `/api/v2`. Аутентификация — Bearer-токен, выпущенный администратором.
 
@@ -595,7 +574,7 @@ flowchart LR
 
 ---
 
-## 16. Audit log — запись и чтение
+## 15. Audit log — запись и чтение
 
 Единое хранилище — PostgreSQL. Запись синхронная с основной транзакцией, чтение через фильтры с full-text по action / entity_type / ip / username / cast(details::text).
 
@@ -624,7 +603,7 @@ flowchart TB
 
 ---
 
-## 17. Word-отчёты — конвейер генерации
+## 16. Word-отчёты — конвейер генерации
 
 ПП = все страницы landscape, СЗИ = portrait. Общая логика в `_build_common`.
 
@@ -659,7 +638,7 @@ flowchart TB
 
 ---
 
-## 18. Импорт OpenAPI/Swagger по endpoint'ам
+## 17. Импорт OpenAPI/Swagger по endpoint'ам
 
 Импорт спецификации в каталог endpoint'ов хоста.
 
@@ -693,7 +672,7 @@ sequenceDiagram
 
 ---
 
-## 19. PCF JSON импорт — атомарный
+## 18. PCF JSON импорт — атомарный
 
 Полный rollback при любой ошибке. Идемпотентность по идентифицирующим полям.
 
@@ -719,7 +698,7 @@ flowchart TB
 
 ---
 
-## 20. Frontend — высокоуровневая структура
+## 19. Frontend — высокоуровневая структура
 
 ```mermaid
 flowchart TB
@@ -769,7 +748,7 @@ flowchart TB
 
 ---
 
-## 21. ER-диаграмма (укорочённая)
+## 20. ER-диаграмма (укорочённая)
 
 Полное описание — в [DB_SCHEMA.md](DB_SCHEMA.md). Здесь укрупнённая карта связей.
 

@@ -1,4 +1,4 @@
-# Use Cases — Pentest Collaboration Framework (PCF)
+# Use Cases — STORM
 
 Документ описывает ключевые сценарии использования системы. Все use cases опираются на
 реализованный backend (`FastAPI` + `PostgreSQL` + `MinIO` + `RabbitMQ`)
@@ -21,34 +21,28 @@
   2. Frontend выполняет `POST /api/v1/auth/login` с CSRF-токеном из cookie.
   3. `AuthService.login` проверяет пароль (Argon2/bcrypt), пишет audit `LOGIN`.
   4. Backend выдаёт пару cookie: `access_token` (JWT, короткоживущий) и `refresh_token` (хэш сохранён в `refresh_tokens`).
-  5. Возвращает `LoginResponse` с `id`, `username`, `role`, `must_change_password`.
+  5. Возвращает `LoginResponse` с `id`, `username`, `role`.
 - **Альтернативы:**
   - **Неверные креды** — 401, audit `LOGIN_FAILED`.
-  - **`must_change_password = true`** — фронт редиректит на `/force-change-password` (UC-02).
   - **`is_active = false`** — 403.
 - **Постусловия:** активная сессия в браузере, открыт WebSocket-канал уведомлений.
 
-## UC-02. Принудительная смена пароля при первом входе или после reset
+## UC-02. — удалён
 
-- **Участники:** пользователь с `must_change_password = true`.
-- **Предусловия:** пользователь только что залогинился; access cookie выдан.
-- **Основной поток:**
-  1. Frontend блокирует все маршруты, кроме `/force-change-password`.
-  2. Пользователь вводит новый пароль, удовлетворяющий политике.
-  3. `POST /api/v1/auth/force-change-password` обновляет `password_hash`, сбрасывает флаг, ставит `password_changed_at`.
-  4. Audit `PASSWORD_CHANGED`.
-- **Постусловия:** обычная навигация разблокирована.
+Механизм временного пароля (флаг `must_change_password` + экран принудительной
+смены) убран из продукта. Номер не переиспользуется, чтобы ссылки на остальные
+сценарии не разъехались.
 
 ## UC-03. Сброс пароля администратором с письмом по email
 
 - **Участники:** `admin`, целевой пользователь.
 - **Основной поток:**
   1. Админ на `/users` нажимает «Сбросить пароль» у пользователя.
-  2. `PATCH /api/v1/users/{id}/password` генерирует временный пароль, ставит `must_change_password = true`.
+  2. `PATCH /api/v1/users/{id}/password` генерирует временный пароль и отзывает активные refresh-токены.
   3. Создаётся `MailJob` (template `password_reset`), публикуется в RabbitMQ; SMTP-воркер отправляет письмо.
-  4. Возвращается `PasswordResetOut` (email, флаг must_change_password, опционально `mail_preview_url` для Mailpit).
+  4. Возвращается `PasswordResetOut` (`ok`, `email_sent_to`, опционально `mail_preview_url` для Mailpit).
 - **Альтернативы:** при сбое RabbitMQ задача остаётся в `pending`, повторяется воркером.
-- **Постусловия:** при следующем логине срабатывает UC-02.
+- **Постусловия:** пользователь входит с временным паролем из письма и меняет его в профиле.
 
 ## UC-04. Создание проекта и иерархия папок
 
@@ -100,7 +94,7 @@
 
 ## UC-08. Загрузка и скачивание файлов доказательной базы
 
-- **Участники:** `pentester`, `admin`, `developer` (только чтение).
+- **Участники:** `pentester`, `admin`.
 - **Основной поток:**
   1. В карточке уязвимости кнопка «Загрузить файл».
   2. `POST .../vulnerabilities/{vid}/files` (multipart). Backend проверяет mime по whitelist, размер ≤ 50 МБ.
@@ -110,7 +104,7 @@
 
 ## UC-09. Комментирование уязвимости с упоминаниями
 
-- **Участники:** `pentester`, `admin`, `developer`.
+- **Участники:** `pentester`, `admin`.
 - **Основной поток:**
   1. На карточке уязвимости пишется комментарий с `@username`.
   2. `POST .../vulnerabilities/{vid}/comments` создаёт запись и парсит mentions.
@@ -225,7 +219,7 @@
 - **Основной поток:**
   1. SPA при загрузке открывает каналы:
      - `/ws/projects-index` — изменения в общем списке проектов;
-     - `/ws/notifications` — персональные уведомления (фильтр по `must_change_password`);
+     - `/ws/notifications` — персональные уведомления;
      - `/ws/projects/{id}` — события внутри открытого проекта (после проверки членства).
   2. На сообщение фронт обновляет соответствующий стейт без перезагрузки.
 - **Альтернативы:** нет access cookie / отозван — close 4401; не член проекта — close 4403.

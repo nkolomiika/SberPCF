@@ -1,5 +1,5 @@
-# Схема базы данных PCF
-## Pentest Collaboration Framework
+# Схема базы данных STORM
+## Offensive Security Research & Management
 
 > СУБД: **PostgreSQL** (единое хранилище — и доменные данные, и audit_logs)  
 > Удаление: **физическое** (hard delete)  
@@ -47,20 +47,18 @@ erDiagram
 
 | Колонка       | Тип                       | Ограничения              | Описание                          |
 |---------------|---------------------------|--------------------------|-----------------------------------|
-| id            | UUID                      | PK, DEFAULT gen_random_uuid() | Первичный ключ              |
+| id            | INTEGER                      | PK, autoincrement | Первичный ключ              |
 | username            | VARCHAR(100)              | NOT NULL, UNIQUE         | Имя пользователя (логин)                      |
 | email               | VARCHAR(255)              | NOT NULL, UNIQUE         | Электронная почта                             |
 | full_name           | VARCHAR(255)              | NULLABLE                 | Отображаемое имя пользователя                 |
-| tags                | JSON / ARRAY(JSON text)   | NOT NULL, DEFAULT []     | Пользовательские теги профиля                 |
-| avatar_url          | VARCHAR(500)              | NULLABLE                 | Публичный URL/роут для выдачи аватара         |
 | avatar_minio_bucket | VARCHAR(63)               | NULLABLE                 | Бакет MinIO с аватаром                        |
 | avatar_minio_key    | TEXT                      | NULLABLE                 | Ключ объекта аватара в MinIO                  |
 | avatar_content_type | VARCHAR(127)              | NULLABLE                 | MIME-тип аватара                              |
 | avatar_uploaded_at  | TIMESTAMPTZ               | NULLABLE                 | Дата загрузки аватара                         |
 | password_hash       | VARCHAR(255)              | NOT NULL                 | Хэш пароля (bcrypt)                           |
-| role                | ENUM('admin','pentester','developer') | NOT NULL, DEFAULT 'pentester' | Глобальная роль |
+| role                | ENUM('admin','pentester') | NOT NULL, DEFAULT 'pentester' | Аккаунтная роль                          |
+| project_role        | ENUM('lead','pentester')  | NOT NULL, DEFAULT 'pentester' | Проектная роль — глобальная, задаётся в /members |
 | is_active           | BOOLEAN                   | NOT NULL, DEFAULT TRUE   | Активен ли аккаунт                            |
-| must_change_password| BOOLEAN                   | NOT NULL, DEFAULT FALSE  | Требуется ли обязательная смена временного пароля |
 | password_changed_at | TIMESTAMPTZ               | NULLABLE                 | Последняя успешная смена постоянного пароля   |
 | created_at          | TIMESTAMPTZ               | NOT NULL, DEFAULT now()  | Дата регистрации                              |
 | updated_at          | TIMESTAMPTZ               | NOT NULL, DEFAULT now()  | Дата последнего изменения                     |
@@ -73,8 +71,8 @@ erDiagram
 
 | Колонка    | Тип          | Ограничения              | Описание                                           |
 |------------|--------------|--------------------------|----------------------------------------------------|
-| id         | UUID         | PK                       | Первичный ключ                                     |
-| user_id    | UUID         | NOT NULL, FK → users.id  | Владелец токена                                    |
+| id         | INTEGER         | PK                       | Первичный ключ                                     |
+| user_id    | INTEGER         | NOT NULL, FK → users.id  | Владелец токена                                    |
 | token_hash | VARCHAR(255) | NOT NULL, UNIQUE         | SHA-256 хэш refresh-токена (сам токен не хранится) |
 | expires_at | TIMESTAMPTZ  | NOT NULL                 | Срок действия                                      |
 | created_at | TIMESTAMPTZ  | NOT NULL, DEFAULT now()  | Дата выдачи                                        |
@@ -89,9 +87,9 @@ erDiagram
 
 | Колонка         | Тип           | Ограничения                          | Описание                                  |
 |-----------------|---------------|--------------------------------------|-------------------------------------------|
-| id              | UUID          | PK                                   | Первичный ключ                             |
-| user_id         | UUID          | NULLABLE, FK → users.id              | Получатель (если связан с пользователем)   |
-| created_by      | UUID          | NULLABLE, FK → users.id              | Кто инициировал отправку                   |
+| id              | INTEGER          | PK                                   | Первичный ключ                             |
+| user_id         | INTEGER          | NULLABLE, FK → users.id              | Получатель (если связан с пользователем)   |
+| created_by      | INTEGER          | NULLABLE, FK → users.id              | Кто инициировал отправку                   |
 | recipient_email | VARCHAR(255)  | NOT NULL                             | Email адрес получателя                     |
 | subject         | VARCHAR(255)  | NOT NULL                             | Тема письма                                |
 | template        | VARCHAR(100)  | NOT NULL                             | Имя шаблона/типа письма                    |
@@ -112,15 +110,15 @@ erDiagram
 
 | Колонка     | Тип          | Ограничения                   | Описание                      |
 |-------------|--------------|-------------------------------|-------------------------------|
-| id          | UUID         | PK                            | Первичный ключ                |
+| id          | INTEGER         | PK                            | Первичный ключ                |
 | name        | VARCHAR(255) | NOT NULL                      | Название проекта              |
 | folder      | VARCHAR(255) | NOT NULL, DEFAULT ''          | Папка/группа проекта в интерфейсе |
 | description | TEXT         | NULLABLE                      | Описание                      |
 | start_date  | DATE         | NULLABLE                      | Дата начала                   |
 | end_date    | DATE         | NULLABLE                      | Дата окончания                |
 | timeline_frozen_at | TIMESTAMPTZ | NULLABLE                | Время фиксации таймлайна проекта |
-| status      | ENUM('active','handover_to_development','vulnerability_recheck','completed','archived') | NOT NULL, DEFAULT 'active' | Статус    |
-| created_by  | UUID         | NOT NULL, FK → users.id       | Кто создал                    |
+| status      | ENUM('active','freeze','handover_to_development','vulnerability_recheck','completed','archived') | NOT NULL, DEFAULT 'active' | Статус    |
+| created_by  | INTEGER         | NOT NULL, FK → users.id       | Кто создал                    |
 | created_at  | TIMESTAMPTZ  | NOT NULL, DEFAULT now()       | Дата создания                 |
 | updated_at  | TIMESTAMPTZ  | NOT NULL, DEFAULT now()       | Дата последнего изменения     |
 
@@ -132,9 +130,9 @@ erDiagram
 
 | Колонка    | Тип         | Ограничения                     | Описание              |
 |------------|-------------|----------------------------------|-----------------------|
-| id         | UUID        | PK                               | Первичный ключ        |
-| project_id | UUID        | NOT NULL, FK → projects.id       | Проект                |
-| user_id    | UUID        | NOT NULL, FK → users.id          | Пользователь          |
+| id         | INTEGER        | PK                               | Первичный ключ        |
+| project_id | INTEGER        | NOT NULL, FK → projects.id       | Проект                |
+| user_id    | INTEGER        | NOT NULL, FK → users.id          | Пользователь          |
 | added_at   | TIMESTAMPTZ | NOT NULL, DEFAULT now()          | Дата добавления       |
 
 **Уникальность:** `UNIQUE(project_id, user_id)`
@@ -145,8 +143,8 @@ erDiagram
 
 | Колонка    | Тип          | Ограничения               | Описание                              |
 |------------|--------------|---------------------------|---------------------------------------|
-| id         | UUID         | PK                        | Первичный ключ                        |
-| project_id | UUID         | NOT NULL, FK → projects.id | Проект                               |
+| id         | INTEGER         | PK                        | Первичный ключ                        |
+| project_id | INTEGER         | NOT NULL, FK → projects.id | Проект                               |
 | ip_address | VARCHAR(45)  | NULLABLE                  | IP-адрес (IPv4 или IPv6)              |
 | hostname   | VARCHAR(255) | NULLABLE                  | Доменное имя / hostname               |
 | status     | ENUM('up','down','unknown') | NOT NULL, DEFAULT 'unknown' | Статус доступности |
@@ -163,8 +161,8 @@ erDiagram
 
 | Колонка     | Тип                       | Ограничения              | Описание              |
 |-------------|---------------------------|--------------------------|-----------------------|
-| id          | UUID                      | PK                       | Первичный ключ        |
-| host_id     | UUID                      | NOT NULL, FK → hosts.id  | Хост                  |
+| id          | INTEGER                      | PK                       | Первичный ключ        |
+| host_id     | INTEGER                      | NOT NULL, FK → hosts.id  | Хост                  |
 | port_number | SMALLINT                  | NOT NULL, CHECK(1..65535) | Номер порта          |
 | protocol    | ENUM('tcp','udp')         | NOT NULL, DEFAULT 'tcp'  | Протокол              |
 | state       | ENUM('open','closed','filtered') | NOT NULL, DEFAULT 'open' | Состояние порта |
@@ -179,8 +177,8 @@ erDiagram
 
 | Колонка    | Тип          | Ограничения              | Описание                     |
 |------------|--------------|--------------------------|------------------------------|
-| id         | UUID         | PK                       | Первичный ключ               |
-| port_id    | UUID         | NOT NULL, FK → ports.id  | Порт                         |
+| id         | INTEGER         | PK                       | Первичный ключ               |
+| port_id    | INTEGER         | NOT NULL, FK → ports.id  | Порт                         |
 | name       | VARCHAR(100) | NOT NULL                 | Название сервиса (http, ssh и т.д.) |
 | version    | VARCHAR(100) | NULLABLE                 | Версия сервиса               |
 | banner     | TEXT         | NULLABLE                 | Баннер сервиса               |
@@ -193,10 +191,10 @@ erDiagram
 
 | Колонка    | Тип                                                           | Ограничения              | Описание                        |
 |------------|---------------------------------------------------------------|--------------------------|----------------------------------|
-| id         | UUID                                                          | PK                       | Первичный ключ                   |
-| host_id    | UUID                                                          | NOT NULL, FK → hosts.id  | Хост, к которому принадлежит     |
+| id         | INTEGER                                                          | PK                       | Первичный ключ                   |
+| host_id    | INTEGER                                                          | NOT NULL, FK → hosts.id  | Хост, к которому принадлежит     |
 | path       | TEXT                                                          | NOT NULL                 | URL-путь (например, /api/login)  |
-| method     | ENUM('GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS')    | NULLABLE                 | HTTP-метод                       |
+| method     | ENUM('GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS','QUERY')    | NULLABLE                 | HTTP-метод                       |
 | description| TEXT                                                          | NULLABLE                 | Описание назначения              |
 | created_at | TIMESTAMPTZ                                                   | NOT NULL, DEFAULT now()  | Дата добавления                  |
 | updated_at | TIMESTAMPTZ                                                   | NOT NULL, DEFAULT now()  | Дата изменения                   |
@@ -209,8 +207,8 @@ erDiagram
 
 | Колонка              | Тип                                                            | Ограничения                    | Описание                              |
 |----------------------|----------------------------------------------------------------|--------------------------------|---------------------------------------|
-| id                   | UUID                                                           | PK                             | Первичный ключ                        |
-| project_id           | UUID                                                           | NOT NULL, FK → projects.id     | Проект                                |
+| id                   | INTEGER                                                           | PK                             | Первичный ключ                        |
+| project_id           | INTEGER                                                           | NOT NULL, FK → projects.id     | Проект                                |
 | title                | VARCHAR(500)                                                   | NOT NULL                       | Наименование уязвимости               |
 | description          | TEXT                                                           | NULLABLE                       | Описание                              |
 | severity             | ENUM('critical','high','medium','low','info')                  | NOT NULL                       | Уровень критичности                   |
@@ -223,7 +221,7 @@ erDiagram
 | steps_to_reproduce   | TEXT                                                           | NULLABLE                       | Шаги воспроизведения                  |
 | impact               | TEXT                                                           | NULLABLE                       | Описание влияния                      |
 | recommendations      | TEXT                                                           | NULLABLE                       | Рекомендации по устранению            |
-| created_by           | UUID                                                           | NOT NULL, FK → users.id        | Автор записи                          |
+| created_by           | INTEGER                                                           | NOT NULL, FK → users.id        | Автор записи                          |
 | created_at           | TIMESTAMPTZ                                                    | NOT NULL, DEFAULT now()        | Дата создания                         |
 | updated_at           | TIMESTAMPTZ                                                    | NOT NULL, DEFAULT now()        | Дата последнего изменения             |
 
@@ -237,10 +235,10 @@ erDiagram
 
 | Колонка          | Тип                                              | Ограничения                           | Описание                          |
 |------------------|--------------------------------------------------|---------------------------------------|-----------------------------------|
-| id               | UUID                                             | PK                                    | Первичный ключ                    |
-| vulnerability_id | UUID                                             | NOT NULL, FK → vulnerabilities.id     | Уязвимость                        |
+| id               | INTEGER                                             | PK                                    | Первичный ключ                    |
+| vulnerability_id | INTEGER                                             | NOT NULL, FK → vulnerabilities.id     | Уязвимость                        |
 | asset_type       | ENUM('host','port','service','endpoint')         | NOT NULL                              | Тип актива                        |
-| asset_id         | UUID                                             | NOT NULL                              | ID актива в соответствующей таблице |
+| asset_id         | INTEGER                                             | NOT NULL                              | ID актива в соответствующей таблице |
 
 **Уникальность:** `UNIQUE(vulnerability_id, asset_type, asset_id)`  
 **Примечание:** `asset_id` является ненастоящим FK на уровне БД из-за полиморфности. Целостность обеспечивается на уровне приложения.
@@ -253,14 +251,14 @@ erDiagram
 
 | Колонка          | Тип          | Ограничения                       | Описание                                    |
 |------------------|--------------|-----------------------------------|---------------------------------------------|
-| id               | UUID         | PK                                | Первичный ключ                              |
-| vulnerability_id | UUID         | NOT NULL, FK → vulnerabilities.id | Привязка к уязвимости                       |
+| id               | INTEGER         | PK                                | Первичный ключ                              |
+| vulnerability_id | INTEGER         | NOT NULL, FK → vulnerabilities.id | Привязка к уязвимости                       |
 | original_name    | VARCHAR(500) | NOT NULL                          | Оригинальное имя файла                      |
 | content_type     | VARCHAR(127) | NOT NULL                          | MIME-тип (image/png, application/pdf и т.д.)|
 | size_bytes       | BIGINT       | NOT NULL, CHECK(size_bytes <= 52428800) | Размер файла в байтах (макс. 50 МБ)   |
 | minio_bucket     | VARCHAR(63)  | NOT NULL                          | Бакет в MinIO                               |
 | minio_key        | TEXT         | NOT NULL                          | Ключ объекта в MinIO                        |
-| uploaded_by      | UUID         | NOT NULL, FK → users.id           | Кто загрузил                                |
+| uploaded_by      | INTEGER         | NOT NULL, FK → users.id           | Кто загрузил                                |
 | uploaded_at      | TIMESTAMPTZ  | NOT NULL, DEFAULT now()           | Дата загрузки                               |
 
 **Индекс:** `vulnerability_id`
@@ -271,9 +269,9 @@ erDiagram
 
 | Колонка          | Тип         | Ограничения                       | Описание                   |
 |------------------|-------------|-----------------------------------|----------------------------|
-| id               | UUID        | PK                                | Первичный ключ             |
-| vulnerability_id | UUID        | NOT NULL, FK → vulnerabilities.id | Уязвимость                 |
-| user_id          | UUID        | NOT NULL, FK → users.id           | Автор комментария          |
+| id               | INTEGER        | PK                                | Первичный ключ             |
+| vulnerability_id | INTEGER        | NOT NULL, FK → vulnerabilities.id | Уязвимость                 |
+| user_id          | INTEGER        | NOT NULL, FK → users.id           | Автор комментария          |
 | content          | TEXT        | NOT NULL                          | Текст комментария          |
 | created_at       | TIMESTAMPTZ | NOT NULL, DEFAULT now()           | Дата создания              |
 | updated_at       | TIMESTAMPTZ | NOT NULL, DEFAULT now()           | Дата редактирования        |
@@ -286,9 +284,9 @@ erDiagram
 
 | Колонка    | Тип  | Ограничения                   | Описание               |
 |------------|------|-------------------------------|------------------------|
-| id         | UUID | PK                            | Первичный ключ         |
-| comment_id | UUID | NOT NULL, FK → comments.id    | Комментарий            |
-| user_id    | UUID | NOT NULL, FK → users.id       | Упомянутый пользователь|
+| id         | INTEGER | PK                            | Первичный ключ         |
+| comment_id | INTEGER | NOT NULL, FK → comments.id    | Комментарий            |
+| user_id    | INTEGER | NOT NULL, FK → users.id       | Упомянутый пользователь|
 
 **Уникальность:** `UNIQUE(comment_id, user_id)`
 
@@ -296,16 +294,27 @@ erDiagram
 
 ### `notifications` — In-app уведомления
 
-Уведомления создаются при @-упоминании пользователя в комментарии.
+Уведомления создаются ровно по четырём поводам (`NotificationType`), других нет:
+упоминание `@username`, добавление в проект, смена статуса своей находки и смена
+статуса проекта. Инициатора события никогда не уведомляем.
 
-| Колонка    | Тип                          | Ограничения               | Описание                                        |
-|------------|------------------------------|---------------------------|-------------------------------------------------|
-| id         | UUID                         | PK                        | Первичный ключ                                  |
-| user_id    | UUID                         | NOT NULL, FK → users.id   | Получатель уведомления                          |
-| type       | ENUM('mention')              | NOT NULL                  | Тип уведомления (расширяемо)                    |
-| comment_id | UUID                         | NULLABLE, FK → comments.id| Связанный комментарий (для type = 'mention')    |
-| is_read    | BOOLEAN                      | NOT NULL, DEFAULT FALSE    | Прочитано ли                                    |
-| created_at | TIMESTAMPTZ                  | NOT NULL, DEFAULT now()   | Дата создания                                   |
+Предмет уведомления лежит на самой записи: у упоминаний это комментарий
+(`comment_id` **либо** `note_comment_id`), у остальных — `project_id` /
+`vulnerability_id`.
+
+| Колонка          | Тип                          | Ограничения                            | Описание                                            |
+|------------------|------------------------------|----------------------------------------|-----------------------------------------------------|
+| id               | INTEGER                      | PK                                     | Первичный ключ                                      |
+| user_id          | INTEGER                      | NOT NULL, FK → users.id                | Получатель уведомления                              |
+| type             | ENUM('mention','project_member_added','vuln_status_changed','project_status_changed') | NOT NULL | Повод |
+| comment_id       | INTEGER                      | NULLABLE, FK → comments.id             | Упоминание в комментарии к находке                  |
+| note_comment_id  | INTEGER                      | NULLABLE, FK → project_note_comments.id| Упоминание в комментарии к заметке                  |
+| project_id       | INTEGER                      | NULLABLE, FK → projects.id (CASCADE)   | Проект — для добавления в проект и смены его статуса |
+| vulnerability_id | INTEGER                      | NULLABLE, FK → vulnerabilities.id (CASCADE) | Находка — для смены её статуса                 |
+| actor_id         | INTEGER                      | NULLABLE, FK → users.id (SET NULL)     | Кто инициировал событие                             |
+| status           | VARCHAR(50)                  | NULLABLE                               | Выставленный статус (для смен статуса)              |
+| is_read          | BOOLEAN                      | NOT NULL, DEFAULT FALSE                | Прочитано ли                                        |
+| created_at       | TIMESTAMPTZ                  | NOT NULL, DEFAULT now()                | Дата создания                                       |
 
 **Индексы:** `user_id`, `(user_id, is_read)` (для счётчика непрочитанных)
 
@@ -351,6 +360,7 @@ Vulnerability ──► vulnerability_assets (asset_type + asset_id)
 | Значение                    | Описание                                  |
 |----------------------------|--------------------------------------------|
 | active                     | Активный проект                            |
+| freeze                     | Работы приостановлены                      |
 | handover_to_development    | Передача результатов разработке             |
 | vulnerability_recheck      | Повторная проверка после исправлений        |
 | completed                  | Завершён                                   |
@@ -381,7 +391,7 @@ Vulnerability ──► vulnerability_assets (asset_type + asset_id)
 {
   "event": "created" | "updated" | "deleted",
   "entity": "host" | "port" | "service" | "endpoint" | "vulnerability" | "comment" | "file",
-  "project_id": "<uuid>",
+  "project_id": <int>,
   "data": { /* объект сущности */ }
 }
 ```
@@ -401,7 +411,7 @@ WebSocket-подключение авторизуется `access_token` из ht
 
 ## Замечания разработчику
 
-1. Все первичные ключи — `UUID` (генерируются через `gen_random_uuid()`).
+1. Все первичные ключи — `INTEGER` (autoincrement).
 2. Временные метки хранятся в `TIMESTAMPTZ` (UTC). Конвертация в локальное время — на стороне клиента.
 3. Все ENUM-типы создавать через `CREATE TYPE` в PostgreSQL до создания таблиц.
 4. Таблица `vulnerability_assets` — полиморфная. Целостность `asset_id` гарантируется приложением, а не FK-ограничением БД.

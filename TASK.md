@@ -1,4 +1,4 @@
-# TASK — Pentest Collaboration Framework (PCF)
+# TASK — STORM
 
 Чек-лист реализованных задач (отмечено `[x]`) и backlog (`[ ]`), сгруппированный по
 эпикам/модулям. Источник истины — текущий код `backend/app` и `frontend/src`.
@@ -11,7 +11,6 @@
 - [x] `POST /api/v1/auth/login` (CSRF-cookie + Double Submit)
 - [x] `POST /api/v1/auth/refresh` с ротацией refresh-токена
 - [x] `POST /api/v1/auth/logout` (отзыв всех refresh-токенов, очистка cookie)
-- [x] `POST /api/v1/auth/force-change-password` (флаг `must_change_password`)
 - [x] CSRF-защита всех мутирующих эндпоинтов через `enforce_csrf`
 - [x] Проверка `is_active` пользователя на каждом запросе
 - [x] Извлечение реального IP клиента (`get_client_ip`) для audit
@@ -21,7 +20,7 @@
 
 ## Эпик 2. Управление пользователями
 
-- [x] Роли `admin` / `pentester` / `developer` (enum `UserRole`)
+- [x] Аккаунтная роль `admin` / `pentester` (`UserRole`) и проектная `lead` / `pentester` (`ProjectRole`, глобальная)
 - [x] CRUD пользователей (только admin): `GET/POST/PUT/DELETE /api/v1/users`
 - [x] `GET /api/v1/users/me` и расширенный `GET /api/v1/users/me/profile`
 - [x] `PATCH /api/v1/users/me` (full_name, email, tags)
@@ -131,11 +130,11 @@
 
 - [x] Глобальный конфиг Jira (`jira_instances`): URL, email, API-токен (шифрование at rest)
 - [x] `GET/PUT /api/v1/jira/config` (admin)
-- [x] Привязка проекта PCF к Jira project key (`project_jira_links`)
+- [x] Привязка проекта STORM к Jira project key (`project_jira_links`)
 - [x] `POST .../vulnerabilities/{vid}/jira/export` — создание Jira issue
 - [x] Хранение `JiraIssueLink` (key, URL, status, last_error)
 - [x] Просмотр привязки `GET .../vulnerabilities/{vid}/jira`
-- [ ] Двусторонняя синхронизация статусов (Jira → PCF)
+- [ ] Двусторонняя синхронизация статусов (Jira → STORM)
 - [ ] Webhooks из Jira
 - [ ] Поддержка нескольких Jira-инстансов
 
@@ -171,7 +170,7 @@
 - [x] `/ws/projects-index` — обновления списка проектов
 - [x] `/ws/notifications` — персональные уведомления
 - [x] `/ws/projects/{id}` — события проекта (с проверкой членства)
-- [x] Авторизация WS по `access_token` cookie + проверка `must_change_password`
+- [x] Авторизация WS по `access_token` cookie
 - [x] Закрытие соединения 4401/4403 при ошибках авторизации
 - [ ] Server-side rebroadcast событий с фильтрами по подсущностям
 - [ ] WebSocket-канал для admin-mass-actions
