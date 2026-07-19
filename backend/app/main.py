@@ -15,12 +15,14 @@ from app.routers import (
     audit_logs,
     auth,
     comments,
+    farm,
     files,
     images,
     import_,
     jira,
     notifications,
     projects,
+    project_credentials,
     project_notes,
     reports,
     users,
@@ -58,7 +60,9 @@ def _register_routes() -> None:
     app.include_router(users.router, prefix=prefix)
     app.include_router(projects.router, prefix=prefix)
     app.include_router(project_notes.router, prefix=prefix)
+    app.include_router(project_credentials.router, prefix=prefix)
     app.include_router(assets.router, prefix=prefix)
+    app.include_router(farm.router, prefix=prefix)
     app.include_router(vulnerabilities.router, prefix=prefix)
     app.include_router(files.router, prefix=prefix)
     app.include_router(images.router, prefix=prefix)
@@ -136,6 +140,8 @@ async def startup() -> None:
         if conn.dialect.name == "postgresql":
             await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'handover_to_development'"))
             await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'vulnerability_recheck'"))
+            # Критичность по умолчанию у новой находки — не определена (нет CVSS).
+            await conn.execute(text("ALTER TYPE vuln_severity ADD VALUE IF NOT EXISTS 'unknown'"))
             await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder VARCHAR(255) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS timeline_frozen_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE projects ALTER COLUMN folder SET DEFAULT ''"))
@@ -147,6 +153,10 @@ async def startup() -> None:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_content_type VARCHAR(127)"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_uploaded_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT false"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_confirmed_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_locked BOOLEAN NOT NULL DEFAULT false"))
             await conn.execute(text("ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS workflow_steps JSON"))
             await conn.execute(
                 text(
@@ -165,17 +175,56 @@ async def startup() -> None:
             await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_body TEXT"))
             await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_content_type VARCHAR(127)"))
             await conn.execute(text("ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS request_headers JSON"))
+            await conn.execute(text("ALTER TABLE ports ADD COLUMN IF NOT EXISTS http_status INTEGER"))
+            # Рекон-ферма: происхождение хоста, обратный резолв и признак Cloudflare.
+            await conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS origin VARCHAR(16) NOT NULL DEFAULT 'host'"))
+            await conn.execute(text("ALTER TABLE host_ip_addresses ADD COLUMN IF NOT EXISTS hostnames JSON"))
+            await conn.execute(text("ALTER TABLE host_ip_addresses ADD COLUMN IF NOT EXISTS is_cloudflare BOOLEAN NOT NULL DEFAULT false"))
+            await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'hosts'"))
+            await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS raw TEXT"))
+            await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"))
+            await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS published_at TIMESTAMP WITH TIME ZONE"))
+            await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS last_error TEXT"))
+            await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS skipped_targets JSON"))
             await conn.execute(text("UPDATE users SET tags = '[]'::json WHERE tags IS NULL"))
             await conn.execute(text("UPDATE endpoints SET query_params = '[]'::json WHERE query_params IS NULL"))
             await conn.execute(text("UPDATE endpoints SET request_headers = '[]'::json WHERE request_headers IS NULL"))
+            await conn.execute(text("UPDATE host_ip_addresses SET hostnames = '[]'::json WHERE hostnames IS NULL"))
         elif conn.dialect.name == "sqlite":
-            columns = (await conn.execute(text("PRAGMA table_info(projects)"))).fetchall()
-            has_folder = any(row[1] == "folder" for row in columns)
-            has_timeline_frozen_at = any(row[1] == "timeline_frozen_at" for row in columns)
-            if not has_folder:
-                await conn.execute(text("ALTER TABLE projects ADD COLUMN folder VARCHAR(255) NOT NULL DEFAULT ''"))
-            if not has_timeline_frozen_at:
-                await conn.execute(text("ALTER TABLE projects ADD COLUMN timeline_frozen_at TIMESTAMP"))
+            async def add_missing(table: str, columns: dict[str, str]) -> None:
+                """SQLite не умеет ADD COLUMN IF NOT EXISTS — проверяем через PRAGMA."""
+                present = {row[1] for row in (await conn.execute(text(f"PRAGMA table_info({table})"))).fetchall()}
+                for name, ddl in columns.items():
+                    if name not in present:
+                        await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
+            await add_missing(
+                "projects",
+                {
+                    "folder": "folder VARCHAR(255) NOT NULL DEFAULT ''",
+                    "timeline_frozen_at": "timeline_frozen_at TIMESTAMP",
+                },
+            )
+            await add_missing("users", {"is_locked": "is_locked BOOLEAN NOT NULL DEFAULT 0"})
+            await add_missing("hosts", {"origin": "origin VARCHAR(16) NOT NULL DEFAULT 'host'"})
+            await add_missing(
+                "host_ip_addresses",
+                {
+                    "hostnames": "hostnames JSON",
+                    "is_cloudflare": "is_cloudflare BOOLEAN NOT NULL DEFAULT 0",
+                },
+            )
+            await add_missing(
+                "host_farm_jobs",
+                {
+                    "kind": "kind VARCHAR(16) NOT NULL DEFAULT 'hosts'",
+                    "raw": "raw TEXT",
+                    "attempts": "attempts INTEGER NOT NULL DEFAULT 0",
+                    "published_at": "published_at TIMESTAMP",
+                    "last_error": "last_error TEXT",
+                    "skipped_targets": "skipped_targets JSON",
+                },
+            )
     MinioStorage().ensure_bucket()
     async with SessionLocal() as db:
         service = UserService(db)

@@ -89,17 +89,21 @@ cd frontend && npx vitest run                     # фронтенд
 
 ## Документация
 
+Вся проектная документация собрана в папке [`docs/`](docs/).
+
 | Файл | Содержание |
 |------|-----------|
-| [CONTEXT_ARCH.md](CONTEXT_ARCH.md) | Короткая ориентация для AI-агента / нового разработчика |
-| [ARCH.md](ARCH.md) | Архитектура, сервисы, роутеры, API |
-| [ARCH_DIAGRAMS.md](ARCH_DIAGRAMS.md) | Подробные Mermaid-диаграммы по каждому компоненту |
-| [DB_SCHEMA.md](DB_SCHEMA.md) | Схема БД (таблицы, ERD, индексы) |
-| [DESIGN.md](DESIGN.md) | UI/UX дизайн-документ |
-| [DEV_RULES.md](DEV_RULES.md) | Правила разработки (стиль, безопасность, git flow) |
-| [USE_CASES.md](USE_CASES.md) | Сценарии использования по ролям |
-| [TASK.md](TASK.md) | Чек-лист реализованного и backlog |
-| [TEST_CASES.md](TEST_CASES.md) | Тест-кейсы QA |
+| [docs/CONTEXT_ARCH.md](docs/CONTEXT_ARCH.md) | Короткая ориентация для AI-агента / нового разработчика |
+| [docs/ARCH.md](docs/ARCH.md) | Архитектура, сервисы, роутеры, API |
+| [docs/ARCH_DIAGRAMS.md](docs/ARCH_DIAGRAMS.md) | Подробные Mermaid-диаграммы по каждому компоненту |
+| [docs/DB_SCHEMA.md](docs/DB_SCHEMA.md) | Схема БД (таблицы, ERD, индексы) |
+| [docs/DESIGN.md](docs/DESIGN.md) | UI/UX дизайн-документ |
+| [docs/DEV_RULES.md](docs/DEV_RULES.md) | Правила разработки (стиль, безопасность, git flow) |
+| [docs/USE_CASES.md](docs/USE_CASES.md) | Сценарии использования по ролям |
+| [docs/TASK.md](docs/TASK.md) | Чек-лист реализованного и backlog |
+| [docs/TEST_CASES.md](docs/TEST_CASES.md) | Тест-кейсы QA |
+| [docs/API_PROCESSES.md](docs/API_PROCESSES.md) | Процессы и сценарии работы с API |
+| [docs/GOST_34_DOCUMENTATION.md](docs/GOST_34_DOCUMENTATION.md) | Документация по ГОСТ 34 |
 | [docs/openapi-v1.json](docs/openapi-v1.json) | Swagger / OpenAPI 3.1 — `/api/v1` (cookie-auth) |
 | [docs/openapi-v2.json](docs/openapi-v2.json) | Swagger / OpenAPI 3.1 — `/v2` (Bearer для AI-агентов) |
 | [docs/README.md](docs/README.md) | Как пересоздать OpenAPI-файлы |

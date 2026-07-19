@@ -27,6 +27,9 @@ async def list_agent_projects(
                 select(AgentApiTokenProjectGrant.project_id).where(AgentApiTokenProjectGrant.token_id == context.token_id)
             )
         )
+    # Не шире прав создателя: не-админ видит только свои проекты (даже с all_projects).
+    if not context.creator_is_admin:
+        query = query.where(Project.id.in_(context.creator_project_ids or {-1}))
     projects = (await db.scalars(query)).all()
     return [ProjectOut.model_validate(project) for project in projects]
 

@@ -1,6 +1,7 @@
 import axios from "axios";
 import type {
   AuthLoginResponse,
+  TwoFASetupResponse,
   VulnerabilityComment,
   VulnerabilityDetails,
   VulnerabilityFile,
@@ -10,11 +11,20 @@ import type {
   AuditLog,
   Host,
   HostDetails,
+  HostFarmJob,
+  IpFarmJob,
+  JsFarmJob,
+  JsFile,
   ImportResult,
   OpenApiImportResult,
+  Invitation,
+  InvitationInfo,
+  InvitationSentResult,
   Notification,
   OsType,
   PaginatedResponse,
+  PasswordResetInfo,
+  ReactivationInfo,
   Port,
   Project,
   ProjectActivityItem,
@@ -25,9 +35,13 @@ import type {
   User,
   ProjectNote,
   ProjectNoteComment,
+  ProjectCredential,
   Vulnerability,
   VulnerabilityAsset,
   AgentApiToken,
+  JiraIssueLink,
+  ProjectJiraLink,
+  JiraConfig,
 } from "./types";
 
 const api = axios.create({
@@ -39,7 +53,7 @@ const isBlank = (value: string | null | undefined): boolean => !value || value.t
 
 const assertRequired = (value: string | null | undefined, label: string): void => {
   if (isBlank(value)) {
-    throw new Error(`Поле "${label}" обязательно`);
+    throw new Error(`Field "${label}" is required`);
   }
 };
 
@@ -75,24 +89,24 @@ export const getApiErrorMessage = (error: unknown, fallback: string): string => 
     // локальном `npm run dev`, когда прокси указывает на несуществующий хост.
     if (!error.response) {
       if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
-        return "Превышено время ожидания ответа сервера.";
+        return "The server response timed out.";
       }
-      return "Сервер недоступен — не удалось подключиться к бэкенду. Проверьте, что бэкенд запущен.";
+      return "Server unavailable — couldn't connect to the backend. Make sure the backend is running.";
     }
 
-    if (status === 401) return detail || "Неверный логин или пароль.";
-    if (status === 403) return detail || "Недостаточно прав для этого действия.";
-    if (status === 404) return detail || "Запрашиваемый ресурс не найден.";
-    if (status === 409) return detail || "Конфликт: ресурс уже существует или изменён.";
-    if (status === 422) return detail || "Проверьте правильность заполнения полей.";
-    if (status === 429) return detail || "Слишком много попыток. Попробуйте позже.";
+    if (status === 401) return detail || "Invalid username or password.";
+    if (status === 403) return detail || "You don't have permission for this action.";
+    if (status === 404) return detail || "The requested resource was not found.";
+    if (status === 409) return detail || "Conflict: the resource already exists or was changed.";
+    if (status === 422) return detail || "Check the form fields.";
+    if (status === 429) return detail || "Too many attempts. Try again later.";
     if (status && status >= 500) {
       // 500/502/503/504 — на сервере/прокси. Если это заглушка прокси Vite,
       // тела с detail обычно нет, поэтому даём понятную подсказку.
       const isGeneric = !detail || detail === "Internal Server Error";
       return isGeneric
-        ? `Ошибка сервера (${status}). Возможно, бэкенд недоступен или упал.`
-        : `Ошибка сервера (${status}): ${detail}`;
+        ? `Server error (${status}). The backend may be down or unavailable.`
+        : `Server error (${status}): ${detail}`;
     }
 
     return detail || normalizeDetailMessage(error.message) || fallback;
@@ -117,7 +131,13 @@ api.interceptors.response.use(
     // /users/me на старте — проверка наличия сессии: 401 ожидаем, без авторефреша.
     const shouldSkipRefresh =
       requestUrl.includes("/auth/login") ||
+      requestUrl.includes("/auth/2fa/verify") ||
       requestUrl.includes("/auth/refresh") ||
+      // Публичные эндпоинты активации приглашения — вызываются без сессии,
+      // 401 тут «токен активации недействителен», а не «сессия истекла».
+      requestUrl.includes("/auth/invitations") ||
+      requestUrl.includes("/auth/password-reset") ||
+      requestUrl.includes("/auth/reactivate") ||
       requestUrl.includes("/users/me");
     if (error.response?.status === 401 && !originalRequest?._retry && !shouldSkipRefresh) {
       originalRequest._retry = true;
@@ -143,14 +163,62 @@ api.interceptors.response.use(
 );
 
 export async function login(username: string, password: string): Promise<AuthLoginResponse> {
-  assertRequired(username, "Имя пользователя");
-  assertRequired(password, "Пароль");
+  assertRequired(username, "Username");
+  assertRequired(password, "Password");
   const { data } = await api.post<AuthLoginResponse>("/auth/login", { username, password });
+  return data;
+}
+
+export async function verifyTwoFactor(code: string): Promise<AuthLoginResponse> {
+  assertRequired(code, "Verification code");
+  const { data } = await api.post<AuthLoginResponse>("/auth/2fa/verify", { code: code.trim() });
+  return data;
+}
+
+export async function setupTwoFactor(): Promise<TwoFASetupResponse> {
+  const { data } = await api.post<TwoFASetupResponse>("/users/me/2fa/setup");
+  return data;
+}
+
+export async function confirmTwoFactor(code: string): Promise<User> {
+  assertRequired(code, "Verification code");
+  const { data } = await api.post<User>("/users/me/2fa/confirm", { code: code.trim() });
+  return data;
+}
+
+export async function disableTwoFactor(password: string): Promise<User> {
+  assertRequired(password, "Password");
+  const { data } = await api.post<User>("/users/me/2fa/disable", { password });
   return data;
 }
 
 export async function logout(): Promise<void> {
   await api.post("/auth/logout");
+}
+
+/* ── Восстановление пароля («забыли пароль») ─────────────────────────────
+   Все три вызова публичные: выполняются без сессии. */
+
+/** Запрашивает ссылку сброса. Отвечает 200 всегда — есть такой email или нет,
+ *  бэкенд намеренно не сообщает, чтобы форму нельзя было использовать для
+ *  перебора существующих адресов. */
+export async function requestPasswordReset(email: string): Promise<{ ok: boolean; mail_preview_url: string | null }> {
+  assertRequired(email, "Email");
+  const { data } = await api.post<{ ok: boolean; mail_preview_url: string | null }>(
+    "/auth/password-reset/request",
+    { email }
+  );
+  return data;
+}
+
+export async function getPasswordResetInfo(token: string): Promise<PasswordResetInfo> {
+  const { data } = await api.get<PasswordResetInfo>(`/auth/password-reset/${encodeURIComponent(token)}`);
+  return data;
+}
+
+export async function confirmPasswordReset(token: string, password: string): Promise<void> {
+  assertRequired(password, "Пароль");
+  await api.post(`/auth/password-reset/${encodeURIComponent(token)}`, { password });
 }
 
 export async function getMe(): Promise<User> {
@@ -163,7 +231,13 @@ export async function getUsers(page = 1, size = 200): Promise<PaginatedResponse<
   return data;
 }
 
-export async function createUser(payload: {
+/**
+ * @deprecated Прямое создание пользователя с паролем убрано в пользу приглашений
+ * ({@link createInvitation}). Функция оставлена только чтобы типизировалась
+ * устаревшая, НЕ подключённая к роутингу страница `pages/UsersAdminPage.tsx`
+ * (живой UI — Storm — её не использует). Реального эндпоинта на бэкенде больше нет.
+ */
+export async function createUser(_payload: {
   username: string;
   email: string;
   full_name?: string;
@@ -172,9 +246,63 @@ export async function createUser(payload: {
   project_role?: User["project_role"];
   send_invite_email?: boolean;
 }): Promise<User> {
-  assertRequired(payload.username, "Имя пользователя");
+  throw new Error("Direct user creation is disabled — use invitations (invite flow)");
+}
+
+/* ── Приглашения (invite-flow) ────────────────────────────────────────────
+   Пользователей больше не создаём напрямую: админ шлёт приглашение по email,
+   а username/пароль приглашённый задаёт сам на странице активации. */
+
+export async function createInvitation(payload: {
+  email: string;
+  full_name?: string;
+  role: User["role"];
+  project_role?: User["project_role"];
+}): Promise<InvitationSentResult> {
   assertRequired(payload.email, "Email");
-  const { data } = await api.post<User>("/users", payload);
+  const { data } = await api.post<InvitationSentResult>("/users/invitations", payload);
+  return data;
+}
+
+export async function getInvitations(): Promise<Invitation[]> {
+  const { data } = await api.get<Invitation[]>("/users/invitations");
+  return data;
+}
+
+export async function resendInvitation(invitationId: number): Promise<InvitationSentResult> {
+  const { data } = await api.post<InvitationSentResult>(`/users/invitations/${invitationId}/resend`);
+  return data;
+}
+
+export async function revokeInvitation(invitationId: number): Promise<void> {
+  await api.delete(`/users/invitations/${invitationId}`);
+}
+
+/* Публичные вызовы страницы активации (без сессии). */
+
+export async function getInvitationInfo(token: string): Promise<InvitationInfo> {
+  const { data } = await api.get<InvitationInfo>(`/auth/invitations/${encodeURIComponent(token)}`);
+  return data;
+}
+
+export async function checkInvitationUsername(token: string, username: string): Promise<boolean> {
+  const { data } = await api.get<{ available: boolean }>(
+    `/auth/invitations/${encodeURIComponent(token)}/username-available`,
+    { params: { username } }
+  );
+  return data.available;
+}
+
+export async function acceptInvitation(
+  token: string,
+  payload: { username: string; password: string }
+): Promise<AuthLoginResponse> {
+  assertRequired(payload.username, "Username");
+  assertRequired(payload.password, "Password");
+  const { data } = await api.post<AuthLoginResponse>(
+    `/auth/invitations/${encodeURIComponent(token)}/accept`,
+    payload
+  );
   return data;
 }
 
@@ -189,6 +317,26 @@ export async function updateUser(
   }
 ): Promise<User> {
   const { data } = await api.put<User>(`/users/${userId}`, payload);
+  return data;
+}
+
+/** Возврат деактивированного пользователя: шлёт ему письмо со ссылкой-возвратом.
+ *  Аккаунт разблокируется, только когда пользователь сам перейдёт по ссылке. */
+export async function reactivateUser(userId: number): Promise<PasswordResetResult> {
+  const { data } = await api.post<PasswordResetResult>(`/users/${userId}/reactivate`);
+  return data;
+}
+
+/* ── Возврат по ссылке из письма (страница /reactivate, без сессии) ──────── */
+
+export async function getReactivationInfo(token: string): Promise<ReactivationInfo> {
+  const { data } = await api.get<ReactivationInfo>(`/auth/reactivate/${encodeURIComponent(token)}`);
+  return data;
+}
+
+/** Разблокирует аккаунт по ссылке и сразу выдаёт сессию (cookie ставит бэкенд). */
+export async function completeReactivation(token: string): Promise<AuthLoginResponse> {
+  const { data } = await api.post<AuthLoginResponse>(`/auth/reactivate/${encodeURIComponent(token)}`);
   return data;
 }
 
@@ -211,15 +359,15 @@ export async function updateMyProfile(payload: {
 }
 
 export async function changeMyPassword(payload: { current_password: string; new_password: string }): Promise<User> {
-  assertRequired(payload.current_password, "Текущий пароль");
-  assertRequired(payload.new_password, "Новый пароль");
+  assertRequired(payload.current_password, "Current password");
+  assertRequired(payload.new_password, "New password");
   const { data } = await api.patch<User>("/users/me/password", payload);
   return data;
 }
 
 export async function uploadMyAvatar(file: File): Promise<User> {
   if (!file) {
-    throw new Error("Файл аватара обязателен");
+    throw new Error("An avatar file is required");
   }
   const formData = new FormData();
   formData.append("avatar", file);
@@ -245,7 +393,7 @@ export async function getProjectFolders(): Promise<ProjectFolder[]> {
 }
 
 export async function createProjectFolder(payload: { name: string; parent_id?: number | null }): Promise<ProjectFolder> {
-  assertRequired(payload.name, "Название папки");
+  assertRequired(payload.name, "Folder name");
   const { data } = await api.post<ProjectFolder>("/projects/folders", payload);
   return data;
 }
@@ -273,7 +421,7 @@ export async function createProject(payload: {
   start_date?: string;
   end_date?: string;
 }): Promise<Project> {
-  assertRequired(payload.name, "Название проекта");
+  assertRequired(payload.name, "Project name");
   const { data } = await api.post<Project>("/projects", payload);
   return data;
 }
@@ -305,7 +453,7 @@ export async function getProjectMembers(projectId: number): Promise<ProjectMembe
 
 export async function addProjectMember(projectId: number, userId: number): Promise<void> {
   if (!userId) {
-    throw new Error("Нужно выбрать пользователя");
+    throw new Error("Select a user");
   }
   await api.post(`/projects/${projectId}/members`, { user_id: userId });
 }
@@ -355,7 +503,7 @@ export async function createProjectNote(
   projectId: number,
   payload: { title: string; parent_id?: number | null; content?: string | null }
 ): Promise<ProjectNote> {
-  assertRequired(payload.title, "Название страницы");
+  assertRequired(payload.title, "Page title");
   const { data } = await api.post<ProjectNote>(`/projects/${projectId}/notes`, payload);
   return data;
 }
@@ -366,7 +514,7 @@ export async function updateProjectNote(
   payload: { title?: string; content?: string | null }
 ): Promise<ProjectNote> {
   if (payload.title !== undefined) {
-    assertRequired(payload.title, "Название страницы");
+    assertRequired(payload.title, "Page title");
   }
   const { data } = await api.put<ProjectNote>(`/projects/${projectId}/notes/${noteId}`, payload);
   return data;
@@ -386,7 +534,7 @@ export async function reorderProjectNotes(
   payload: { parent_id?: number | null; items: Array<{ id: number; sort_order: number }> }
 ): Promise<ProjectNote[]> {
   if (!payload.items.length) {
-    throw new Error("Нужно передать хотя бы одну страницу для сортировки");
+    throw new Error("Provide at least one page to sort");
   }
   const { data } = await api.patch<ProjectNote[]>(`/projects/${projectId}/notes/reorder`, payload);
   return data;
@@ -394,6 +542,37 @@ export async function reorderProjectNotes(
 
 export async function deleteProjectNote(projectId: number, noteId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/notes/${noteId}`);
+}
+
+// ---- project credentials (accounts & access tokens) ----
+
+export async function listProjectCredentials(projectId: number): Promise<ProjectCredential[]> {
+  const { data } = await api.get<ProjectCredential[]>(`/projects/${projectId}/credentials`);
+  return data;
+}
+
+export async function createProjectCredential(
+  projectId: number,
+  payload: { username?: string | null; password: string; host?: string | null }
+): Promise<ProjectCredential> {
+  assertRequired(payload.password, "Password");
+  const { data } = await api.post<ProjectCredential>(`/projects/${projectId}/credentials`, payload);
+  return data;
+}
+
+export async function updateProjectCredential(
+  projectId: number,
+  credentialId: number,
+  // Пустой/опущенный password означает «оставить прежний» — форма правки не
+  // присылает существующий пароль обратно.
+  payload: { username?: string | null; password?: string; host?: string | null }
+): Promise<ProjectCredential> {
+  const { data } = await api.put<ProjectCredential>(`/projects/${projectId}/credentials/${credentialId}`, payload);
+  return data;
+}
+
+export async function deleteProjectCredential(projectId: number, credentialId: number): Promise<void> {
+  await api.delete(`/projects/${projectId}/credentials/${credentialId}`);
 }
 
 export async function listProjectNoteComments(projectId: number, noteId: number): Promise<PaginatedResponse<ProjectNoteComment>> {
@@ -408,7 +587,7 @@ export async function createProjectNoteComment(
   noteId: number,
   content: string
 ): Promise<ProjectNoteComment> {
-  assertRequired(content, "Комментарий");
+  assertRequired(content, "Comment");
   const { data } = await api.post<ProjectNoteComment>(`/projects/${projectId}/notes/${noteId}/comments`, { content });
   return data;
 }
@@ -419,7 +598,7 @@ export async function updateProjectNoteComment(
   commentId: number,
   content: string
 ): Promise<ProjectNoteComment> {
-  assertRequired(content, "Комментарий");
+  assertRequired(content, "Comment");
   const { data } = await api.put<ProjectNoteComment>(`/projects/${projectId}/notes/${noteId}/comments/${commentId}`, { content });
   return data;
 }
@@ -433,8 +612,10 @@ export async function deleteProject(projectId: number): Promise<void> {
 }
 
 export async function getHosts(projectId: number): Promise<PaginatedResponse<Host>> {
+  // origin=all — один запрос кормит и таблицу хостов, и таблицу IP: строки
+  // origin='ip' отфильтровываются на клиенте (см. hostsList в StormApp).
   const { data } = await api.get<PaginatedResponse<Host>>(`/projects/${projectId}/hosts`, {
-    params: { page: 1, size: 100 },
+    params: { page: 1, size: 100, origin: "all" },
   });
   return data;
 }
@@ -451,7 +632,7 @@ export async function createHost(
   }
 ): Promise<Host> {
   if (isBlank(payload.ip_address) && isBlank(payload.hostname)) {
-    throw new Error('Нужно указать хотя бы "IP-адрес" или "Hostname"');
+    throw new Error('Provide at least "IP address" or "Hostname"');
   }
   const { data } = await api.post<Host>(`/projects/${projectId}/hosts`, payload);
   return data;
@@ -482,6 +663,52 @@ export async function deleteHost(projectId: number, hostId: number): Promise<voi
   await api.delete(`/projects/${projectId}/hosts/${hostId}`);
 }
 
+// ---- recon farm: серверный пробив вставленных списков хостов и IP ----
+
+/** Запускает фоновый пробив вставленного списка; возвращает созданную задачу. */
+export async function startHostFarm(projectId: number, raw: string): Promise<HostFarmJob> {
+  assertRequired(raw, "Hosts");
+  const { data } = await api.post<HostFarmJob>(`/projects/${projectId}/host-farm`, { raw });
+  return data;
+}
+
+/** Статус задачи фермы — фронт опрашивает до status === "done" | "failed". */
+export async function getHostFarmJob(projectId: number, jobId: number): Promise<HostFarmJob> {
+  const { data } = await api.get<HostFarmJob>(`/projects/${projectId}/host-farm/jobs/${jobId}`);
+  return data;
+}
+
+/** Запускает обратный резолв + пробив вставленного списка IP-адресов. */
+export async function startIpFarm(projectId: number, raw: string): Promise<IpFarmJob> {
+  assertRequired(raw, "IPs");
+  const { data } = await api.post<IpFarmJob>(`/projects/${projectId}/ip-farm`, { raw });
+  return data;
+}
+
+/** Статус задачи фермы IP — фронт опрашивает до status === "done" | "failed". */
+export async function getIpFarmJob(projectId: number, jobId: number): Promise<IpFarmJob> {
+  const { data } = await api.get<IpFarmJob>(`/projects/${projectId}/ip-farm/jobs/${jobId}`);
+  return data;
+}
+
+/** Запускает скан JS всех доменов проекта (raw пусто) или переданного списка. */
+export async function startJsScan(projectId: number, raw = ""): Promise<JsFarmJob> {
+  const { data } = await api.post<JsFarmJob>(`/projects/${projectId}/js-farm`, { raw });
+  return data;
+}
+
+/** Статус задачи фермы JS — фронт опрашивает до status === "done" | "failed". */
+export async function getJsScanJob(projectId: number, jobId: number): Promise<JsFarmJob> {
+  const { data } = await api.get<JsFarmJob>(`/projects/${projectId}/js-farm/jobs/${jobId}`);
+  return data;
+}
+
+/** JS-файлы проекта с находками — раздел JS группирует их по хосту. */
+export async function getJsFiles(projectId: number): Promise<JsFile[]> {
+  const { data } = await api.get<JsFile[]>(`/projects/${projectId}/js-files`);
+  return data;
+}
+
 export async function getPorts(projectId: number, hostId: number): Promise<Port[]> {
   const { data } = await api.get<Port[]>(`/projects/${projectId}/hosts/${hostId}/ports`);
   return data;
@@ -498,10 +725,10 @@ export async function createPort(
   }
 ): Promise<Port> {
   if (!Number.isFinite(payload.port_number)) {
-    throw new Error("Порт должен быть числом");
+    throw new Error("Port must be a number");
   }
   if (!payload.ip_address_id) {
-    throw new Error("Не выбран IP-адрес");
+    throw new Error("No IP address selected");
   }
   const { data } = await api.post<Port>(`/projects/${projectId}/hosts/${hostId}/ports`, payload);
   return data;
@@ -537,7 +764,7 @@ export async function createService(
   portId: number,
   payload: { name: string; version?: string; banner?: string }
 ): Promise<Service> {
-  assertRequired(payload.name, "Название сервиса");
+  assertRequired(payload.name, "Service name");
   const { data } = await api.post<Service>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services`, payload);
   return data;
 }
@@ -550,7 +777,7 @@ export async function updateService(
   payload: { name?: string; version?: string; banner?: string }
 ): Promise<Service> {
   if (payload.name !== undefined) {
-    assertRequired(payload.name, "Название сервиса");
+    assertRequired(payload.name, "Service name");
   }
   const { data } = await api.put<Service>(`/projects/${projectId}/hosts/${hostId}/ports/${portId}/services/${serviceId}`, payload);
   return data;
@@ -580,7 +807,7 @@ export async function createEndpoint(
   }
 ): Promise<Endpoint> {
   if (isBlank(payload.path) && isBlank(payload.request_raw)) {
-    throw new Error('Нужно указать хотя бы "Путь" или "Raw request"');
+    throw new Error('Provide at least "Path" or "Raw request"');
   }
   const { data } = await api.post<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints`, payload);
   return data;
@@ -602,7 +829,7 @@ export async function updateEndpoint(
   }
 ): Promise<Endpoint> {
   if (payload.path !== undefined && isBlank(payload.path) && isBlank(payload.request_raw)) {
-    throw new Error('Нужно указать хотя бы "Путь" или "Raw request"');
+    throw new Error('Provide at least "Path" or "Raw request"');
   }
   const { data } = await api.put<Endpoint>(`/projects/${projectId}/hosts/${hostId}/endpoints/${endpointId}`, payload);
   return data;
@@ -625,7 +852,8 @@ export async function createVulnerability(
     host_id: number;
     title: string;
     description?: string | null;
-    severity: "critical" | "high" | "medium" | "low" | "info";
+    // Необязательно: бэкенд по умолчанию ставит "unknown" (критичность не определена).
+    severity?: "critical" | "high" | "medium" | "low" | "info" | "unknown";
     cvss_version?: "4.0" | null;
     cvss_score?: number | null;
     cvss_vector?: string | null;
@@ -644,9 +872,9 @@ export async function createVulnerability(
   }
 ): Promise<Vulnerability> {
   if (!payload.host_id) {
-    throw new Error("Нужно выбрать хост");
+    throw new Error("Select a host");
   }
-  assertRequired(payload.title, "Название уязвимости");
+  assertRequired(payload.title, "Vulnerability title");
   const { data } = await api.post<Vulnerability>(`/projects/${projectId}/vulnerabilities`, payload);
   return data;
 }
@@ -657,7 +885,7 @@ export async function updateVulnerability(
   payload: {
     title?: string;
     description?: string | null;
-    severity?: "critical" | "high" | "medium" | "low" | "info";
+    severity?: "critical" | "high" | "medium" | "low" | "info" | "unknown";
     cvss_version?: "4.0" | null;
     cvss_score?: number | null;
     cvss_vector?: string | null;
@@ -676,7 +904,7 @@ export async function updateVulnerability(
   }
 ): Promise<Vulnerability> {
   if (payload.title !== undefined) {
-    assertRequired(payload.title, "Название уязвимости");
+    assertRequired(payload.title, "Vulnerability title");
   }
   const { data } = await api.put<Vulnerability>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`, payload);
   return data;
@@ -684,6 +912,45 @@ export async function updateVulnerability(
 
 export async function deleteVulnerability(projectId: number, vulnerabilityId: number): Promise<void> {
   await api.delete(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}`);
+}
+
+export async function getVulnerabilityJiraLink(projectId: number, vulnerabilityId: number): Promise<JiraIssueLink | null> {
+  const { data } = await api.get<JiraIssueLink | null>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/jira`);
+  return data;
+}
+
+export async function exportVulnerabilityToJira(projectId: number, vulnerabilityId: number): Promise<JiraIssueLink> {
+  const { data } = await api.post<JiraIssueLink>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/jira/export`);
+  return data;
+}
+
+export async function getProjectJiraLink(projectId: number): Promise<ProjectJiraLink | null> {
+  const { data } = await api.get<ProjectJiraLink | null>(`/projects/${projectId}/jira-link`);
+  return data;
+}
+
+export async function saveProjectJiraLink(projectId: number, jiraProjectKey: string): Promise<ProjectJiraLink> {
+  assertRequired(jiraProjectKey, "Jira project key");
+  const { data } = await api.put<ProjectJiraLink>(`/projects/${projectId}/jira-link`, { jira_project_key: jiraProjectKey });
+  return data;
+}
+
+export async function getJiraConfig(): Promise<JiraConfig | null> {
+  const { data } = await api.get<JiraConfig | null>("/jira/config");
+  return data;
+}
+
+export async function saveJiraConfig(payload: {
+  base_url: string;
+  email: string;
+  api_token?: string;
+  default_issue_type?: string;
+  is_enabled?: boolean;
+}): Promise<JiraConfig> {
+  assertRequired(payload.base_url, "Jira base URL");
+  assertRequired(payload.email, "Email");
+  const { data } = await api.put<JiraConfig>("/jira/config", { name: "default", ...payload });
+  return data;
 }
 
 export async function getVulnerability(projectId: number, vulnerabilityId: number): Promise<VulnerabilityDetails> {
@@ -721,7 +988,7 @@ export async function listVulnerabilityFiles(projectId: number, vulnerabilityId:
 
 export async function uploadVulnerabilityFile(projectId: number, vulnerabilityId: number, file: File): Promise<VulnerabilityFile> {
   if (!file) {
-    throw new Error("Нужно выбрать файл");
+    throw new Error("Select a file");
   }
   const formData = new FormData();
   formData.append("file", file);
@@ -743,7 +1010,7 @@ export async function listVulnerabilityComments(projectId: number, vulnerability
 }
 
 export async function createVulnerabilityComment(projectId: number, vulnerabilityId: number, content: string): Promise<VulnerabilityComment> {
-  assertRequired(content, "Комментарий");
+  assertRequired(content, "Comment");
   const { data } = await api.post<VulnerabilityComment>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments`, { content });
   return data;
 }
@@ -754,7 +1021,7 @@ export async function updateVulnerabilityComment(
   commentId: number,
   content: string
 ): Promise<VulnerabilityComment> {
-  assertRequired(content, "Комментарий");
+  assertRequired(content, "Comment");
   const { data } = await api.put<VulnerabilityComment>(`/projects/${projectId}/vulnerabilities/${vulnerabilityId}/comments/${commentId}`, { content });
   return data;
 }
@@ -774,7 +1041,7 @@ export async function importProjectData(projectId: number, file: File): Promise<
 
 export async function importOpenApiFile(projectId: number, hostId: number, file: File): Promise<OpenApiImportResult> {
   if (!file) {
-    throw new Error("Нужно выбрать Swagger/OpenAPI файл");
+    throw new Error("Select a Swagger/OpenAPI file");
   }
   const formData = new FormData();
   formData.append("file", file);

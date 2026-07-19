@@ -74,6 +74,9 @@ class Severity(str, enum.Enum):
     MEDIUM = "medium"
     LOW = "low"
     INFO = "info"
+    # Значение по умолчанию для только что созданной находки: критичность ещё не
+    # оценена (нет CVSS-вектора). Заполняется, когда автор проставит вектор/уровень.
+    UNKNOWN = "unknown"
 
 
 class CvssVersion(str, enum.Enum):
@@ -112,3 +115,25 @@ class NotificationType(str, enum.Enum):
     VULN_STATUS_CHANGED = "vuln_status_changed"
     #: Изменился статус проекта, в котором состоит пользователь.
     PROJECT_STATUS_CHANGED = "project_status_changed"
+
+
+class ReconJobKind(str, enum.Enum):
+    """Тип задачи рекон-фермы — определяет сервис-исполнитель и форму result."""
+
+    HOSTS = "hosts"
+    IPS = "ips"
+    JS = "js"
+
+
+class ReconJobStatus(str, enum.Enum):
+    """Жизненный цикл задачи фермы: pending → queued → running → done | failed.
+
+    Хранится строкой (String-колонка host_farm_jobs.status, без DB-enum), поэтому
+    из БД читается как обычный str; сравнения с членами работают за счёт (str, Enum).
+    """
+
+    PENDING = "pending"
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"

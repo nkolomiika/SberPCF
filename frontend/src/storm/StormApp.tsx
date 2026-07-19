@@ -23,7 +23,12 @@ import { Icon, SberMark } from "./icons";
    only the note editor needs it. Loading it on demand keeps that weight off every
    other screen. */
 const StormMarkdownEditor = lazy(() => import("./StormMarkdownEditor"));
+const StormDocs = lazy(() => import("./StormDocs"));
+import { StormDatePicker } from "./StormDatePicker";
 import { useAuthStore, useToastStore } from "../store";
+import { useThemeStore } from "./theme";
+import { StormSelect } from "./StormSelect";
+import { t, useLangStore } from "./i18n";
 import {
   getApiErrorMessage,
   getApiErrorStatus,
@@ -33,15 +38,24 @@ import {
   createProject as apiCreateProject,
   updateProject as apiUpdateProject,
   deleteProject as apiDeleteProject,
-  createUser as apiCreateUser,
+  createInvitation as apiCreateInvitation,
+  getInvitations as apiGetInvitations,
+  resendInvitation as apiResendInvitation,
+  revokeInvitation as apiRevokeInvitation,
   updateUser as apiUpdateUser,
   deleteUser as apiDeleteUser,
+  reactivateUser as apiReactivateUser,
   getHosts as apiGetHosts,
   getHost as apiGetHost,
-  createHost as apiCreateHost,
   updateHost as apiUpdateHost,
   deleteHost as apiDeleteHost,
-  createPort as apiCreatePort,
+  startHostFarm as apiStartHostFarm,
+  getHostFarmJob as apiGetHostFarmJob,
+  startIpFarm as apiStartIpFarm,
+  getIpFarmJob as apiGetIpFarmJob,
+  startJsScan as apiStartJsScan,
+  getJsScanJob as apiGetJsScanJob,
+  getJsFiles as apiGetJsFiles,
   createEndpoint as apiCreateEndpoint,
   updateEndpoint as apiUpdateEndpoint,
   getEndpoints as apiGetEndpoints,
@@ -60,8 +74,13 @@ import {
   createProjectNote as apiCreateProjectNote,
   updateProjectNote as apiUpdateProjectNote,
   deleteProjectNote as apiDeleteProjectNote,
+  listProjectCredentials as apiListProjectCredentials,
+  createProjectCredential as apiCreateProjectCredential,
+  updateProjectCredential as apiUpdateProjectCredential,
+  deleteProjectCredential as apiDeleteProjectCredential,
   getProjectActivity as apiGetProjectActivity,
   listNotifications as apiListNotifications,
+  uploadMyAvatar as apiUploadMyAvatar,
   markNotificationRead as apiMarkNotificationRead,
   markAllNotificationsRead as apiMarkAllNotificationsRead,
   listAgentTokens as apiListAgentTokens,
@@ -69,6 +88,11 @@ import {
   revokeAgentToken as apiRevokeAgentToken,
   downloadProjectCertificationReport as apiDownloadCertificationReport,
   downloadProjectAcceptanceReport as apiDownloadAcceptanceReport,
+  setupTwoFactor as apiSetupTwoFactor,
+  confirmTwoFactor as apiConfirmTwoFactor,
+  disableTwoFactor as apiDisableTwoFactor,
+  exportVulnerabilityToJira as apiExportVulnerabilityToJira,
+  getVulnerabilityJiraLink as apiGetVulnerabilityJiraLink,
 } from "../api";
 import { calculateCvssScore, severityFromCvssScore } from "../cvss";
 import { PROJECT_STATUS_ORDER } from "../projectStatus";
@@ -77,18 +101,27 @@ import type {
   ProjectActivityItem,
   ProjectMember as ApiProjectMember,
   ProjectNote,
+  ProjectCredential as ApiProjectCredential,
   ProjectStats,
   ProjectStatus,
   Endpoint as ApiEndpoint,
   Host as ApiHost,
+  HostFarmJob as ApiHostFarmJob,
+  IpFarmJob as ApiIpFarmJob,
+  JsFarmJob as ApiJsFarmJob,
+  JsFile as ApiJsFile,
   Port as ApiPort,
   Service as ApiService,
   Vulnerability as ApiVulnerability,
+  JiraIssueLink,
+  Invitation as ApiInvitation,
 } from "../types";
 import {
   type ApiKey,
+  type Cred,
   type Endpoint,
   type Host,
+  type JsFileEntry,
   type Member,
   type Method,
   type Note,
@@ -102,14 +135,15 @@ import {
 } from "./data";
 import {
   API_SCOPES,
+  API_SCOPE_LABELS,
   EDITOR_FIELDS,
-  EPSTATUS,
   FINDING_SEV,
   MEMBER_COLORS,
   METHOD,
   PORT,
   PROJ_STATUS,
   ROLE,
+  SECRET_SEV,
   SEV,
   STDOT,
   TYPELABEL,
@@ -124,16 +158,18 @@ import {
 
 type NavId = "projects" | "tasks" | "mine" | "docs" | "members";
 type ViewId = "list" | "detail" | "profile" | "workspaceMembers";
-type SectionId = "overview" | "hosts" | "vulns" | "notes" | "members" | "activity";
-type ReconView = "hosts" | "ips" | "endpoints";
-type ProfileTab = "account" | "security" | "api";
+type SectionId = "overview" | "hosts" | "vulns" | "notes" | "creds" | "members" | "activity";
+type ReconView = "hosts" | "ips" | "endpoints" | "js";
+type ProfileTab = "account" | "security" | "api" | "customizing";
 /** Word report templates the backend can generate (POST /projects/{id}/reports/{kind}). */
 type ReportKind = "szi" | "pp";
 /** What the export dialog exports: the project report, or one of the recon lists. */
 type ExportScope = "report" | "hosts" | "ips" | "endpoints";
+/** How many type-to-search suggestions a combo field offers at once. */
+const COMBO_MAX = 5;
 const REPORT_KINDS: { kind: ReportKind; title: string; desc: string }[] = [
-  { kind: "szi", title: "Отчёт для сертификации", desc: "Отчёт по результатам испытаний СЗИ — для сертификационных испытаний." },
-  { kind: "pp", title: "Отчёт внутренней приёмки", desc: "Протокол приёмки — для внутренней приёмки работ." },
+  { kind: "szi", title: "Certification report", desc: "Security-system test report — for certification testing." },
+  { kind: "pp", title: "Internal acceptance report", desc: "Acceptance protocol — for internal acceptance of the work." },
 ];
 
 interface NoteForm {
@@ -165,9 +201,16 @@ interface StormState {
   apiProjects: ApiProjectRow[] | null;
   projectsLoading: boolean;
   projectsError: string | null;
+  /* Per-project "added at" timestamps for the projects-list stat sparklines,
+     keyed by project id. Fetched lazily (hosts + vulns per project) so the
+     Hosts / Open issues cards can chart real add-frequency, not just a total.
+     `null` = not fetched yet. */
+  aggTimes: Record<number, { hosts: string[]; openVulns: string[] }> | null;
   reloadTick: number;
   projEditId: number | null;
   confirmProjectId: number | null;
+  /** Удаляемый пользователь на странице /members (там нет открытого проекта). */
+  confirmUserId: number | null;
   /* ---- project detail: every collection below is backend-backed ----
      `null` = not loaded yet, `[]` = loaded and empty. Each has a `*Tick`
      counter that its loader effect watches, so a mutation reloads it. */
@@ -181,17 +224,60 @@ interface StormState {
   apiHosts: Host[] | null;
   hostsLoading: boolean;
   hostsTick: number;
+  // ---- "Add hosts" import (server-side probe farm) ----
+  hostImportOpen: boolean;
+  hostImportRaw: string;
+  /** Deduped, normalized preview of what will actually be imported (editable). */
+  hostImportPreview: string;
+  hostImportBusy: boolean;
+  // ---- "Add IPs" import (same farm, reverse-resolves each address) ----
+  ipImportOpen: boolean;
+  ipImportRaw: string;
+  ipImportPreview: string;
+  ipImportBusy: boolean;
+  // ---- "Add endpoints" import (paste a list of URLs, bulk-create) ----
+  epImportOpen: boolean;
+  epImportRaw: string;
+  epImportPreview: string;
+  epImportBusy: boolean;
+  /** Hosts filter pills (multi-select, empty = all): "up" | "down" | HTTP code. */
+  hostFilters: string[];
+  /** Same status filter, for the IPs view. */
+  ipFilters: string[];
+  /** Cloudflare filter: "" = all, "yes" = behind CF, "no" = not. Separate per view. */
+  ipCfFilter: "" | "yes" | "no";
+  hostCfFilter: "" | "yes" | "no";
+  /** The running/finished probe job being polled, or null when idle. */
+  hostFarmJob: ApiHostFarmJob | null;
+  ipFarmJob: ApiIpFarmJob | null;
+  /** The running/finished JS scan job being polled, or null when idle. */
+  jsFarmJob: ApiJsFarmJob | null;
+  /** Project JS files (backend-loaded). `null` = not loaded yet. */
+  apiJsFiles: ApiJsFile[] | null;
+  jsTick: number;
+  jsQuery: string;
+  /** Only show files that leaked at least one secret. */
+  jsSecretsOnly: boolean;
+  /** Which JS files are expanded (by url). */
+  jsExpanded: string[];
   apiMembers: Member[] | null;
   membersTick: number;
   apiVulns: Vuln[] | null;
   vulnsTick: number;
   apiNotes: Note[] | null;
   notesTick: number;
+  /** Project credential vault for `openProjectId`. `null` = not loaded yet. */
+  apiCreds: Cred[] | null;
+  credsTick: number;
+  /** Ids of creds whose secret is currently un-masked (reveal is per-row, opt-in). */
+  revealedCredIds: number[];
   /** Set when the backend answers 403 for the open project → renders the no-access screen. */
   accessDenied: boolean;
   notifs: ApiNotification[];
   reconView: ReconView;
   openHostId: number | null;
+  /** The IP address whose detail card is open (IPs have no stored id — keyed by address). */
+  openIp: string | null;
   reconMenuOpen: boolean;
   hostQuery: string;
   /* Recon view filters. Methods are multi-select like every other pill filter:
@@ -224,6 +310,12 @@ interface StormState {
   /** What the export dialog is for: the project's Word report, or a recon list. */
   exportScope: ExportScope;
   exportFormat: "list" | "openapi";
+  /** Recon exports open as a full page (like "Add hosts"), not a modal. */
+  exportPageOpen: boolean;
+  /* The right-hand pane: the lines that will actually be written to the file.
+     Seeded from the filtered list and editable, so rows can be dropped before
+     downloading — the left pane mirrors whatever is left here. */
+  exportText: string;
   /** Note open in the viewer, by backend id — it is part of the URL. */
   openNoteId: number | null;
   editorOpen: boolean;
@@ -232,6 +324,10 @@ interface StormState {
   editorIndex: number;
   editorForm: Record<string, string | string[]>;
   tagDrafts: Record<string, string>;
+  /** Key of the combo field whose suggestion list is open, if any. */
+  comboOpen: string | null;
+  /** Index of the keyboard-highlighted suggestion in that list. */
+  comboHi: number;
   nav: NavId;
   tab: "active" | "archived";
   query: string;
@@ -255,8 +351,17 @@ interface StormState {
   apiKeyModalOpen: boolean;
   apiKeyName: string;
   apiKeyScopes: Record<string, boolean>;
+  /** Доступ ключа: все свои проекты (true) или явно выбранные (false). */
+  apiKeyAllProjects: boolean;
+  apiKeyProjectIds: number[];
+  /** Expiry ключа (YYYY-MM-DD); пусто = бессрочный. */
+  apiKeyExpiry: string;
   workspaceUsers: WorkspaceUser[];
+  /** Неактивированные приглашения (pending), показываются над списком участников. */
+  pendingInvites: ApiInvitation[];
   usersTick: number;
+  /** Активные / архивные (деактивированные) участники — как вкладки у проектов. */
+  wsUserTab: "active" | "archived";
   wsUserModalOpen: boolean;
   wsUserMode: "add" | "edit";
   wsUserIndex: number;
@@ -272,9 +377,15 @@ interface StormState {
   wsMemberRoles: WsRole[];
   /** Multi-select project-role filter on the workspace Members page (empty = no filtering). */
   wsMemberProjectRoles: Role[];
-  twoFAEnabled: boolean;
   twoFASetupOpen: boolean;
   twoFACode: string;
+  // Данные привязки, полученные от POST /users/me/2fa/setup.
+  twoFAQr: string | null;
+  twoFASecret: string | null;
+  // Диалог отключения (требует пароль аккаунта).
+  twoFADisableOpen: boolean;
+  twoFADisablePassword: string;
+  twoFABusy: boolean;
   vulnFilterAuthor: string;
   /* Multi-select filters: every pill toggles, and an empty selection means "All"
      — so deselecting the last pill lands back on All by itself. */
@@ -284,6 +395,24 @@ interface StormState {
   /** Real backend vulnerability id (not a list index) — it is part of the URL. */
   openVulnId: number | null;
   vulnDetailForm: VulnDetailForm;
+  // ---- Jira export modal ----
+  jiraExportOpen: boolean;
+  jiraExportVulnId: number | null;
+  jiraExportChecking: boolean; // идёт начальная проверка (уже экспортировано? проект привязан?)
+  jiraExportBusy: boolean; // идёт сам экспорт
+  jiraExportLink: JiraIssueLink | null; // существующая/созданная связь с задачей
+  jiraExportError: string | null;
+  // ---- Bulk Jira export (все уязвимости раздела) ----
+  jiraBulkOpen: boolean;
+  jiraBulkRunning: boolean;
+  jiraBulkDone: number;
+  jiraBulkTotal: number;
+  jiraBulkCreated: number;
+  jiraBulkSkipped: number;
+  jiraBulkFailed: number;
+  jiraBulkFinished: boolean;
+  /** Ссылка на Jira-проект — выводится из URL созданной задачи, для кнопки «Open Jira». */
+  jiraBulkProjectUrl: string | null;
 }
 
 const initialState: StormState = {
@@ -295,9 +424,11 @@ const initialState: StormState = {
   apiProjects: null,
   projectsLoading: false,
   projectsError: null,
+  aggTimes: null,
   reloadTick: 0,
   projEditId: null,
   confirmProjectId: null,
+  confirmUserId: null,
   activity: null,
   activityLoading: false,
   activityError: null,
@@ -306,16 +437,44 @@ const initialState: StormState = {
   apiHosts: null,
   hostsLoading: false,
   hostsTick: 0,
+  hostImportOpen: false,
+  ipCfFilter: "",
+  hostCfFilter: "",
+  ipImportOpen: false,
+  ipImportRaw: "",
+  ipImportPreview: "",
+  ipImportBusy: false,
+  epImportOpen: false,
+  epImportRaw: "",
+  epImportPreview: "",
+  epImportBusy: false,
+  ipFarmJob: null,
+  jsFarmJob: null,
+  apiJsFiles: null,
+  jsTick: 0,
+  jsQuery: "",
+  jsSecretsOnly: false,
+  jsExpanded: [],
+  hostImportRaw: "",
+  hostImportPreview: "",
+  hostImportBusy: false,
+  hostFilters: [],
+  ipFilters: [],
+  hostFarmJob: null,
   apiMembers: null,
   membersTick: 0,
   apiVulns: null,
   vulnsTick: 0,
   apiNotes: null,
   notesTick: 0,
+  apiCreds: null,
+  credsTick: 0,
+  revealedCredIds: [],
   accessDenied: false,
   notifs: [],
   reconView: "hosts",
   openHostId: null,
+  openIp: null,
   reconMenuOpen: false,
   hostQuery: "",
   epMethods: [],
@@ -341,6 +500,8 @@ const initialState: StormState = {
   exportBusy: false,
   exportScope: "report",
   exportFormat: "list",
+  exportPageOpen: false,
+  exportText: "",
   openNoteId: null,
   editorOpen: false,
   editorType: "host",
@@ -348,6 +509,8 @@ const initialState: StormState = {
   editorIndex: -1,
   editorForm: {},
   tagDrafts: {},
+  comboOpen: null,
+  comboHi: 0,
   nav: "projects",
   tab: "active",
   query: "",
@@ -371,8 +534,13 @@ const initialState: StormState = {
   apiKeyModalOpen: false,
   apiKeyName: "",
   apiKeyScopes: {},
+  apiKeyAllProjects: true,
+  apiKeyProjectIds: [],
+  apiKeyExpiry: "",
   workspaceUsers: [],
+  pendingInvites: [],
   usersTick: 0,
+  wsUserTab: "active",
   wsUserModalOpen: false,
   wsUserMode: "add",
   wsUserIndex: -1,
@@ -385,20 +553,39 @@ const initialState: StormState = {
   wsMemberQuery: "",
   wsMemberRoles: [],
   wsMemberProjectRoles: [],
-  twoFAEnabled: true,
   twoFASetupOpen: false,
   twoFACode: "",
+  twoFAQr: null,
+  twoFASecret: null,
+  twoFADisableOpen: false,
+  twoFADisablePassword: "",
+  twoFABusy: false,
   vulnFilterAuthor: "",
   vulnFilterStatuses: [],
   vulnFilterSeverities: [],
   vulnFilterHost: "",
   openVulnId: null,
   vulnDetailForm: {},
+  jiraExportOpen: false,
+  jiraExportVulnId: null,
+  jiraExportChecking: false,
+  jiraExportBusy: false,
+  jiraExportLink: null,
+  jiraExportError: null,
+  jiraBulkOpen: false,
+  jiraBulkRunning: false,
+  jiraBulkDone: 0,
+  jiraBulkTotal: 0,
+  jiraBulkCreated: 0,
+  jiraBulkSkipped: 0,
+  jiraBulkFailed: 0,
+  jiraBulkFinished: false,
+  jiraBulkProjectUrl: null,
 };
 
-const CARD: CSSProperties = { background: "#fff", border: "1px solid #e9edf4", borderRadius: 16 };
-const PILL_ON: CSSProperties = { background: "#4C74C7", color: "#fff", border: "1px solid #4C74C7" };
-const PILL_OFF: CSSProperties = { background: "#fff", color: "#5A6B84", border: "1px solid #dbe1ec" };
+const CARD: CSSProperties = { background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 16 };
+const PILL_ON: CSSProperties = { background: "var(--st-accent-2)", color: "var(--st-on-accent)", border: "1px solid var(--st-accent-2)" };
+const PILL_OFF: CSSProperties = { background: "var(--st-surface)", color: "var(--st-text-2)", border: "1px solid var(--st-border)" };
 const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 /** Multi-select filter toggle: add the value if absent, drop it if already held. */
@@ -449,13 +636,21 @@ function pathFor(s: {
   profileTab: ProfileTab;
   openVulnId: number | null;
   openNoteId: number | null;
+  openHostId: number | null;
+  openIp: string | null;
 }): string {
   if (s.view === "profile") return s.profileTab === "account" ? "/profile" : `/profile/${s.profileTab}`;
   if (s.view === "workspaceMembers") return "/members";
   if (s.view === "detail" && s.openProjectId != null) {
     const base = `/projects/${s.openProjectId}`;
     if (s.section === "overview") return base;
-    if (s.section === "hosts") return `${base}/${s.reconView}`;
+    if (s.section === "hosts") {
+      // An open host/IP card is the last path segment, so the card is deep-linkable
+      // (an IP carries dots but stays a single segment — encode it to be safe).
+      if (s.reconView === "hosts" && s.openHostId != null) return `${base}/hosts/${s.openHostId}`;
+      if (s.reconView === "ips" && s.openIp != null) return `${base}/ips/${encodeURIComponent(s.openIp)}`;
+      return `${base}/${s.reconView}`;
+    }
     if (s.section === "vulns" && s.openVulnId != null) return `${base}/vulns/${s.openVulnId}`;
     if (s.section === "notes" && s.openNoteId != null) return `${base}/notes/${s.openNoteId}`;
     return `${base}/${s.section}`;
@@ -469,7 +664,7 @@ function navStateFromPath(path: string): Partial<StormState> {
   const head = parts[0];
   if (!head) return { view: "list", nav: "projects" };
   if (head === "projects") {
-    if (parts.length === 1) return { view: "list", nav: "projects", openProjectId: null, openVulnId: null, openNoteId: null, openHostId: null };
+    if (parts.length === 1) return { view: "list", nav: "projects", openProjectId: null, openVulnId: null, openNoteId: null, openHostId: null, openIp: null };
     const id = Number(parts[1]);
     const seg = parts[2];
     const base: Partial<StormState> = {
@@ -479,6 +674,7 @@ function navStateFromPath(path: string): Partial<StormState> {
       openVulnId: null,
       openNoteId: null,
       openHostId: null,
+      openIp: null,
     };
     /** `/…/vulns/7` → 7; a missing or non-numeric segment → null. */
     const entityId = () => {
@@ -486,18 +682,26 @@ function navStateFromPath(path: string): Partial<StormState> {
       return parts[3] != null && Number.isFinite(n) ? n : null;
     };
     if (!seg) return { ...base, section: "overview" };
-    if (seg === "hosts" || seg === "ips" || seg === "endpoints") return { ...base, section: "hosts", reconView: seg };
+    // /projects/{id}/hosts/{hostId} and /projects/{id}/ips/{ip} deep-link an open card.
+    if (seg === "hosts") {
+      const hid = Number(parts[3]);
+      return { ...base, section: "hosts", reconView: "hosts", openHostId: parts[3] != null && Number.isFinite(hid) ? hid : null };
+    }
+    if (seg === "ips") {
+      return { ...base, section: "hosts", reconView: "ips", openIp: parts[3] != null ? decodeURIComponent(parts[3]) : null };
+    }
+    if (seg === "endpoints" || seg === "js") return { ...base, section: "hosts", reconView: seg };
     // /projects/{id}/vulns/{vulnId} and /projects/{id}/notes/{noteId} — deep links.
     if (seg === "vulns") return { ...base, section: "vulns", openVulnId: entityId() };
     if (seg === "notes") return { ...base, section: "notes", openNoteId: entityId() };
-    if (seg === "members" || seg === "activity") return { ...base, section: seg };
+    if (seg === "creds" || seg === "members" || seg === "activity") return { ...base, section: seg };
     return { ...base, section: "overview" };
   }
   if (head === "tasks") return { view: "list", nav: "tasks" };
   if (head === "my-tasks") return { view: "list", nav: "mine" };
   if (head === "docs") return { view: "list", nav: "docs" };
   if (head === "members") return { view: "workspaceMembers", nav: "members" };
-  if (head === "profile") return { view: "profile", profileTab: ["security", "api"].includes(parts[1]) ? (parts[1] as ProfileTab) : "account" };
+  if (head === "profile") return { view: "profile", profileTab: ["security", "api", "customizing"].includes(parts[1]) ? (parts[1] as ProfileTab) : "account" };
   return { view: "list", nav: "projects" };
 }
 
@@ -509,6 +713,8 @@ interface ApiProjectRow {
   status: ProjectStatus;
   startISO: string;
   endISO: string;
+  /** Project creation timestamp — the "added at" point for the count sparklines. */
+  createdISO: string;
   updated: string;
   createdBy: number;
   openFindings: number;
@@ -552,13 +758,13 @@ function mdInline(text: string, kb: string): ReactNode[] {
     else if (m[3] != null) nodes.push(<em key={`${kb}-${key++}`}>{m[3]}</em>);
     else if (m[4] != null)
       nodes.push(
-        <code key={`${kb}-${key++}`} style={{ background: "#eef1f7", borderRadius: 5, padding: "1px 5px", fontFamily: "ui-monospace,Menlo,monospace", fontSize: ".9em" }}>
+        <code key={`${kb}-${key++}`} style={{ background: "var(--st-divider)", borderRadius: 5, padding: "1px 5px", fontFamily: "ui-monospace,Menlo,monospace", fontSize: ".9em" }}>
           {m[4]}
         </code>
       );
     else if (m[5] != null)
       nodes.push(
-        <a key={`${kb}-${key++}`} href={m[6]} style={{ color: "#4C74C7" }}>
+        <a key={`${kb}-${key++}`} href={m[6]} style={{ color: "var(--st-accent-2)" }}>
           {m[5]}
         </a>
       );
@@ -597,7 +803,7 @@ function renderMarkdown(src: string): ReactNode {
       const size = lvl === 1 ? 18 : lvl === 2 ? 15.5 : 13.5;
       const k = key++;
       blocks.push(
-        <div key={`b${k}`} style={{ fontWeight: 800, fontSize: size, color: "#0F1B2D", margin: "8px 0 4px" }}>
+        <div key={`b${k}`} style={{ fontWeight: 800, fontSize: size, color: "var(--st-text)", margin: "8px 0 4px" }}>
           {mdInline(hm[2], `h${k}`)}
         </div>
       );
@@ -616,7 +822,7 @@ function renderMarkdown(src: string): ReactNode {
     }
   }
   flush();
-  return <div style={{ fontSize: 13.5, lineHeight: 1.6, color: "#3a4a60" }}>{blocks}</div>;
+  return <div style={{ fontSize: 13.5, lineHeight: 1.6, color: "var(--st-text-2)" }}>{blocks}</div>;
 }
 
 /** Deterministic sparkline point string (ported from prototype). */
@@ -637,6 +843,71 @@ function sparkline(seed: number, current: number): string {
   return vals.map((val, i) => `${Math.round(i * stepX)},${Math.round(h - pad - (val / max) * (h - pad * 2))}`).join(" ");
 }
 
+/**
+ * Cumulative-count sparkline driven by real "added at" timestamps.
+ *
+ * X is the engagement window [start, end]; the line is drawn only up to today,
+ * so an unfinished project stops partway across the card. Y is the running
+ * number of entities created at or before each sampled instant — every add
+ * pushes the line up, and a burst of adds shows as a steeper climb.
+ *
+ * `startMs`/`endMs` are epoch millis (NaN when the project has no dates set); we
+ * then fall back to the entities' own first/last timestamps so the card still
+ * renders something meaningful.
+ */
+function cumulativeSpark(
+  timestamps: (string | null | undefined)[],
+  startMs: number,
+  endMs: number,
+  w = 111,
+  h = 30,
+  pad = 3,
+): string {
+  const now = Date.now();
+  const times = timestamps
+    .map((t) => Date.parse(t ?? ""))
+    .filter((t) => Number.isFinite(t))
+    .sort((a, b) => a - b);
+
+  let start = startMs;
+  let end = endMs;
+  if (!Number.isFinite(start)) start = times.length ? times[0] : now - 7 * 864e5;
+  if (!Number.isFinite(end) || end <= start) {
+    end = Math.max(now, times.length ? times[times.length - 1] : now, start + 864e5);
+  }
+
+  /* Ось X — прошедшая часть окна: от старта до «сегодня», но не дальше конца
+     проекта. Нормируем именно по ней (а не по всему start…end), иначе у активного
+     проекта линия обрывалась бы на середине карточки, и спарклайны в соседних
+     виджетах получались бы разной длины. */
+  const cutoff = Math.max(start + 1, Math.min(now, end));
+  const span = cutoff - start;
+  const maxY = Math.max(1, times.length);
+  const yTop = pad;
+  const yBot = h - pad;
+  const N = 16;
+
+  const pts: string[] = [];
+  for (let i = 0; i < N; i++) {
+    const t = start + ((cutoff - start) * i) / (N - 1);
+    let count = 0;
+    for (const ts of times) {
+      if (ts <= t) count++;
+      else break;
+    }
+    const x = (w * (t - start)) / span;
+    const y = yBot - (count / maxY) * (yBot - yTop);
+    pts.push(`${Math.round(x)},${Math.round(y)}`);
+  }
+  return pts.join(" ");
+}
+
+/** Замыкает спарклайн вниз до базовой линии — заливка того же цвета под графиком. */
+function sparkArea(points: string, w: number, h = 30): string {
+  if (!points) return "";
+  return `0,${h} ${points} ${w},${h}`;
+}
+
 // ================= backend hosts → Storm host shape =================
 /* The backend serialises each port with its services (schemas.py `PortOut.services`),
    but the shared `Port` type in ../types does not declare the field yet. Widen it
@@ -650,11 +921,24 @@ function toStormMethod(m: ApiEndpoint["method"]): Method {
   return m && (STORM_METHODS as string[]).includes(m) ? (m as Method) : "GET";
 }
 
+/** A farm job still worth polling. `pending`/`queued` are the recon-worker's
+ *  pre-run states — a job sits there until the worker picks it off the queue. */
+function isFarmJobInFlight(status: string): boolean {
+  return status === "pending" || status === "queued" || status === "running";
+}
+
 /** Ports live under each IP on the backend; Storm shows them flat per host. */
 function toStormPorts(h: ApiHost): Host["ports"] {
   return h.ip_addresses
     .flatMap((ip) => ip.ports as ApiPortWithServices[])
-    .map((p) => ({ n: p.port_number, proto: p.protocol, state: p.state, svc: p.services?.[0]?.name ?? "" }));
+    .map((p) => ({
+      n: p.port_number,
+      proto: p.protocol,
+      state: p.state,
+      svc: p.services?.[0]?.name ?? "",
+      techs: (p.services ?? []).map((s) => ({ name: s.name, version: s.version })),
+      http: p.http_status ?? null,
+    }));
 }
 
 function toStormHost(h: ApiHost, endpoints: Endpoint[] = []): Host {
@@ -663,9 +947,19 @@ function toStormHost(h: ApiHost, endpoints: Endpoint[] = []): Host {
     host: h.hostname || h.ip_address || "—",
     ip: h.ip_address || "",
     ips: h.ip_addresses.map((a) => a.ip_address),
+    ipEntries: h.ip_addresses.map((a) => ({
+      ip: a.ip_address,
+      hostnames: a.hostnames ?? [],
+      cloudflare: Boolean(a.is_cloudflare),
+    })),
+    origin: h.origin === "ip" ? "ip" : "host",
+    // Derived, not stored: a host-level column in the DB would need invalidating
+    // on every address add/remove, and every address already carries the flag.
+    cloudflare: h.ip_addresses.some((a) => a.is_cloudflare),
     status: h.status,
     ports: toStormPorts(h),
     endpoints,
+    created: h.created_at,
   };
 }
 
@@ -681,6 +975,7 @@ function toStormVuln(v: ApiVulnerability, hostName: string): Vuln {
     host: hostName,
     author: v.created_by_username || "—",
     updated: relTime(v.updated_at),
+    created: v.created_at,
     steps: v.workflow_steps.map((s) => s.description || "").filter(Boolean),
     description: v.description || "",
     impact: v.impact || "",
@@ -700,6 +995,17 @@ function toStormNote(n: ProjectNote): Note {
   };
 }
 
+function toStormCred(c: ApiProjectCredential): Cred {
+  return {
+    id: c.id,
+    username: c.username || "",
+    password: c.password || "",
+    host: c.host || "",
+    author: c.created_by_username || "—",
+    when: toDispDate((c.updated_at || c.created_at || "").slice(0, 10)),
+  };
+}
+
 function toStormMember(m: ApiProjectMember, idx: number): Member {
   return {
     id: m.user_id,
@@ -715,19 +1021,20 @@ function toStormMember(m: ApiProjectMember, idx: number): Member {
 /* Marker + colour for the dark event panel: green + = added, red − = removed,
    amber ~ = changed — the prototype's scheme, tuned to the Storm palette. */
 const ACT_TONE = {
-  add: { mark: "+", color: "#5FD39A" },
-  change: { mark: "~", color: "#E8A13C" },
-  remove: { mark: "−", color: "#EF8A9C" },
-  info: { mark: "•", color: "#8FB4F5" },
+  add: { mark: "+", color: "var(--st-success)" },
+  change: { mark: "~", color: "var(--st-warn)" },
+  remove: { mark: "−", color: "var(--st-danger)" },
+  info: { mark: "•", color: "var(--st-accent-muted)" },
 } as const;
 type ActTone = (typeof ACT_TONE)[keyof typeof ACT_TONE];
 /** Severity chip on the dark panel — filled with the severity's own colour. */
 const ACT_SEV: Record<Severity, string> = {
-  critical: "#C0455B",
-  high: "#D9683C",
-  medium: "#B7862B",
-  low: "#2E5FBF",
-  info: "#6b7a90",
+  critical: "var(--st-danger)",
+  high: "var(--st-orange)",
+  medium: "var(--st-warn)",
+  low: "var(--st-accent)",
+  info: "var(--st-text-3)",
+  unknown: "var(--st-text-3)",
 };
 
 /** Beyond this many lines a card collapses and offers "Show more". */
@@ -762,6 +1069,7 @@ const ACT_NOUN: Record<string, [string, string]> = {
   endpoint: ["endpoint", "endpoints"],
   project_note: ["note", "notes"],
   note: ["note", "notes"],
+  project_credential: ["credential", "credentials"],
   project: ["project", "projects"],
   project_member: ["member", "members"],
   member: ["member", "members"],
@@ -813,6 +1121,13 @@ function activityLine(a: ProjectActivityItem, resolve: ActivityResolver): Activi
     case "project_note":
     case "note":
       return { ...base, text: a.title || actDetail(a, "title") || fallback };
+    case "project_credential": {
+      // The audit event carries username + host (never the password) — the feed
+      // line reads "{username} for {host}", with the +/−/~ marker from the action.
+      const who = actDetail(a, "username") || "credential";
+      const host = actDetail(a, "host");
+      return { ...base, text: host ? `${who} for ${host}` : who };
+    }
     case "project":
       return { ...base, text: actDetail(a, "project") || a.title || fallback };
     case "project_member":
@@ -898,7 +1213,16 @@ export function StormApp() {
   // ---- logged-in user (real backend auth) ----
   const authUser = useAuthStore((s) => s.user);
   const signOut = useAuthStore((s) => s.signOut);
+  const refreshUser = useAuthStore((s) => s.refreshUser);
+  const setUser = useAuthStore((s) => s.setUser);
+  // 2FA берём из реального профиля, а не из локального состояния.
+  const twoFAEnabled = !!authUser?.totp_enabled;
   const pushToast = useToastStore((s) => s.pushToast);
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
+  // Subscribe so the whole app re-renders (and every t() re-evaluates) on switch.
+  const lang = useLangStore((s) => s.lang);
+  const setLang = useLangStore((s) => s.setLang);
   const navigate = useNavigate();
   const location = useLocation();
   const realUsername = authUser?.username || "";
@@ -908,9 +1232,86 @@ export function StormApp() {
   const isAdmin = meWsRole === "admin";
   const meEmail = authUser?.email || "";
   const meDisplay = authUser?.full_name || realUsername;
-  const meRoleLabel = meWsRole === "admin" ? "Administrator" : "User";
+  const meRoleLabel = meWsRole === "admin" ? t("Administrator") : t("User");
   const meId = String(authUser?.id ?? "");
   const meInitials = initialsOf(authUser?.full_name || realUsername || "U");
+
+  // ================= avatar upload =================
+  /* Mirrors the backend limits (UserService.upload_avatar): ≤5 MB, image only. */
+  const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+  const AVATAR_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+
+  const clearAvatarPick = () => {
+    setAvatarPreview((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setAvatarFile(null);
+  };
+
+  const onAvatarPick = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    e.target.value = ""; // позволяет выбрать тот же файл повторно после ошибки
+    if (!file) return;
+    if (!AVATAR_TYPES.includes(file.type)) {
+      pushToast("Avatar must be a PNG, JPEG, WEBP or GIF image", "error");
+      return;
+    }
+    if (file.size > AVATAR_MAX_BYTES) {
+      pushToast("Avatar exceeds the 5 MB limit", "error");
+      return;
+    }
+    setAvatarFile(file);
+    setAvatarPreview((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(file);
+    });
+  };
+
+  const submitAvatar = async () => {
+    if (!avatarFile || avatarUploading) return;
+    setAvatarUploading(true);
+    try {
+      const updated = await apiUploadMyAvatar(avatarFile);
+      setUser(updated); // avatar_url меняется → круги по всему интерфейсу обновятся
+      clearAvatarPick();
+      pushToast("Avatar updated", "success");
+    } catch (err) {
+      pushToast(getApiErrorMessage(err, "Couldn't upload avatar"), "error");
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
+  /** Круг-аватар текущего пользователя: фото, если оно есть, иначе инициалы. */
+  const meAvatar = (size: number, fontPx: number, text: string, src: string | null = authUser?.avatar_url ?? null) =>
+    src ? (
+      <img
+        src={src}
+        alt={meDisplay}
+        style={{ width: size, height: size, flex: "none", borderRadius: "50%", objectFit: "cover", display: "block" }}
+      />
+    ) : (
+      <div
+        style={{
+          width: size,
+          height: size,
+          flex: "none",
+          borderRadius: "50%",
+          background: "var(--st-accent)",
+          color: "var(--st-on-accent)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          font: `700 ${fontPx}px 'JetBrains Mono',monospace`,
+        }}
+      >
+        {text}
+      </div>
+    );
 
   /** Any request that 403s for the open project flips the no-access screen on. */
   const handleProjectError = (e: unknown, fallback: string) => {
@@ -943,6 +1344,7 @@ export function StormApp() {
             status: p.status,
             startISO: p.start_date || "",
             endISO: p.end_date || "",
+            createdISO: p.created_at || "",
             updated: relTime(p.updated_at),
             createdBy: p.created_by,
             openFindings: st?.open_findings ?? 0,
@@ -952,30 +1354,76 @@ export function StormApp() {
         });
         if (!cancelled) setStateRaw((s) => ({ ...s, apiProjects: rows, projectsLoading: false }));
       } catch (e) {
-        if (!cancelled) setStateRaw((s) => ({ ...s, apiProjects: [], projectsError: getApiErrorMessage(e, "Не удалось загрузить проекты"), projectsLoading: false }));
+        if (!cancelled) setStateRaw((s) => ({ ...s, apiProjects: [], projectsError: getApiErrorMessage(e, "Couldn't load projects"), projectsLoading: false }));
       }
     })();
     return () => {
       cancelled = true;
     };
-     
+
   }, [state.reloadTick]);
+
+  /* ================= projects list: per-project "added at" timestamps =========
+     The stat cards on the projects page chart real add-frequency, which needs
+     each host's and each open finding's creation time — data the list endpoint
+     does not carry. Fetch it lazily while the list is on screen, in bounded
+     batches so a large workspace does not fire hundreds of requests at once, and
+     cache by project id so switching tabs (or reopening the list) reuses it. */
+  useEffect(() => {
+    if (state.view !== "list" || state.nav !== "projects") return;
+    const rows = state.apiProjects;
+    if (!rows || rows.length === 0) return;
+    const known = state.aggTimes ?? {};
+    const need = rows.filter((r) => !(r.id in known));
+    if (need.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      const CONCURRENCY = 6;
+      for (let i = 0; i < need.length && !cancelled; i += CONCURRENCY) {
+        const batch = need.slice(i, i + CONCURRENCY);
+        const settled = await Promise.all(
+          batch.map(async (r) => {
+            // Best-effort per project: a 403/404 on one project must not blank the
+            // whole card — that project simply contributes no points.
+            const [hostsRes, vulnsRes] = await Promise.all([
+              apiGetHosts(r.id).catch(() => null),
+              apiGetVulnerabilities(r.id).catch(() => null),
+            ]);
+            const hosts = (hostsRes?.items ?? []).map((h) => h.created_at);
+            const openVulns = (vulnsRes?.items ?? [])
+              .filter((v) => (VSTATUS_OPEN as readonly string[]).includes(v.status))
+              .map((v) => v.created_at);
+            return [r.id, { hosts, openVulns }] as const;
+          })
+        );
+        if (cancelled) return;
+        setStateRaw((s) => ({ ...s, aggTimes: { ...(s.aggTimes ?? {}), ...Object.fromEntries(settled) } }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+
+  }, [state.apiProjects, state.view, state.nav]);
 
   /* ================= workspace users: load from backend =================
      `GET /users` is admin-only, so this must not run for anyone else: it would
-     403 and pop a "Недостаточно прав" toast on every page (that is what showed
+     403 and pop a "Insufficient permissions" toast on every page (that is what showed
      up while simply sitting on the Activity tab). `project_role` is a global
      user attribute and the workspace members page is where it is configured. */
   const reloadUsers = () => setStateRaw((s) => ({ ...s, usersTick: s.usersTick + 1 }));
   useEffect(() => {
     if (!isAdmin) {
-      setStateRaw((s) => (s.workspaceUsers.length === 0 ? s : { ...s, workspaceUsers: [] }));
+      setStateRaw((s) => (s.workspaceUsers.length === 0 && s.pendingInvites.length === 0 ? s : { ...s, workspaceUsers: [], pendingInvites: [] }));
       return;
     }
     let cancelled = false;
     void (async () => {
       try {
-        const res = await getUsers(1, 200);
+        // Активные пользователи и незавершённые приглашения грузим вместе —
+        // и то и другое показывается на странице участников (invite-flow).
+        const [res, invites] = await Promise.all([getUsers(1, 200), apiGetInvitations()]);
         const rows: WorkspaceUser[] = res.items.map((u) => ({
           id: u.id,
           key: u.username,
@@ -983,13 +1431,14 @@ export function StormApp() {
           email: u.email,
           role: u.role === "admin" ? "admin" : "user",
           projectRole: u.project_role,
+          locked: u.is_locked,
         }));
-        if (!cancelled) setStateRaw((s) => ({ ...s, workspaceUsers: rows }));
+        if (!cancelled) setStateRaw((s) => ({ ...s, workspaceUsers: rows, pendingInvites: invites }));
       } catch (e) {
         // Best-effort: keep the list empty rather than breaking the app.
         if (!cancelled) {
-          setStateRaw((s) => ({ ...s, workspaceUsers: [] }));
-          pushToast(getApiErrorMessage(e, "Не удалось загрузить пользователей"), "error");
+          setStateRaw((s) => ({ ...s, workspaceUsers: [], pendingInvites: [] }));
+          pushToast(getApiErrorMessage(e, "Couldn't load users"), "error");
         }
       }
     })();
@@ -1030,7 +1479,7 @@ export function StormApp() {
       } catch (e) {
         if (!cancelled) {
           setStateRaw((s) => ({ ...s, apiHosts: [], hostsLoading: false }));
-          handleProjectError(e, "Не удалось загрузить хосты");
+          handleProjectError(e, "Couldn't load hosts");
         }
       }
     })();
@@ -1039,6 +1488,144 @@ export function StormApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.openProjectId, state.hostsTick]);
+
+  // ================= JS files: backend-loaded, refreshed by jsTick =================
+  const reloadJsFiles = () => setStateRaw((s) => ({ ...s, jsTick: s.jsTick + 1 }));
+  useEffect(() => {
+    const pid = state.openProjectId;
+    if (pid == null) {
+      setStateRaw((s) => (s.apiJsFiles === null ? s : { ...s, apiJsFiles: null }));
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const files = await apiGetJsFiles(pid);
+        if (!cancelled) setStateRaw((s) => ({ ...s, apiJsFiles: files }));
+      } catch {
+        if (!cancelled) setStateRaw((s) => ({ ...s, apiJsFiles: [] }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [state.openProjectId, state.jsTick]);
+
+  // ================= host farm: poll the running probe job =================
+  useEffect(() => {
+    const job = state.hostFarmJob;
+    const pid = state.openProjectId;
+    if (!job || pid == null || !isFarmJobInFlight(job.status)) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const next = await apiGetHostFarmJob(pid, job.id);
+        if (cancelled) return;
+        // Reload every tick so the per-host commits show up as statuses fill in.
+        reloadHosts();
+        if (isFarmJobInFlight(next.status)) {
+          setStateRaw((s) => (s.hostFarmJob && s.hostFarmJob.id === next.id ? { ...s, hostFarmJob: next } : s));
+        } else {
+          setStateRaw((s) => (s.hostFarmJob && s.hostFarmJob.id === next.id ? { ...s, hostFarmJob: null } : s));
+          if (next.status === "done" && next.result) {
+            // Added = number of new targets probed this run; skipped = already-present
+            // hosts we left untouched (no re-probe). Statuses are reported alongside.
+            const r = next.result;
+            const added = r.hosts_created + r.hosts_updated;
+            const skipped = r.hosts_skipped ? `, ${r.hosts_skipped} ${t("skipped")}` : "";
+            pushToast(
+              `${t("Probe done")} — ${added} ${t("added")}${skipped}, ${r.hosts_online} ${t("up")}, ${r.hosts_offline} ${t("down")}`,
+              "success",
+            );
+          } else if (next.status === "failed") {
+            pushToast(next.error || t("Probe failed"), "error");
+          }
+        }
+      } catch {
+        // Transient error — re-arm the poll by nudging the reference.
+        if (!cancelled) setStateRaw((s) => (s.hostFarmJob ? { ...s, hostFarmJob: { ...s.hostFarmJob } } : s));
+      }
+    }, 1500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.hostFarmJob, state.openProjectId]);
+
+  // ================= ip farm: poll the running resolve+probe job =================
+  useEffect(() => {
+    const job = state.ipFarmJob;
+    const pid = state.openProjectId;
+    if (!job || pid == null || !isFarmJobInFlight(job.status)) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const next = await apiGetIpFarmJob(pid, job.id);
+        if (cancelled) return;
+        // The IP farm commits per address, so rows stream in as it goes.
+        reloadHosts();
+        if (isFarmJobInFlight(next.status)) {
+          setStateRaw((s) => (s.ipFarmJob && s.ipFarmJob.id === next.id ? { ...s, ipFarmJob: next } : s));
+        } else {
+          setStateRaw((s) => (s.ipFarmJob && s.ipFarmJob.id === next.id ? { ...s, ipFarmJob: null } : s));
+          if (next.status === "done" && next.result) {
+            {
+              const r = next.result;
+              const promoted = r.hosts_promoted ? `, ${r.hosts_promoted} ${t("hosts")}` : "";
+              const skipped = r.ips_skipped ? `, ${r.ips_skipped} ${t("skipped")}` : "";
+              pushToast(
+                `${t("Probe done")} — ${r.ips_created} ${t("IPs")}${skipped}, ${r.hostnames_found} ${t("hostnames")}${promoted}`,
+                "success",
+              );
+            }
+          } else if (next.status === "failed") {
+            pushToast(next.error || t("Probe failed"), "error");
+          }
+        }
+      } catch {
+        if (!cancelled) setStateRaw((s) => (s.ipFarmJob ? { ...s, ipFarmJob: { ...s.ipFarmJob } } : s));
+      }
+    }, 1500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.ipFarmJob, state.openProjectId]);
+
+  // ================= js farm: poll the running scan job =================
+  useEffect(() => {
+    const job = state.jsFarmJob;
+    const pid = state.openProjectId;
+    if (!job || pid == null || !isFarmJobInFlight(job.status)) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const next = await apiGetJsScanJob(pid, job.id);
+        if (cancelled) return;
+        // The scan commits per file, so found files stream in as it runs.
+        reloadJsFiles();
+        if (isFarmJobInFlight(next.status)) {
+          setStateRaw((s) => (s.jsFarmJob && s.jsFarmJob.id === next.id ? { ...s, jsFarmJob: next } : s));
+        } else {
+          setStateRaw((s) => (s.jsFarmJob && s.jsFarmJob.id === next.id ? { ...s, jsFarmJob: null } : s));
+          if (next.status === "done" && next.result) {
+            pushToast(`${t("Scan done")} — ${next.result.files_scanned} JS, ${next.result.secrets_found} ${t("secrets")}, ${next.result.endpoints_found} ${t("paths")}`, "success");
+          } else if (next.status === "failed") {
+            pushToast(next.error || t("Scan failed"), "error");
+          }
+        }
+      } catch {
+        if (!cancelled) setStateRaw((s) => (s.jsFarmJob ? { ...s, jsFarmJob: { ...s.jsFarmJob } } : s));
+      }
+    }, 1500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.jsFarmJob, state.openProjectId]);
 
   /** Hosts rendered by the whole Recon section. Backend-only — never the seed. */
   const hosts: Host[] = state.apiHosts ?? [];
@@ -1067,7 +1654,7 @@ export function StormApp() {
       } catch (e) {
         if (!cancelled) {
           setStateRaw((s) => ({ ...s, apiMembers: [] }));
-          handleProjectError(e, "Не удалось загрузить участников");
+          handleProjectError(e, "Couldn't load members");
         }
       }
     })();
@@ -1110,7 +1697,7 @@ export function StormApp() {
       } catch (e) {
         if (!cancelled) {
           setStateRaw((s) => ({ ...s, apiVulns: [] }));
-          handleProjectError(e, "Не удалось загрузить уязвимости");
+          handleProjectError(e, "Couldn't load vulnerabilities");
         }
       }
     })();
@@ -1136,7 +1723,7 @@ export function StormApp() {
       } catch (e) {
         if (!cancelled) {
           setStateRaw((s) => ({ ...s, apiNotes: [] }));
-          handleProjectError(e, "Не удалось загрузить заметки");
+          handleProjectError(e, "Couldn't load notes");
         }
       }
     })();
@@ -1145,6 +1732,32 @@ export function StormApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.openProjectId, state.notesTick]);
+
+  // ================= credentials: load from backend =================
+  const reloadCreds = () => setStateRaw((s) => ({ ...s, credsTick: s.credsTick + 1 }));
+  useEffect(() => {
+    const pid = state.openProjectId;
+    if (pid == null) {
+      setStateRaw((s) => (s.apiCreds === null ? s : { ...s, apiCreds: null, revealedCredIds: [] }));
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rows = await apiListProjectCredentials(pid);
+        if (!cancelled) setStateRaw((s) => ({ ...s, apiCreds: rows.map(toStormCred) }));
+      } catch (e) {
+        if (!cancelled) {
+          setStateRaw((s) => ({ ...s, apiCreds: [] }));
+          handleProjectError(e, "Couldn't load credentials");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.openProjectId, state.credsTick]);
 
   // ================= notifications: load from backend =================
   useEffect(() => {
@@ -1180,6 +1793,7 @@ export function StormApp() {
     members: state.apiMembers ?? [],
     vulns: state.apiVulns ?? [],
     notes: state.apiNotes ?? [],
+    creds: state.apiCreds ?? [],
   };
 
   // ================= role model / access control =================
@@ -1188,8 +1802,13 @@ export function StormApp() {
   const isProjectCreator = projRow != null && authUser != null && projRow.createdBy === authUser.id;
   /** The lead role is global (User.project_role); it only unlocks anything inside a project the user belongs to. */
   const isProjectLead = authUser?.project_role === "lead" && (state.apiMembers ?? []).some((m) => m.id === authUser.id);
-  /** Rule 1.2 — only admin / creator / lead may see (and manage) project members. */
-  const canViewMembers = isAdmin || isProjectCreator || isProjectLead;
+  /** Любой участник проекта (в т.ч. простой пентестер) — он есть в списке apiMembers. */
+  const isProjectMember = authUser != null && (state.apiMembers ?? []).some((m) => m.id === authUser.id);
+  /** Rule 1.2 — управлять составом команды (add/remove) могут только админ / создатель / лид.
+      Бэкенд — источник истины (ensure_can_manage_members), это лишь прячет кнопки. */
+  const canManageMembers = isAdmin || isProjectCreator || isProjectLead;
+  /** Видеть список участников может любой участник проекта — но только смотреть, без управления. */
+  const canViewMembers = canManageMembers || isProjectMember;
   /** The same three roles may edit the project card (name / description / dates).
       Mirrors ProjectService.ensure_can_edit_project — the backend is the gate,
       this only hides a button the user would be refused anyway. */
@@ -1213,6 +1832,7 @@ export function StormApp() {
       openVulnId: null,
       openNoteId: null,
       openHostId: null,
+      openIp: null,
     });
   const openProject = (id: number) =>
     setState({ view: "detail", openProjectId: id, section: "overview", expanded: [], openVulnId: null, openNoteId: null, accessDenied: false });
@@ -1232,13 +1852,19 @@ export function StormApp() {
           setStateRaw((s) => ({ ...s, activity: [], activityLoading: false, accessDenied: true }));
           return;
         }
-        setStateRaw((s) => ({ ...s, activity: [], activityError: getApiErrorMessage(e, "Не удалось загрузить активность"), activityLoading: false }));
+        setStateRaw((s) => ({ ...s, activity: [], activityError: getApiErrorMessage(e, "Couldn't load activity"), activityLoading: false }));
       }
     })();
   };
   /** A section tab always lands on that section's list, never on a card left open in it. */
-  const setSection = (s: SectionId) => setState({ section: s, reconMenuOpen: false, openVulnId: null, openNoteId: null, noteEditorOpen: false });
-  const selRecon = (v: ReconView) => setState({ section: "hosts", reconView: v, reconMenuOpen: false, openHostId: null });
+  /* Leaving Recon resets its sub-view, so coming back later opens on Hosts
+     instead of restoring whichever list was picked several sections ago. */
+  /* Leaving a section abandons the full-page forms that live inside it (export,
+     "Add hosts") — otherwise coming back would drop the user into a stale form
+     instead of the list they asked for. */
+  const setSection = (s: SectionId) =>
+    setState({ section: s, ...(s === "hosts" ? {} : { reconView: "hosts" as ReconView }), reconMenuOpen: false, openVulnId: null, openNoteId: null, noteEditorOpen: false, exportPageOpen: false, hostImportOpen: false, ipImportOpen: false, epImportOpen: false });
+  const selRecon = (v: ReconView) => setState({ section: "hosts", reconView: v, reconMenuOpen: false, openHostId: null, openIp: null, exportPageOpen: false, hostImportOpen: false, ipImportOpen: false, epImportOpen: false });
 
   /* ---- URL ↔ navigation-state sync (deep links to sections / projects) ----
      Two effects mirror each other: URL → state, and state → URL. They must never
@@ -1285,10 +1911,12 @@ export function StormApp() {
       profileTab: state.profileTab,
       openVulnId: state.openVulnId,
       openNoteId: state.openNoteId,
+      openHostId: state.openHostId,
+      openIp: state.openIp,
     });
     if (p !== location.pathname) navigate(p);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.view, state.nav, state.openProjectId, state.section, state.reconView, state.profileTab, state.openVulnId, state.openNoteId, location.pathname]);
+  }, [state.view, state.nav, state.openProjectId, state.section, state.reconView, state.profileTab, state.openVulnId, state.openNoteId, state.openHostId, state.openIp, location.pathname]);
   /* Loaded as soon as the project opens, like every other collection — the tab's
      counter has to be right before the tab is ever visited. Entering the tab
      re-fetches, since the feed is a shared audit trail that others add to. */
@@ -1315,10 +1943,36 @@ export function StormApp() {
      
   }, [state.openVulnId, state.apiVulns]);
 
+  /* Esc dismisses the frontmost open overlay, mirroring a backdrop click. Modals
+     and the notifications panel each carry their own onClose on `.modalback` /
+     `.notifback`, so clicking the topmost open one (highest z-index) closes that
+     layer alone and leaves anything beneath it — any modal following the shared
+     pattern is covered without touching this. The user menu has no backdrop of
+     its own, so it's dismissed by flag. */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const open = Array.from(
+        document.querySelectorAll<HTMLElement>(".modalback.open, .notifback.open")
+      );
+      if (open.length) {
+        open
+          .reduce((top, el) =>
+            (parseInt(getComputedStyle(el).zIndex) || 0) >= (parseInt(getComputedStyle(top).zIndex) || 0) ? el : top
+          )
+          .click();
+        return;
+      }
+      setStateRaw((s) => (s.userMenuOpen || s.reconMenuOpen ? { ...s, userMenuOpen: false, reconMenuOpen: false } : s));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // ================= projects list (backend-backed) =================
   /** The backend rejects this too (422) — checked here so the form says so before submitting. */
   const datesInvalid = (startISO: string, endISO: string) => !!startISO && !!endISO && endISO < startISO;
-  const DATES_ERROR = "Дата начала не может быть позже даты окончания";
+  const DATES_ERROR = "Start date can't be after end date";
 
   const createProject = async () => {
     const name = state.newName.trim();
@@ -1340,7 +1994,7 @@ export function StormApp() {
       setState({ modalOpen: false, newName: "", newDesc: "", newStart: "", newEnd: "", tab: "active" });
       reloadProjects();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось создать проект"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't create project"), "error");
     }
   };
 
@@ -1389,7 +2043,7 @@ export function StormApp() {
       setState({ projEditOpen: false });
       reloadProjects();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось сохранить проект"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't save project"), "error");
     }
   };
   const askDeleteProject = (row: ApiProjectRow) => setState({ confirmOpen: true, confirmType: null, confirmProjectId: row.id, confirmLabel: row.name });
@@ -1418,39 +2072,88 @@ export function StormApp() {
 
   const slug = (s: string) => (s.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "export").slice(0, 60);
 
-  /** Endpoints as a minimal OpenAPI 3 document — one path per endpoint. */
-  const endpointsAsOpenApi = (): string => {
+  /** Non-empty, trimmed lines of the editable pane — what actually gets written. */
+  const exportTextLines = (text: string): string[] => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+  /* The line format for every recon export: one row per host:port pair, so a row
+     can be dropped without taking the rest of the host with it. A host with no
+     known ports still contributes its bare name — otherwise it would vanish from
+     an export that is supposed to list it. */
+  const exportLinesFor = (scope: ExportScope): string[] => {
+    if (scope === "ips") {
+      // The row already carries the ports of every host sharing this address.
+      return ipsRows.flatMap((r) => (r.ports.length ? r.ports.map((p) => `${r.ip}:${p.n}`) : [r.ip]));
+    }
+    if (scope === "endpoints") {
+      // Only the endpoint URL — no method prefix.
+      return endpointGroups.flatMap((g) => g.endpoints.map((e) => `https://${g.host}${e.p}`));
+    }
+    /* The table nests subdomains under their parent, so hostsList on its own would
+       leave them out of the export. Expand every row with its subdomains and dedupe:
+       a search flattens the tree, which already lists the subdomain in its own right,
+       and subdomainsOf matches every descendant, so deeper trees repeat too. */
+    const seen = new Set<number>();
+    const rows: Host[] = [];
+    const add = (x: Host) => {
+      if (seen.has(x.id)) return;
+      seen.add(x.id);
+      rows.push(x);
+    };
+    hostsList.forEach(({ h }) => {
+      // A parent can be on the list only because one of its subdomains matched the
+      // pills — export it itself only when it matches them too.
+      if (hostMatchesFilters(h)) add(h);
+      visibleSubdomainsOf(h).forEach(add);
+    });
+    return rows.flatMap((h) => (h.ports.length ? h.ports.map((p) => `${h.host}:${p.n}`) : [h.host]));
+  };
+
+  /** Rebuilds the OpenAPI doc from the edited lines, so edits reach the JSON too. */
+  const endpointLinesToOpenApi = (lines: string[]): string => {
     const paths: Record<string, Record<string, unknown>> = {};
-    endpointGroups.forEach((g) =>
-      g.endpoints.forEach((e) => {
-        // OpenAPI keys by path, so the host goes into the operation's server list.
-        const path = e.p.startsWith("/") ? e.p : `/${e.p}`;
-        paths[path] = paths[path] ?? {};
-        paths[path][e.m.toLowerCase()] = {
-          summary: `${e.m} ${e.p}`,
-          servers: [{ url: `https://${g.host}` }],
-          responses: { "200": { description: "OK" } },
-        };
-      })
-    );
+    lines.forEach((line) => {
+      // Export lines are now bare URLs; still accept a leading METHOD for
+      // hand-edited lines. No method → default to GET.
+      const parts = line.trim().split(/\s+/);
+      const hasMethod = parts.length >= 2 && !/^https?:/i.test(parts[0]);
+      const method = hasMethod ? parts[0] : "GET";
+      const url = hasMethod ? parts[1] : parts[0];
+      if (!url) return;
+      let host: string;
+      let path: string;
+      try {
+        const u = new URL(url);
+        host = u.host;
+        path = u.pathname;
+      } catch {
+        return; // a hand-edited line that is no longer a URL is skipped, not fatal
+      }
+      // OpenAPI keys by path, so the host goes into the operation's server list.
+      paths[path] = paths[path] ?? {};
+      paths[path][method.toLowerCase()] = {
+        summary: `${method} ${path}`,
+        servers: [{ url: `https://${host}` }],
+        responses: { "200": { description: "OK" } },
+      };
+    });
     return JSON.stringify({ openapi: "3.0.3", info: { title: `${projName} — endpoints`, version: "1.0.0" }, paths }, null, 2);
   };
 
   const doReconExport = () => {
     const name = slug(projName);
-    if (state.exportScope === "hosts") {
-      downloadText(hostsList.map(({ h }) => h.host).join("\n"), `${name}_hosts.txt`);
-    } else if (state.exportScope === "ips") {
-      downloadText(ipsRows.map((r) => r.ip).join("\n"), `${name}_ips.txt`);
-    } else if (state.exportFormat === "openapi") {
-      downloadText(endpointsAsOpenApi(), `${name}_endpoints.json`, "application/json");
+    const lines = exportTextLines(state.exportText);
+    if (state.exportScope === "endpoints" && state.exportFormat === "openapi") {
+      downloadText(endpointLinesToOpenApi(lines), `${name}_endpoints.json`, "application/json");
     } else {
-      downloadText(endpointGroups.flatMap((g) => g.endpoints.map((e) => `${e.m} https://${g.host}${e.p}`)).join("\n"), `${name}_endpoints.txt`);
+      const file = state.exportScope === "hosts" ? "hosts" : state.exportScope === "ips" ? "ips" : "endpoints";
+      downloadText(lines.join("\n"), `${name}_${file}.txt`);
     }
-    setState({ exportModalOpen: false });
+    closeReconExport();
   };
 
-  const openReconExport = (scope: ExportScope) => setState({ exportModalOpen: true, exportScope: scope, exportFormat: "list" });
+  const openReconExport = (scope: ExportScope) =>
+    setState({ exportPageOpen: true, exportScope: scope, exportFormat: "list", exportText: exportLinesFor(scope).join("\n") });
+  const closeReconExport = () => setState({ exportPageOpen: false, exportText: "" });
   const doExport = async () => {
     const pid = state.openProjectId;
     if (pid == null) return;
@@ -1469,8 +2172,98 @@ export function StormApp() {
       setState({ exportModalOpen: false, exportBusy: false });
     } catch (e) {
       setState({ exportBusy: false });
-      pushToast(getApiErrorMessage(e, "Не удалось сформировать отчёт"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't generate report"), "error");
     }
+  };
+
+  // ================= Jira export =================
+  const openJiraExport = (vulnId: number) => {
+    const pid = state.openProjectId;
+    if (pid == null) return;
+    setState({
+      jiraExportOpen: true,
+      jiraExportVulnId: vulnId,
+      jiraExportChecking: true,
+      jiraExportBusy: false,
+      jiraExportLink: null,
+      jiraExportError: null,
+    });
+    // Jira настроена на уровне деплоя — проверяем только, не экспортирована ли уже находка.
+    void apiGetVulnerabilityJiraLink(pid, vulnId)
+      .catch(() => null)
+      .then((link) => setState({ jiraExportChecking: false, jiraExportLink: link }));
+  };
+  const closeJiraExport = () => setState({ jiraExportOpen: false });
+  const doJiraExport = async () => {
+    const pid = state.openProjectId;
+    const vid = state.jiraExportVulnId;
+    if (pid == null || vid == null) return;
+    setState({ jiraExportBusy: true, jiraExportError: null });
+    try {
+      const link = await apiExportVulnerabilityToJira(pid, vid);
+      setState({ jiraExportBusy: false, jiraExportLink: link });
+      pushToast(`Exported to Jira: ${link.jira_issue_key || "issue created"}`, "success");
+    } catch (e) {
+      const msg = getApiErrorMessage(e, "Couldn't export to Jira");
+      setState({ jiraExportBusy: false, jiraExportError: msg });
+      pushToast(msg, "error");
+    }
+  };
+
+  // ---- Bulk export: every vulnerability currently listed (respecting filters) ----
+  const openBulkJira = () => {
+    const pid = state.openProjectId;
+    if (pid == null) return;
+    setState({
+      jiraBulkOpen: true,
+      jiraBulkRunning: false,
+      jiraBulkFinished: false,
+      jiraBulkDone: 0,
+      jiraBulkTotal: 0,
+      jiraBulkCreated: 0,
+      jiraBulkSkipped: 0,
+      jiraBulkFailed: 0,
+      jiraBulkProjectUrl: null,
+    });
+  };
+  const closeBulkJira = () => {
+    if (!state.jiraBulkRunning) setState({ jiraBulkOpen: false });
+  };
+  const doBulkJiraExport = async () => {
+    const pid = state.openProjectId;
+    if (pid == null) return;
+    const ids = vulns.map((v) => v.id);
+    setState({ jiraBulkRunning: true, jiraBulkFinished: false, jiraBulkTotal: ids.length, jiraBulkDone: 0, jiraBulkCreated: 0, jiraBulkSkipped: 0, jiraBulkFailed: 0 });
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    // Ссылку на Jira-проект выводим из URL любой задачи: .../browse/STORM-29 -> .../browse/STORM
+    let projectUrl: string | null = null;
+    const rememberProjectUrl = (issueUrl?: string) => {
+      if (projectUrl || !issueUrl) return;
+      const m = issueUrl.match(/^(.*\/browse\/[A-Za-z][A-Za-z0-9_]*)-\d+/);
+      if (m) projectUrl = m[1];
+    };
+    for (const id of ids) {
+      try {
+        const existing = await apiGetVulnerabilityJiraLink(pid, id).catch(() => null);
+        if (existing && existing.status === "linked" && existing.jira_issue_key) {
+          skipped++;
+          rememberProjectUrl(existing.jira_issue_url);
+        } else {
+          const link = await apiExportVulnerabilityToJira(pid, id);
+          created++;
+          rememberProjectUrl(link.jira_issue_url);
+        }
+      } catch {
+        failed++;
+      }
+      setState((s) => ({ jiraBulkDone: s.jiraBulkDone + 1, jiraBulkCreated: created, jiraBulkSkipped: skipped, jiraBulkFailed: failed }));
+    }
+    setState({ jiraBulkProjectUrl: projectUrl });
+    setState({ jiraBulkRunning: false, jiraBulkFinished: true });
+    reloadVulns();
+    pushToast(`Jira export finished — ${created} created, ${skipped} already linked, ${failed} failed`, failed ? "warning" : "success");
   };
 
   // ================= detail: hosts / recon =================
@@ -1478,10 +2271,29 @@ export function StormApp() {
     setState((s) => ({ expanded: s.expanded.includes(id) ? s.expanded.filter((x) => x !== id) : [...s.expanded, id] }));
   const openHostDetail = (id: number) => setState({ openHostId: id });
   const closeHostDetail = () => setState({ openHostId: null });
+  const openIpDetail = (ip: string) => setState({ openIp: ip });
+  const closeIpDetail = () => setState({ openIp: null });
   const toggleReconMenu = () => setState((s) => ({ reconMenuOpen: !s.reconMenuOpen }));
 
   const toggleEpGroup = (host: string) =>
     setState((s) => ({ epExpanded: s.epExpanded.includes(host) ? s.epExpanded.filter((x) => x !== host) : [...s.epExpanded, host] }));
+  // JS files share the epExpanded set, namespaced "js:<host>" so a host and its
+  // JS group don't collide.
+  const toggleJsFile = (url: string) => {
+    const key = `js:file:${url}`;
+    setState((s) => ({ epExpanded: s.epExpanded.includes(key) ? s.epExpanded.filter((x) => x !== key) : [...s.epExpanded, key] }));
+  };
+  const submitJsScan = async () => {
+    const pid = state.openProjectId;
+    if (pid == null) return;
+    try {
+      const job = await apiStartJsScan(pid, "");
+      setState({ jsFarmJob: job });
+      pushToast(`${t("Scanning")} ${job.targets_total ?? ""} ${t("domains…")}`.replace("  ", " "), "success");
+    } catch (e) {
+      pushToast(getApiErrorMessage(e, t("Couldn't start JS scan")), "error");
+    }
+  };
   /* The raw request is loaded from the endpoint itself — what was stored, not a
      made-up template. When it has never been filled in, a skeleton request line
      is offered as a starting point. The response has no backend field, so it
@@ -1513,25 +2325,31 @@ export function StormApp() {
     try {
       await apiUpdateEndpoint(pid, hostId, endpointId, { request_raw: state.epRequest });
       setState({ epSaving: false });
-      pushToast("Запрос сохранён", "success");
+      pushToast("Request saved", "success");
       reloadHosts();
     } catch (e) {
       setState({ epSaving: false });
-      pushToast(getApiErrorMessage(e, "Не удалось сохранить запрос"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't save request"), "error");
     }
   };
 
   const copyText = (text: string, what: string) => {
     try {
       void navigator.clipboard?.writeText(text);
-      pushToast(`${what} скопирован в буфер`, "success");
+      pushToast(`${what} copied to clipboard`, "success");
     } catch {
-      pushToast("Буфер обмена недоступен", "error");
+      pushToast("Clipboard unavailable", "error");
     }
   };
+  /** Toggle whether one credential's secret is shown in clear text. */
+  const toggleCredReveal = (id: number) =>
+    setState((s) => ({
+      revealedCredIds: s.revealedCredIds.includes(id) ? s.revealedCredIds.filter((x) => x !== id) : [...s.revealedCredIds, id],
+    }));
   const copyCurl = (ep: { method: Method; path: string; host: string }) => {
     try {
       void navigator.clipboard?.writeText(`curl -X ${ep.method} 'https://${ep.host}${ep.path}'`);
+      pushToast(t("cURL copied"), "success");
     } catch {
       /* clipboard unavailable */
     }
@@ -1543,7 +2361,7 @@ export function StormApp() {
       await apiDeleteEndpoint(pid, hostId, endpointId);
       reloadHosts();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось удалить эндпоинт"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't delete endpoint"), "error");
     }
   };
 
@@ -1571,7 +2389,7 @@ export function StormApp() {
       if (type === "host") {
         const e = hosts[index];
         if (!e) return;
-        form = { host: e.host, ip: e.ip, ports: e.ports.map((p) => `${p.n}/${p.proto}`), status: e.status };
+        form = { host: e.host };
       } else if (type === "vuln") {
         const e = d.vulns[index];
         if (!e) return;
@@ -1580,70 +2398,228 @@ export function StormApp() {
         const e = d.notes[index];
         if (!e) return;
         form = { title: e.title, excerpt: e.excerpt };
+      } else if (type === "cred") {
+        const e = d.creds[index];
+        if (!e) return;
+        // Password is left blank on edit — sending it blank keeps the stored one, so
+        // it is neither pre-filled into the form nor overwritten unless retyped.
+        form = { username: e.username, password: "", host: e.host };
       }
     } else if (type === "host") form = { status: "up", ports: [] };
-    else if (type === "ip") form = { hostName: "", ip: "", label: "" };
+    else if (type === "ip") form = { hostName: "", ip: "", status: "unknown" };
     else if (type === "endpoint") form = { hostName: "", method: "GET", path: "" };
-    else if (type === "vuln") form = { sev: "medium", status: "open" };
+    else if (type === "vuln") form = { sev: "unknown", status: "open" };
     else if (type === "member") form = { userKey: "" };
+    else if (type === "cred") form = { username: "", password: "", host: "" };
     setState({ editorOpen: true, editorType: type, editorMode: mode, editorIndex: index, editorForm: form, tagDrafts: {} });
   };
   const closeEditor = () => setState({ editorOpen: false });
 
-  /** "443/tcp" / "443" → a createPort payload; anything unparseable is skipped. */
-  const parsePortTag = (tag: string): { port_number: number; protocol: "tcp" | "udp" } | null => {
-    const m = tag.trim().match(/^(\d{1,5})(?:\s*\/\s*(tcp|udp))?$/i);
-    if (!m) return null;
-    const n = Number(m[1]);
-    if (!Number.isFinite(n) || n < 1 || n > 65535) return null;
-    return { port_number: n, protocol: (m[2]?.toLowerCase() as "tcp" | "udp") || "tcp" };
+
+  // ================= host farm: paste-a-list import =================
+  /* One pasted token → its canonical `host` / `host:port` form (or null if junk).
+     Mirrors the backend parser closely enough for a live preview; the backend
+     re-parses authoritatively on submit. Scheme without a port keeps the scheme's
+     default port so `https://x` stays 443 (JS URL would otherwise drop it). */
+  const normalizeHostToken = (token: string): string | null => {
+    const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(token);
+    if (hasScheme && !/^https?:\/\//i.test(token)) return null; // non-web scheme → rejected
+    let u: URL;
+    try {
+      u = new URL(hasScheme ? token : `http://${token}`);
+    } catch {
+      return null;
+    }
+    const host = u.hostname.toLowerCase().replace(/\.$/, "");
+    if (!host) return null;
+    let port = u.port;
+    if (!port && hasScheme) port = /^https:/i.test(token) ? "443" : "80";
+    return port ? `${host}:${port}` : host;
+  };
+  /** Raw paste → deduped, normalized host list (the "will be imported" preview). */
+  const normalizeHostList = (raw: string): string => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const l = line.trim();
+      if (!l || l.startsWith("#") || l.startsWith("//")) continue;
+      for (const tok of l.split(/[\s,]+/)) {
+        const n = tok.trim() ? normalizeHostToken(tok.trim()) : null;
+        if (n && !seen.has(n)) {
+          seen.add(n);
+          out.push(n);
+        }
+      }
+    }
+    return out.join("\n");
+  };
+  /** Raw paste → deduped IP list. Same normalization, minus anything that is not
+   *  an address literal — the IP farm rejects hostnames server-side anyway, so
+   *  filtering here keeps the preview honest about what will actually be sent. */
+  const isIpLiteral = (host: string): boolean => {
+    const bare = host.replace(/^\[|\]$/g, "");
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(bare)) return bare.split(".").every((o) => Number(o) <= 255);
+    return bare.includes(":");
+  };
+  const normalizeIpList = (raw: string): string =>
+    normalizeHostList(raw)
+      .split("\n")
+      .filter((line) => {
+        // Strip a trailing :port, but only when it is not part of an IPv6 literal.
+        const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(line);
+        return isIpLiteral(m ? m[1] : line);
+      })
+      .join("\n");
+
+  // Note: never null hostFarmJob here — a running probe keeps polling in the
+  // background (banner + live statuses) whether or not this page is open.
+  const openHostImport = () => setState({ hostImportOpen: true, hostImportRaw: "", hostImportPreview: "", hostImportBusy: false });
+  const closeHostImport = () => setState({ hostImportOpen: false, hostImportRaw: "", hostImportPreview: "", hostImportBusy: false });
+  const openIpImport = () => setState({ ipImportOpen: true, ipImportRaw: "", ipImportPreview: "", ipImportBusy: false });
+  const closeIpImport = () => setState({ ipImportOpen: false, ipImportRaw: "", ipImportPreview: "", ipImportBusy: false });
+  const submitIpImport = async () => {
+    const pid = state.openProjectId;
+    const raw = state.ipImportPreview.trim();
+    if (pid == null || !raw) {
+      pushToast(t("Paste at least one IP"), "error");
+      return;
+    }
+    setState({ ipImportBusy: true });
+    try {
+      const job = await apiStartIpFarm(pid, raw);
+      // Unlike the host farm there are no skeleton rows: until an address is
+      // reverse-resolved we cannot tell whether it belongs to an existing host.
+      // Rows still stream in — the farm commits per address.
+      setState({ ipImportOpen: false, ipImportRaw: "", ipImportPreview: "", ipImportBusy: false, ipFarmJob: job });
+      reloadHosts();
+      pushToast(`${t("Probing")} ${job.targets_total ?? ""} ${t("IPs")}…`.replace("  ", " "), "success");
+    } catch (e) {
+      setState({ ipImportBusy: false });
+      pushToast(getApiErrorMessage(e, t("Couldn't start IP import")), "error");
+    }
+  };
+  const submitHostImport = async () => {
+    const pid = state.openProjectId;
+    // Submit the edited preview (the final list the user sees), not the raw paste.
+    const raw = state.hostImportPreview.trim();
+    if (pid == null || !raw) {
+      pushToast(t("Paste at least one host"), "error");
+      return;
+    }
+    setState({ hostImportBusy: true });
+    try {
+      const job = await apiStartHostFarm(pid, raw);
+      // The server creates the hosts up front, so close the page and show them now;
+      // statuses/ports fill in as the background probe commits per host (poll effect).
+      setState({ hostImportOpen: false, hostImportRaw: "", hostImportPreview: "", hostImportBusy: false, hostFarmJob: job });
+      reloadHosts();
+      pushToast(`${t("Probing")} ${job.targets_total ?? ""} ${t("hosts")}…`.replace("  ", " "), "success");
+    } catch (e) {
+      setState({ hostImportBusy: false });
+      pushToast(getApiErrorMessage(e, t("Couldn't start host import")), "error");
+    }
   };
 
-  /* The "Hostname" field is sent as `hostname`, so a bare domain (test.com) is a
-     valid hostname-only host. Ports live under an IP on the backend, so each port
-     tag needs a follow-up createPort call against the host's primary IP — which
-     only exists if an IP was given. */
+  /* "Add endpoints" mirrors "Add hosts/IPs": paste a list, preview the normalized
+     form, submit. Each line is a URL (with an optional leading METHOD); the host is
+     taken from the URL and matched to an existing project host — endpoints hang off
+     a host, so a line whose host is not in the project is skipped on submit. */
+  const EP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "QUERY"]);
+  const parseEpLine = (line: string): { host: string; method: string; path: string } | null => {
+    const l = line.trim();
+    if (!l || l.startsWith("#") || l.startsWith("//")) return null;
+    const parts = l.split(/\s+/);
+    let method = "GET";
+    let target = l;
+    if (parts.length >= 2 && EP_METHODS.has(parts[0].toUpperCase())) {
+      method = parts[0].toUpperCase();
+      target = parts.slice(1).join(" ").trim();
+    }
+    let host: string;
+    let path: string;
+    try {
+      const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(target) ? target : `https://${target}`);
+      host = u.hostname.toLowerCase();
+      path = (u.pathname || "/") + (u.search || "");
+    } catch {
+      return null;
+    }
+    // Need a real host to attach to (domain or IP); a bare path has none.
+    if (!host || !host.includes(".")) return null;
+    return { host, method, path };
+  };
+  const normalizeEpList = (raw: string): string => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const p = parseEpLine(line);
+      if (!p) continue;
+      const canon = `${p.method} https://${p.host}${p.path}`;
+      if (!seen.has(canon)) {
+        seen.add(canon);
+        out.push(canon);
+      }
+    }
+    return out.join("\n");
+  };
+  const openEpImport = () => setState({ epImportOpen: true, epImportRaw: "", epImportPreview: "", epImportBusy: false });
+  const closeEpImport = () => setState({ epImportOpen: false, epImportRaw: "", epImportPreview: "", epImportBusy: false });
+  const submitEpImport = async () => {
+    const pid = state.openProjectId;
+    const parsed = state.epImportPreview
+      .split(/\r?\n/)
+      .map(parseEpLine)
+      .filter((x): x is { host: string; method: string; path: string } => x != null);
+    if (pid == null || parsed.length === 0) {
+      pushToast(t("Paste at least one endpoint"), "error");
+      return;
+    }
+    setState({ epImportBusy: true });
+    let added = 0;
+    let skipped = 0;
+    for (const ep of parsed) {
+      const host = hosts.find((h) => h.host.toLowerCase() === ep.host);
+      if (!host) {
+        skipped++;
+        continue;
+      }
+      try {
+        await apiCreateEndpoint(pid, host.id, { path: ep.path, method: ep.method as Method });
+        added++;
+      } catch {
+        skipped++;
+      }
+    }
+    setState({ epImportOpen: false, epImportRaw: "", epImportPreview: "", epImportBusy: false });
+    reloadHosts();
+    pushToast(
+      skipped ? `${t("Added")} ${added} · ${skipped} ${t("skipped (host not found)")}` : `${t("Added")} ${added} ${t("endpoints")}`,
+      added ? "success" : "error",
+    );
+  };
+
+  /* Host editing only renames — status comes from the probe and ports hang off an
+     IP the probe materialises, so neither is editable here. New hosts come from the
+     "Add hosts" import, never this editor. */
   const saveHostEditor = async () => {
-    const { editorMode: mode, editorIndex: index, editorForm: f } = state;
+    const { editorIndex: index, editorForm: f } = state;
     const pid = state.openProjectId;
     if (pid == null) {
       setState({ editorOpen: false });
       return;
     }
+    const target = hosts[index];
+    if (!target) {
+      setState({ editorOpen: false });
+      return;
+    }
     const hostname = fstr(f.host).trim();
-    const ip = fstr(f.ip).trim();
-    const status = (fstr(f.status) as Host["status"]) || "unknown";
-    const portTags = Array.isArray(f.ports) ? f.ports : [];
     try {
-      const saved =
-        mode === "add"
-          ? await apiCreateHost(pid, { hostname, ip_address: ip || undefined, status })
-          : await (async () => {
-              const target = hosts[index];
-              if (!target) return null;
-              return apiUpdateHost(pid, target.id, { hostname, ip_address: ip || undefined, status });
-            })();
-      if (!saved) {
-        setState({ editorOpen: false });
-        return;
-      }
-      // Ports hang off an IP; without one there is nothing to attach them to.
-      const primaryIp = saved.ip_addresses.find((a) => a.is_primary) ?? saved.ip_addresses[0];
-      const known = new Set(saved.ip_addresses.flatMap((a) => a.ports).map((p) => `${p.port_number}/${p.protocol}`));
-      const wanted = portTags.map(parsePortTag).filter((p): p is { port_number: number; protocol: "tcp" | "udp" } => p !== null);
-      const missing = wanted.filter((p) => !known.has(`${p.port_number}/${p.protocol}`));
-      if (missing.length && !primaryIp) {
-        pushToast("Порты не сохранены: сначала укажите IP-адрес хоста", "error");
-      } else if (missing.length && primaryIp) {
-        await Promise.all(missing.map((p) => apiCreatePort(pid, saved.id, { ip_address_id: primaryIp.id, ...p })));
-      }
-      if (portTags.length && wanted.length < portTags.length) {
-        pushToast("Часть портов пропущена: ожидается формат 443/tcp", "error");
-      }
+      await apiUpdateHost(pid, target.id, { hostname });
       setState({ editorOpen: false });
       reloadHosts();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, mode === "add" ? "Не удалось добавить хост" : "Не удалось сохранить хост"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't save host"), "error");
     }
   };
 
@@ -1653,6 +2629,13 @@ export function StormApp() {
      backend derives severity from it on every update (ProjectService keeps the
      score authoritative), so an edit-time severity field would be a no-op. It is
      changed by editing the CVSS vector on the finding's card. */
+  /* Resolve a typed host to a real project host, case-insensitively — the same
+     binding the member picker uses (match an existing entity, not free text). */
+  const resolveProjectHost = (typed: string) => {
+    const q = typed.trim().toLowerCase();
+    return q ? hosts.find((h) => h.host.toLowerCase() === q) : undefined;
+  };
+
   const saveVulnEditor = async () => {
     const { editorMode: mode, editorIndex: index, editorForm: f } = state;
     const pid = state.openProjectId;
@@ -1661,24 +2644,30 @@ export function StormApp() {
     const status = (fstr(f.status) as VStatus) || "open";
     try {
       if (mode === "add") {
-        const host = hosts.find((h) => h.host === fstr(f.host));
+        const typedHost = fstr(f.host).trim();
+        const host = resolveProjectHost(typedHost);
         if (!host) {
-          pushToast("Выберите хост, к которому относится находка", "error");
+          pushToast(typedHost ? `Host “${typedHost}” not found` : "Select the host this finding belongs to", "error");
           return;
         }
-        await apiCreateVulnerability(pid, { title, status, severity: (fstr(f.sev) as Severity) || "medium", host_id: host.id });
-      } else {
-        const target = d.vulns[index];
-        if (!target) return;
-        // No `severity` here on purpose: sending one would either be ignored (when
-        // a CVSS score exists) or silently overwrite the real severity.
-        await apiUpdateVulnerability(pid, target.id, { title, status });
-        await relinkVulnHost(pid, target.id, fstr(f.host));
+        // Add asks only for Title + Host; severity/status default here and the
+        // user completes the finding on its detail card — redirect straight there.
+        // Severity starts "unknown": it is set once the author fills the CVSS vector.
+        const created = await apiCreateVulnerability(pid, { title, status: "open", severity: "unknown", host_id: host.id });
+        reloadVulns();
+        setState({ editorOpen: false, section: "vulns", openVulnId: created.id, vulnDetailForm: {} });
+        return;
       }
+      const target = d.vulns[index];
+      if (!target) return;
+      // No `severity` here on purpose: sending one would either be ignored (when
+      // a CVSS score exists) or silently overwrite the real severity.
+      await apiUpdateVulnerability(pid, target.id, { title, status });
+      await relinkVulnHost(pid, target.id, fstr(f.host));
       setState({ editorOpen: false });
       reloadVulns();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, mode === "add" ? "Не удалось добавить уязвимость" : "Не удалось сохранить уязвимость"), "error");
+      pushToast(getApiErrorMessage(e, mode === "add" ? "Couldn't add vulnerability" : "Couldn't save vulnerability"), "error");
     }
   };
 
@@ -1686,7 +2675,7 @@ export function StormApp() {
      repointing its host asset link. Without this the "Affected host" field would
      silently do nothing when editing. */
   const relinkVulnHost = async (pid: number, vulnId: number, hostName: string) => {
-    const host = hosts.find((h) => h.host === hostName);
+    const host = resolveProjectHost(hostName);
     if (!host) return;
     const det = await apiGetVulnerability(pid, vulnId);
     const link = det.assets.find((a) => a.asset_type === "host");
@@ -1710,7 +2699,7 @@ export function StormApp() {
       setState({ editorOpen: false });
       reloadNotes();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, mode === "add" ? "Не удалось добавить заметку" : "Не удалось сохранить заметку"), "error");
+      pushToast(getApiErrorMessage(e, mode === "add" ? "Couldn't add note" : "Couldn't save note"), "error");
     }
   };
 
@@ -1724,7 +2713,7 @@ export function StormApp() {
     const typed = fstr(state.editorForm.userKey).trim();
     const u = state.workspaceUsers.find((x) => x.key.toLowerCase() === typed.toLowerCase());
     if (!u) {
-      pushToast(typed ? `Пользователь «${typed}» не найден` : "Выберите пользователя", "error");
+      pushToast(typed ? `User “${typed}” not found` : "Select a user", "error");
       return;
     }
     try {
@@ -1732,7 +2721,7 @@ export function StormApp() {
       setState({ editorOpen: false });
       reloadMembers();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось добавить участника"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't add member"), "error");
     }
   };
 
@@ -1746,25 +2735,31 @@ export function StormApp() {
     const host = hosts.find((h) => h.host === fstr(f.hostName));
     const ip = fstr(f.ip).trim();
     if (!host || !ip) {
-      pushToast(host ? "Укажите IP-адрес" : "Выберите хост", "error");
+      pushToast(host ? "Specify an IP address" : "Select a host", "error");
       return;
     }
     try {
       const current = await apiGetHost(pid, host.id);
       if (current.ip_addresses.some((a) => a.ip_address === ip)) {
-        pushToast("Такой IP уже есть у этого хоста", "error");
+        pushToast("This host already has that IP", "error");
         return;
       }
+      /* There is no per-IP status: the IPs view renders the parent host's, so the
+         field writes through to the host. "unknown" is the untouched default —
+         treat it as "leave as is" so adding an address can't downgrade a host
+         already known to be up or down. */
+      const picked = fstr(f.status) as Host["status"];
       await apiUpdateHost(pid, host.id, {
+        ...(picked && picked !== "unknown" ? { status: picked } : {}),
         ip_addresses: [
           ...current.ip_addresses.map((a) => ({ ip_address: a.ip_address, label: a.label, is_primary: a.is_primary })),
-          { ip_address: ip, label: fstr(f.label).trim() || null, is_primary: current.ip_addresses.length === 0 },
+          { ip_address: ip, label: null, is_primary: current.ip_addresses.length === 0 },
         ],
       });
       setState({ editorOpen: false });
       reloadHosts();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось добавить IP-адрес"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't add IP address"), "error");
     }
   };
 
@@ -1775,7 +2770,7 @@ export function StormApp() {
     const host = hosts.find((h) => h.host === fstr(f.hostName));
     const path = fstr(f.path).trim();
     if (!host || !path) {
-      pushToast(host ? "Укажите путь эндпоинта" : "Выберите хост", "error");
+      pushToast(host ? "Specify the endpoint path" : "Select a host", "error");
       return;
     }
     try {
@@ -1783,7 +2778,53 @@ export function StormApp() {
       setState({ editorOpen: false });
       reloadHosts();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось добавить эндпоинт"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't add endpoint"), "error");
+    }
+  };
+
+  /* Cred vault. On add the password is required; on edit a blank password means
+     "keep the stored one" (see openEditor / updateProjectCredential), so the
+     existing password is never round-tripped through the form. */
+  const saveCredEditor = async () => {
+    const { editorMode: mode, editorIndex: index, editorForm: f } = state;
+    const pid = state.openProjectId;
+    if (pid == null) return;
+    const username = fstr(f.username).trim();
+    const password = fstr(f.password);
+    // Host binds to a project host, like the member picker: if entered, it must
+    // match an existing host (case-insensitive) and is stored by its canonical
+    // name; empty means no host binding.
+    const typedHost = fstr(f.host).trim();
+    let host: string | null = null;
+    if (typedHost) {
+      const h = resolveProjectHost(typedHost);
+      if (!h) {
+        pushToast(`Host “${typedHost}” not found`, "error");
+        return;
+      }
+      host = h.host;
+    }
+    try {
+      if (mode === "add") {
+        if (!password.trim()) {
+          pushToast("Enter the password", "error");
+          return;
+        }
+        await apiCreateProjectCredential(pid, { username: username || null, password, host });
+      } else {
+        const target0 = d.creds[index];
+        if (!target0) return;
+        await apiUpdateProjectCredential(pid, target0.id, {
+          username: username || null,
+          host,
+          // Blank = keep the stored password; only send it when the user retyped one.
+          ...(password.trim() ? { password } : {}),
+        });
+      }
+      setState({ editorOpen: false });
+      reloadCreds();
+    } catch (e) {
+      pushToast(getApiErrorMessage(e, mode === "add" ? "Couldn't add credential" : "Couldn't save credential"), "error");
     }
   };
 
@@ -1794,12 +2835,13 @@ export function StormApp() {
     if (state.editorType === "vuln") return saveVulnEditor();
     if (state.editorType === "note") return saveNoteEditorEntity();
     if (state.editorType === "member") return saveMemberEditor();
+    if (state.editorType === "cred") return saveCredEditor();
   };
 
   // ================= delete confirm =================
   const askDelete = (type: EditorType, index: number, label: string) =>
-    setState({ confirmOpen: true, confirmType: type, confirmIndex: index, confirmLabel: label, confirmProjectId: null });
-  const closeConfirm = () => setState({ confirmOpen: false, confirmProjectId: null });
+    setState({ confirmOpen: true, confirmType: type, confirmIndex: index, confirmLabel: label, confirmProjectId: null, confirmUserId: null });
+  const closeConfirm = () => setState({ confirmOpen: false, confirmProjectId: null, confirmUserId: null });
   const confirmDelete = async () => {
     if (state.confirmProjectId) {
       const id = state.confirmProjectId;
@@ -1808,7 +2850,20 @@ export function StormApp() {
         await apiDeleteProject(id);
         reloadProjects();
       } catch (e) {
-        pushToast(getApiErrorMessage(e, "Не удалось удалить проект"), "error");
+        pushToast(getApiErrorMessage(e, "Couldn't delete project"), "error");
+      }
+      return;
+    }
+    // Удаление пользователя идёт со страницы /members — там нет openProjectId,
+    // поэтому обрабатываем до общей ветки, как и удаление проекта.
+    if (state.confirmUserId) {
+      const id = state.confirmUserId;
+      setState({ confirmOpen: false, confirmUserId: null });
+      try {
+        await apiDeleteUser(id);
+        reloadUsers();
+      } catch (e) {
+        pushToast(getApiErrorMessage(e, "Couldn't deactivate user"), "error");
       }
       return;
     }
@@ -1818,12 +2873,13 @@ export function StormApp() {
     if (!t || pid == null) return;
     // Every collection is backend-backed: delete through the API, then reload.
     const targets: Record<EditorType, { id: number | undefined; call: (id: number) => Promise<void>; reload: () => void; err: string }> = {
-      host: { id: hosts[i]?.id, call: (id) => apiDeleteHost(pid, id), reload: reloadHosts, err: "Не удалось удалить хост" },
+      host: { id: hosts[i]?.id, call: (id) => apiDeleteHost(pid, id), reload: reloadHosts, err: "Couldn't delete host" },
       // Rows in the IPs view address one address of a host, not the host itself.
-      ip: { id: ipsRows[i] ? i : undefined, call: () => removeHostIp(pid, ipsRows[i].hostId, ipsRows[i].ip), reload: reloadHosts, err: "Не удалось удалить IP-адрес" },
-      endpoint: { id: endpointRows[i]?.endpointId, call: (id) => apiDeleteEndpoint(pid, endpointRows[i].hostId, id), reload: reloadHosts, err: "Не удалось удалить эндпоинт" },
-      vuln: { id: d.vulns[i]?.id, call: (id) => apiDeleteVulnerability(pid, id), reload: reloadVulns, err: "Не удалось удалить уязвимость" },
-      note: { id: d.notes[i]?.id, call: (id) => apiDeleteProjectNote(pid, id), reload: reloadNotes, err: "Не удалось удалить заметку" },
+      ip: { id: ipsRows[i] ? i : undefined, call: () => removeHostIp(pid, ipsRows[i].hostIds, ipsRows[i].ip), reload: reloadHosts, err: "Couldn't delete IP address" },
+      endpoint: { id: endpointRows[i]?.endpointId, call: (id) => apiDeleteEndpoint(pid, endpointRows[i].hostId, id), reload: reloadHosts, err: "Couldn't delete endpoint" },
+      vuln: { id: d.vulns[i]?.id, call: (id) => apiDeleteVulnerability(pid, id), reload: reloadVulns, err: "Couldn't delete vulnerability" },
+      note: { id: d.notes[i]?.id, call: (id) => apiDeleteProjectNote(pid, id), reload: reloadNotes, err: "Couldn't delete note" },
+      cred: { id: d.creds[i]?.id, call: (id) => apiDeleteProjectCredential(pid, id), reload: reloadCreds, err: "Couldn't delete credential" },
       member: {
         id: d.members[i]?.id,
         call: (id) => apiRemoveProjectMember(pid, id),
@@ -1839,9 +2895,9 @@ export function StormApp() {
           }
           selProjects();
           reloadProjects();
-          pushToast("Вы вышли из проекта — он больше не в вашем списке", "success");
+          pushToast("You left the project — it's no longer in your list", "success");
         },
-        err: "Не удалось удалить участника",
+        err: "Couldn't remove member",
       },
     };
     const target = targets[t];
@@ -1855,12 +2911,17 @@ export function StormApp() {
   };
 
   /** Drops one address by writing back the host's remaining ip_addresses. */
-  const removeHostIp = async (pid: number, hostId: number, ip: string) => {
-    const current = await apiGetHost(pid, hostId);
-    const rest = current.ip_addresses.filter((a) => a.ip_address !== ip);
-    await apiUpdateHost(pid, hostId, {
-      ip_addresses: rest.map((a) => ({ ip_address: a.ip_address, label: a.label, is_primary: a.is_primary })),
-    });
+  /** Drops an address from every host that carries it — the IPs table groups by
+   *  address, so clearing only one host would leave the row on screen. */
+  const removeHostIp = async (pid: number, hostIds: number[], ip: string) => {
+    for (const hostId of hostIds) {
+      const current = await apiGetHost(pid, hostId);
+      const rest = current.ip_addresses.filter((a) => a.ip_address !== ip);
+      if (rest.length === current.ip_addresses.length) continue;
+      await apiUpdateHost(pid, hostId, {
+        ip_addresses: rest.map((a) => ({ ip_address: a.ip_address, label: a.label, is_primary: a.is_primary })),
+      });
+    }
   };
 
   // ================= notes =================
@@ -1895,7 +2956,7 @@ export function StormApp() {
       setState({ noteEditorOpen: false });
       reloadNotes();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, mode === "add" ? "Не удалось создать заметку" : "Не удалось сохранить заметку"), "error");
+      pushToast(getApiErrorMessage(e, mode === "add" ? "Couldn't create note" : "Couldn't save note"), "error");
     }
   };
 
@@ -1999,7 +3060,7 @@ export function StormApp() {
       setState({ openVulnId: null });
       reloadVulns();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось сохранить уязвимость"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't save vulnerability"), "error");
     }
   };
 
@@ -2015,34 +3076,69 @@ export function StormApp() {
           ...s,
           apiKeys: rows
             .filter((t) => !t.revoked_at)
-            .map((t) => ({ id: t.id, name: t.name, key: `${t.token_prefix}…`, scopes: t.scopes, created: toDispDate(t.created_at.slice(0, 10)) })),
+            .map((t) => ({
+              id: t.id,
+              name: t.name,
+              key: `${t.token_prefix}…`,
+              scopes: t.scopes,
+              created: toDispDate(t.created_at.slice(0, 10)),
+              expires: t.expires_at ? toDispDate(t.expires_at.slice(0, 10)) : null,
+              allProjects: t.all_projects,
+              projectCount: t.project_ids.length,
+            })),
         }));
       } catch {
-        // Best-effort: agent tokens are admin-only, so a 403 just means an empty list.
+        // Best-effort: список грузится под текущего пользователя; на ошибке — пусто.
         setStateRaw((s) => ({ ...s, apiKeys: [] }));
       }
     })();
   };
   useEffect(() => {
     if (state.view === "profile" && state.profileTab === "api") reloadApiKeys();
-     
+
   }, [state.view, state.profileTab]);
-  const openApiKeyModal = () => setState({ apiKeyModalOpen: true, apiKeyName: "", apiKeyScopes: {} });
+  // Проекты нужны для выбора доступа ключа — подтягиваем свежий список при открытии.
+  const openApiKeyModal = () => {
+    reloadProjects();
+    setState({ apiKeyModalOpen: true, apiKeyName: "", apiKeyScopes: {}, apiKeyAllProjects: true, apiKeyProjectIds: [], apiKeyExpiry: "" });
+  };
   const closeApiKeyModal = () => setState({ apiKeyModalOpen: false });
   const toggleApiScope = (s: string) => setState((st) => ({ apiKeyScopes: { ...st.apiKeyScopes, [s]: !st.apiKeyScopes[s] } }));
+  const toggleApiProject = (id: number) =>
+    setState((st) => ({
+      apiKeyProjectIds: st.apiKeyProjectIds.includes(id)
+        ? st.apiKeyProjectIds.filter((p) => p !== id)
+        : [...st.apiKeyProjectIds, id],
+    }));
   const createApiKey = async () => {
     const name = state.apiKeyName.trim();
     if (!name) return;
     const scopes = API_SCOPES.filter((s) => state.apiKeyScopes[s]);
-    if (!scopes.length) return;
+    if (!scopes.length) {
+      pushToast("Select at least one scope", "error");
+      return;
+    }
+    // Явный список проектов не может быть пустым — иначе токен ни к чему не даёт доступ.
+    if (!state.apiKeyAllProjects && state.apiKeyProjectIds.length === 0) {
+      pushToast("Select projects or enable “All my projects”", "error");
+      return;
+    }
+    // Пусто = бессрочный; иначе конец выбранного дня.
+    const expires_at = state.apiKeyExpiry ? new Date(`${state.apiKeyExpiry}T23:59:59`).toISOString() : null;
     try {
-      const created = await apiCreateAgentToken({ name, scopes, project_ids: [], all_projects: true });
+      const created = await apiCreateAgentToken({
+        name,
+        scopes,
+        project_ids: state.apiKeyAllProjects ? [] : state.apiKeyProjectIds,
+        all_projects: state.apiKeyAllProjects,
+        expires_at,
+      });
       setState({ apiKeyModalOpen: false });
       // The token is shown once and never again — the backend keeps only its hash.
-      pushToast(`Токен создан, скопируйте его сейчас: ${created.token}`, "success");
+      pushToast(`Token created — copy it now: ${created.token}`, "success");
       reloadApiKeys();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось создать токен"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't create token"), "error");
     }
   };
   const revokeApiKey = async (id: number) => {
@@ -2050,7 +3146,7 @@ export function StormApp() {
       await apiRevokeAgentToken(id);
       reloadApiKeys();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось отозвать токен"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't revoke token"), "error");
     }
   };
 
@@ -2072,42 +3168,109 @@ export function StormApp() {
   const saveWSUser = async () => {
     const name = state.wsUserName.trim();
     const email = state.wsUserEmail.trim();
-    if (!name || !email) return;
     const role = state.wsUserRole === "admin" ? "admin" : "pentester";
     const projectRole = state.wsUserProjectRole;
     const adding = state.wsUserMode === "add";
+    // В режиме приглашения username не задаём — его выберет сам приглашённый.
+    if (adding ? !email : (!name || !email)) return;
     try {
       if (adding) {
-        await apiCreateUser({ username: name, email, role, project_role: projectRole, send_invite_email: true });
+        const res = await apiCreateInvitation({ email, role, project_role: projectRole });
+        const preview = res.mail_preview_url ? ` (email preview: ${res.mail_preview_url})` : "";
+        pushToast(`Invitation sent to ${res.email_sent_to}${preview}`, "success");
       } else {
         const u = state.workspaceUsers[state.wsUserIndex];
         if (!u) return;
-        await apiUpdateUser(u.id, { username: name, role, project_role: projectRole });
+        // Юзернейм неизменяем (см. read-only поле в редакторе) — шлём только роли.
+        await apiUpdateUser(u.id, { role, project_role: projectRole });
       }
       setState({ wsUserModalOpen: false });
       reloadUsers();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, adding ? "Не удалось создать пользователя" : "Не удалось сохранить пользователя"), "error");
+      pushToast(getApiErrorMessage(e, adding ? "Couldn't send invitation" : "Couldn't save user"), "error");
     }
   };
-  const deleteWSUser = async (index: number) => {
+  /* «Удаление» пользователя на деле деактивирует его (мягкое удаление на бэке:
+     строка остаётся, выставляется is_locked) — сначала подтверждаем в общем
+     диалоге, сам вызов apiDeleteUser — в confirmDelete по confirmUserId. */
+  const askDeleteWSUser = (index: number) => {
+    const u = state.workspaceUsers[index];
+    if (!u) return;
+    setState({ confirmOpen: true, confirmType: null, confirmIndex: -1, confirmLabel: u.name, confirmProjectId: null, confirmUserId: u.id });
+  };
+  /* Возврат деактивированного пользователя: не разблокируем напрямую, а шлём ему
+     письмо-возврат. Доступ вернётся, когда он сам перейдёт по ссылке (там же сразу
+     выдаётся сессия). Строка остаётся в архиве до перехода по ссылке. */
+  const reactivateUser = async (index: number) => {
     const u = state.workspaceUsers[index];
     if (!u) return;
     try {
-      await apiDeleteUser(u.id);
+      const res = await apiReactivateUser(u.id);
+      const preview = res.mail_preview_url ? ` (email preview: ${res.mail_preview_url})` : "";
+      pushToast(`${t("Reactivation link sent to")} ${res.email_sent_to}${preview}`, "success");
       reloadUsers();
     } catch (e) {
-      pushToast(getApiErrorMessage(e, "Не удалось удалить пользователя"), "error");
+      pushToast(getApiErrorMessage(e, "Couldn't send the reactivation link"), "error");
+    }
+  };
+  const resendInvite = async (id: number) => {
+    try {
+      const res = await apiResendInvitation(id);
+      const preview = res.mail_preview_url ? ` (email preview: ${res.mail_preview_url})` : "";
+      pushToast(`Invitation re-sent to ${res.email_sent_to}${preview}`, "success");
+      reloadUsers();
+    } catch (e) {
+      pushToast(getApiErrorMessage(e, "Couldn't resend invitation"), "error");
+    }
+  };
+  const revokeInvite = async (id: number) => {
+    try {
+      await apiRevokeInvitation(id);
+      reloadUsers();
+    } catch (e) {
+      pushToast(getApiErrorMessage(e, "Couldn't revoke invitation"), "error");
     }
   };
 
-  const startTwoFA = () => setState({ twoFASetupOpen: true, twoFACode: "" });
-  const cancelTwoFA = () => setState({ twoFASetupOpen: false });
-  const confirmTwoFA = () => {
-    if (state.twoFACode.trim().length < 6) return;
-    setState({ twoFAEnabled: true, twoFASetupOpen: false });
+  const startTwoFA = async () => {
+    setState({ twoFABusy: true });
+    try {
+      const setup = await apiSetupTwoFactor();
+      setState({ twoFASetupOpen: true, twoFACode: "", twoFAQr: setup.qr_png_data_url, twoFASecret: setup.secret, twoFABusy: false });
+    } catch (e) {
+      setState({ twoFABusy: false });
+      pushToast(getApiErrorMessage(e, "Couldn't start 2FA setup"), "error");
+    }
   };
-  const disableTwoFA = () => setState({ twoFAEnabled: false });
+  const cancelTwoFA = () => setState({ twoFASetupOpen: false, twoFACode: "", twoFAQr: null, twoFASecret: null });
+  const confirmTwoFA = async () => {
+    if (state.twoFACode.trim().length < 6 || state.twoFABusy) return;
+    setState({ twoFABusy: true });
+    try {
+      await apiConfirmTwoFactor(state.twoFACode.trim());
+      await refreshUser();
+      setState({ twoFASetupOpen: false, twoFACode: "", twoFAQr: null, twoFASecret: null, twoFABusy: false });
+      pushToast("Two-factor authentication enabled", "success");
+    } catch (e) {
+      setState({ twoFABusy: false });
+      pushToast(getApiErrorMessage(e, "Invalid code — try again"), "error");
+    }
+  };
+  const openDisableTwoFA = () => setState({ twoFADisableOpen: true, twoFADisablePassword: "" });
+  const cancelDisableTwoFA = () => setState({ twoFADisableOpen: false, twoFADisablePassword: "" });
+  const disableTwoFA = async () => {
+    if (!state.twoFADisablePassword || state.twoFABusy) return;
+    setState({ twoFABusy: true });
+    try {
+      await apiDisableTwoFactor(state.twoFADisablePassword);
+      await refreshUser();
+      setState({ twoFADisableOpen: false, twoFADisablePassword: "", twoFABusy: false });
+      pushToast("Two-factor authentication disabled", "success");
+    } catch (e) {
+      setState({ twoFABusy: false });
+      pushToast(getApiErrorMessage(e, "Couldn't disable 2FA"), "error");
+    }
+  };
 
   // ================= notifications =================
   /* Each notification carries the ids of what it is about (context.project_id /
@@ -2143,11 +3306,11 @@ export function StormApp() {
             accessDenied: false,
           }),
     }));
-    if (pid == null) pushToast("Уведомление не привязано к проекту", "error");
+    if (pid == null) pushToast("Notification isn't linked to a project", "error");
   };
 
   const markAllNotifsRead = () => {
-    void apiMarkAllNotificationsRead().catch((e) => pushToast(getApiErrorMessage(e, "Не удалось отметить уведомления"), "error"));
+    void apiMarkAllNotificationsRead().catch((e) => pushToast(getApiErrorMessage(e, "Couldn't mark notifications"), "error"));
     setStateRaw((s) => ({ ...s, notifs: s.notifs.map((x) => ({ ...x, is_read: true })) }));
   };
 
@@ -2160,28 +3323,46 @@ export function StormApp() {
   const projRows = allProjects
     .filter((p) => (state.tab === "active" ? !isArchivedStatus(p.status) : isArchivedStatus(p.status)))
     .filter((p) => !q || p.name.toLowerCase().includes(q));
-  if (state.projSort === "first") projRows.reverse();
+  // Newest first by default ("Last updated") — a just-added project lands at the
+  // top, not buried at the end; "First updated" flips to oldest-first. id is a
+  // monotonic proxy for creation order (safe: projRows is a fresh filtered array).
+  projRows.sort((a, b) => (state.projSort === "first" ? a.id - b.id : b.id - a.id));
 
   const activeCount = allProjects.filter((p) => !isArchivedStatus(p.status)).length;
   const archivedCount = allProjects.filter((p) => isArchivedStatus(p.status)).length;
   // Tab-scoped (no search filter): stat tiles must not react to `query`.
   const tabProjects = allProjects.filter((p) => (isActive ? !isArchivedStatus(p.status) : isArchivedStatus(p.status)));
 
-  const navBg = (id: NavId) => (state.nav === id ? "#EEF3FC" : "transparent");
-  const navColor = (id: NavId) => (state.nav === id ? "#2E5FBF" : "#5A6B84");
+  // ---- stat-card sparklines: real cumulative growth over the projects' window ----
+  const activeRows = allProjects.filter((p) => !isArchivedStatus(p.status));
+  const archivedRows = allProjects.filter((p) => isArchivedStatus(p.status));
+  const parseAll = (arr: (string | undefined)[]) => arr.map((s) => Date.parse(s ?? "")).filter((n) => Number.isFinite(n));
+  /** Combined [start, end] window across a set of projects — the sparkline's X axis. */
+  const projWindow = (rows: ApiProjectRow[]): [number, number] => {
+    const starts = parseAll(rows.map((r) => r.startISO || r.createdISO));
+    const ends = parseAll(rows.map((r) => r.endISO));
+    return [starts.length ? Math.min(...starts) : NaN, ends.length ? Math.max(...ends) : NaN];
+  };
+  const projCreatedTimes = (rows: ApiProjectRow[]) => rows.map((r) => r.createdISO || r.startISO);
+  const aggHostTimes = (rows: ApiProjectRow[]) => rows.flatMap((r) => state.aggTimes?.[r.id]?.hosts ?? []);
+  const aggOpenVulnTimes = (rows: ApiProjectRow[]) => rows.flatMap((r) => state.aggTimes?.[r.id]?.openVulns ?? []);
+
+  const navBg = (id: NavId) => (state.nav === id ? "var(--st-accent-soft)" : "transparent");
+  const navColor = (id: NavId) => (state.nav === id ? "var(--st-accent)" : "var(--st-text-2)");
 
   const isList = state.view === "list" && state.nav === "projects";
-  const isStub = state.view === "list" && state.nav !== "projects" && state.nav !== "members";
-  const stubTitle = ({ tasks: "Tasks", mine: "My Tasks", docs: "Docs" } as Record<string, string>)[state.nav] || "";
+  const isDocs = state.view === "list" && state.nav === "docs";
+  const isStub = state.view === "list" && state.nav !== "projects" && state.nav !== "members" && state.nav !== "docs";
+  const stubTitle = ({ tasks: "Tasks", mine: "My Tasks" } as Record<string, string>)[state.nav] || "";
   const stubDesc =
-    ({ tasks: "Track and assign engagement tasks across the team.", mine: "Your personally assigned tasks and reviews.", docs: "Reports, templates and shared documentation." } as Record<string, string>)[
+    ({ tasks: "Track and assign engagement tasks across the team.", mine: "Your personally assigned tasks and reviews." } as Record<string, string>)[
       state.nav
     ] || "";
 
   /* Notification rows, built from the backend payload. There are exactly four
      reasons to be notified (NotificationKind), and each reads differently — the
      row is a sentence: "<who> <action> <subject>". */
-  const NOTIF_AVATAR_COLORS = ["#2E5FBF", "#7A4DB8", "#C06A2E", "#C0455B", "#2E8B57"];
+  const NOTIF_AVATAR_COLORS = ["var(--st-accent)", "var(--st-purple)", "var(--st-orange)", "var(--st-danger)", "var(--st-success)"];
   const notifs = state.notifs.map((n) => {
     const ctx = n.context;
     const who = ctx?.commenter_username || "System";
@@ -2226,29 +3407,73 @@ export function StormApp() {
   // ---- section tab styling ----
   const sec = state.section;
   const secStyle = (k: SectionId) => ({
-    color: sec === k ? "#2E5FBF" : "#5A6B84",
-    bar: sec === k ? "#4C74C7" : "transparent",
-    badgeColor: sec === k ? "#2E5FBF" : "#8A97AB",
-    badgeBg: sec === k ? "#DBE7FB" : "#EEF1F6",
+    // The tab's own underline/colour is CSS-driven off `active` (see .sectab);
+    // `color` stays for the badges, which are still styled inline.
+    active: sec === k,
+    color: sec === k ? "var(--st-accent)" : "var(--st-text-2)",
+    badgeColor: sec === k ? "var(--st-accent)" : "var(--st-text-3)",
+    badgeBg: sec === k ? "var(--st-accent-soft)" : "var(--st-bg)",
   });
 
   // ---- hosts / recon derived ----
   const rv = state.reconView;
-  const portPillsOf = (ports: Host["ports"]) => ports.map((p) => ({ label: `${p.n}/${p.proto}`, ...(PORT[p.state] ?? PORT.closed) }));
+  const portPillsOf = (ports: Host["ports"]) => ports.map((p) => ({ label: `${p.n}/${p.proto}`, http: p.http, ...(PORT[p.state] ?? PORT.closed) }));
+  /** Colour for an HTTP status code next to a port: 2xx green, 3xx amber, else red. */
+  const httpStatusColor = (code: number): string =>
+    code < 300 ? "var(--st-success)" : code < 400 ? "var(--st-warn)" : "var(--st-danger)";
 
   // Hosts are searched by name here; addresses have their own search in the IPs view.
+  /** A host that is a subdomain of another host in the project (shown nested, not top-level). */
+  const isNestedSubdomain = (h: Host) =>
+    hosts.some((p) => p.origin !== "ip" && p.id !== h.id && h.host.toLowerCase().endsWith(`.${p.host.toLowerCase()}`));
+  /* Rows the hosts table shows. The IP farm has to create a parent Host per address
+     (ports hang off host_ip_addresses, which hangs off hosts), but the user added an
+     address, not a host — a nameless row here would just be noise. They stay visible
+     in the IPs view, which is what they are. */
+  const isIpFarmRow = (h: Host) => h.origin === "ip";
+  /* Status filter pills, classified by the ports' HTTP codes (not the raw backend
+     status): up = any 2xx/3xx/4xx; down = any 5xx or an offline entity; a numeric
+     pill = that exact code on some port. Shared by the hosts and IPs views. */
+  const matchesStatusFilters = (ports: Host["ports"], status: Host["status"], filters: string[]): boolean => {
+    if (filters.length === 0) return true;
+    const codes = ports.map((p) => p.http).filter((c): c is number => c != null);
+    return filters.some((k) => {
+      if (k === "up") return codes.some((c) => c >= 200 && c < 500);
+      if (k === "down") return status === "down" || codes.some((c) => c >= 500);
+      return codes.includes(Number(k));
+    });
+  };
+  /** Признак Cloudflare — отдельный вопрос («что за прокси»), а не разновидность
+   *  статуса, поэтому свой переключатель, а не ещё одна пилюля в общем ряду. */
+  const matchesCfFilter = (cloudflare: boolean, filter: "" | "yes" | "no"): boolean =>
+    filter === "" || cloudflare === (filter === "yes");
+  /* Единственное место, где решается судьба строки в таблице хостов, — через него
+     же идёт экспорт (exportLinesFor → hostsList/visibleSubdomainsOf), поэтому
+     фильтры не могут разъехаться между тем, что видно, и тем, что выгружается. */
+  const hostMatchesFilters = (h: Host): boolean =>
+    matchesStatusFilters(h.ports, h.status, state.hostFilters) && matchesCfFilter(h.cloudflare, state.hostCfFilter);
+  /** Status pills offered in the hosts and IPs views (empty selection = all). */
+  const STATUS_FILTER_KEYS = ["up", "200", "301", "401", "403", "down"];
+  /** Subdomains of a host, filtered by the active pills (empty = all). */
+  const visibleSubdomainsOf = (h: Host): Host[] => subdomainsOf(h).filter(hostMatchesFilters);
   const hostsList = hosts
     .map((h, idx) => ({ h, idx }))
     .filter((x) => {
       const hq = state.hostQuery.trim().toLowerCase();
-      return !hq || x.h.host.toLowerCase().includes(hq);
+      // Only a *search* flattens the tree; filtering keeps subdomains nested under
+      // their parent. A parent is shown if it OR a subdomain matches the filter.
+      const flat = hq !== "";
+      const nameOk = hq ? x.h.host.toLowerCase().includes(hq) : true;
+      const nestOk = flat || !isNestedSubdomain(x.h);
+      const filterOk = hostMatchesFilters(x.h) || (!flat && visibleSubdomainsOf(x.h).length > 0);
+      return !isIpFarmRow(x.h) && nameOk && nestOk && filterOk;
     });
 
   const _hd = state.openHostId != null ? hosts.find((h) => h.id === state.openHostId) : undefined;
 
-  const sevCounts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  const sevCounts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0, unknown: 0 };
   d.vulns.forEach((v) => (sevCounts[v.sev] = (sevCounts[v.sev] || 0) + 1));
-  const sevBars = (["critical", "high", "medium", "low", "info"] as Severity[]).map((k) => ({
+  const sevBars = (["critical", "high", "medium", "low", "info", "unknown"] as Severity[]).map((k) => ({
     label: cap(k),
     color: SEV[k].color,
     tileBg: SEV[k].bg,
@@ -2276,7 +3501,11 @@ export function StormApp() {
         (vfSev.length === 0 || vfSev.includes(v.sev)) &&
         (!vfH || v.host.toLowerCase().includes(vfH))
     )
+    // Newest first: a just-added finding lands at the top, not buried at the end.
+    // idx is captured above, so edit/delete still address the right d.vulns entry.
+    .sort((a, b) => b.v.id - a.v.id)
     .map(({ v, idx }, i) => ({
+      id: v.id,
       num: i + 1,
       sev: v.sev,
       title: v.title,
@@ -2304,25 +3533,103 @@ export function StormApp() {
   // them all, one row per address. Row actions target the address, not the host.
   // One search box matches either side of the row: the address or its host.
   const ipQ = state.ipQuery.trim().toLowerCase();
-  const ipsRows = hosts
-    .flatMap(({ ...h }, idx) => h.ips.map((ip) => ({ h, idx, ip })))
-    .filter(({ ip }) => ip && ip !== "—")
-    .filter(({ h, ip }) => !ipQ || ip.toLowerCase().includes(ipQ) || h.host.toLowerCase().includes(ipQ))
-    .map(({ h, idx, ip }, i) => ({
-      ip,
-      hostId: h.id,
-      host: h.host,
-      statusColor: STDOT[h.status] ?? STDOT.unknown,
-      status: h.status,
+  /* One row per address, whatever it hangs off. The same address legitimately
+     belongs to several hosts (shared hosting, a CDN edge, or simply a hostname
+     imported after its address was) — those collapse into one row whose Hostname
+     cell lists every name, rather than repeating the address per host. */
+  type IpRowNames = { hostname: string; source: string; confirmed: boolean }[];
+  /* Ports/status are tracked in two buckets and never blended: the bare-IP probe
+     (from an origin="ip" host — the IP farm hits the address directly) and the
+     domain probe (from origin="host" hosts — the host farm hits the address with a
+     Host header). A vhost legitimately answers differently to the two, so the IPs
+     view shows the bare-IP measurement when there is one, and falls back to the
+     domain probe only when the address was merely resolved from a domain and never
+     scanned as an IP. The Hosts view keeps showing the domain probe, so the two no
+     longer overwrite each other. */
+  type IpBucket = { ports: Host["ports"]; status: Host["status"] };
+  const mergeBucket = (into: IpBucket | null, h: Host): IpBucket => {
+    if (into === null) return { ports: [...h.ports], status: h.status };
+    const seen = new Set(into.ports.map((p) => `${p.n}/${p.proto}`));
+    return {
+      ports: [...into.ports, ...h.ports.filter((p) => !seen.has(`${p.n}/${p.proto}`))],
+      status: into.status !== "up" && h.status === "up" ? h.status : into.status,
+    };
+  };
+  const ipRowsByAddr = new Map<
+    string,
+    { ip: string; hostIdx: number; hostIds: number[]; names: IpRowNames; cloudflare: boolean; ipMeas: IpBucket | null; domainMeas: IpBucket | null }
+  >();
+  hosts.forEach((h, idx) => {
+    h.ipEntries.forEach((entry) => {
+      if (!entry.ip || entry.ip === "—") return;
+      // A host's own name counts as a name for its address even when the address
+      // never went through reverse resolution (added by hand or by the host farm).
+      const own: IpRowNames =
+        h.origin === "host" && h.host && h.host !== "—" ? [{ hostname: h.host, source: "host", confirmed: true }] : [];
+      const acc =
+        ipRowsByAddr.get(entry.ip) ??
+        (() => {
+          const fresh = { ip: entry.ip, hostIdx: idx, hostIds: [] as number[], names: [] as IpRowNames, cloudflare: false, ipMeas: null as IpBucket | null, domainMeas: null as IpBucket | null };
+          ipRowsByAddr.set(entry.ip, fresh);
+          return fresh;
+        })();
+      acc.names.push(...entry.hostnames, ...own);
+      // Every host carrying this address — deleting the row must clear it from all
+      // of them, otherwise the row would come straight back.
+      acc.hostIds.push(h.id);
+      acc.cloudflare = acc.cloudflare || entry.cloudflare;
+      // Prefer a real host as the row's edit/delete target over the IP farm's
+      // nameless parent — that is the row a user means when they click edit.
+      if (h.origin === "host" && hosts[acc.hostIdx]?.origin === "ip") acc.hostIdx = idx;
+      if (h.origin === "ip") acc.ipMeas = mergeBucket(acc.ipMeas, h);
+      else acc.domainMeas = mergeBucket(acc.domainMeas, h);
+    });
+  });
+  const ipsRows = [...ipRowsByAddr.values()]
+    .map((row0) => {
+      // Bare-IP measurement wins; domain probe is the fallback for addresses only
+      // ever resolved from a domain.
+      const meas = row0.ipMeas ?? row0.domainMeas ?? { ports: [], status: "unknown" as Host["status"] };
+      const row = { ...row0, ports: meas.ports, status: meas.status };
+      // Dedup names across every host that carries the address; a name confirmed
+      // by any of them is confirmed. PTR entries win over a bare host name.
+      const byName = new Map<string, { hostname: string; source: string; confirmed: boolean }>();
+      for (const n of row.names) {
+        const cur = byName.get(n.hostname);
+        if (!cur) byName.set(n.hostname, { ...n });
+        else {
+          cur.confirmed = cur.confirmed || n.confirmed;
+          if (cur.source !== "ptr" && n.source === "ptr") cur.source = n.source;
+        }
+      }
+      const names = [...byName.values()].sort(
+        (a, b) => Number(b.confirmed) - Number(a.confirmed) || a.hostname.localeCompare(b.hostname),
+      );
+      return { ...row, names };
+    })
+    .filter(
+      (row) =>
+        !ipQ ||
+        row.ip.toLowerCase().includes(ipQ) ||
+        row.names.some((n) => n.hostname.toLowerCase().includes(ipQ)),
+    )
+    // Same status filter as hosts. The Status *column* is gone from this table,
+    // but filtering by HTTP code still answers a real question here.
+    .filter((row) => matchesStatusFilters(row.ports, row.status, state.ipFilters))
+    .filter((row) => matchesCfFilter(row.cloudflare, state.ipCfFilter))
+    .map((row, i) => ({
+      ...row,
       onEdit: (e: ReactMouseEvent) => {
         e.stopPropagation();
-        openEditor("host", "edit", idx);
+        openEditor("host", "edit", row.hostIdx);
       },
       onDelete: (e: ReactMouseEvent) => {
         e.stopPropagation();
-        askDelete("ip", i, ip);
+        askDelete("ip", i, row.ip);
       },
     }));
+  /** The IP row whose detail card is open (looked up by address, like _hd by id). */
+  const _ipd = state.openIp != null ? ipsRows.find((r) => r.ip === state.openIp) : undefined;
   /** Flat endpoint list, so a confirm dialog can address one by position. */
   const endpointRows = hosts.flatMap((h) => h.endpoints.map((e) => ({ hostId: h.id, endpointId: e.id, host: h.host, label: `${e.m} ${e.p}` })));
   /* Endpoints view filters: method pills (empty = all), plus separate searches for
@@ -2344,9 +3651,46 @@ export function StormApp() {
     .map((g) => ({ ...g, count: g.endpoints.length }));
   // Counts what the filters actually left on screen.
   const endpointTotal = endpointGroups.reduce((s, g) => s + g.count, 0);
-  /** How many rows the current filters would export — declared here because the
-      recon lists above are what it counts. */
-  const exportCount = state.exportScope === "hosts" ? hostsList.length : state.exportScope === "ips" ? ipsRows.length : endpointTotal;
+
+  /* JS files pulled from the backend, filtered by the JS view's controls, then
+     grouped by the domain they were found on — the table mirrors the endpoints
+     layout (a card per host, files expand to show their secrets + paths). */
+  const jsQ = state.jsQuery.trim().toLowerCase();
+  const jsFiles: JsFileEntry[] = (state.apiJsFiles ?? []).map((f) => ({
+    id: f.id,
+    host: f.hostname || "—",
+    url: f.url,
+    status: f.status,
+    size: f.size_bytes,
+    secrets: f.secrets.map((s) => ({ kind: s.kind, match: s.match_preview, snippet: s.snippet, severity: s.severity })),
+    endpoints: f.endpoints,
+  }));
+  const jsFilesFiltered = jsFiles.filter(
+    (f) =>
+      (!jsQ || f.url.toLowerCase().includes(jsQ) || f.host.toLowerCase().includes(jsQ)) &&
+      (!state.jsSecretsOnly || f.secrets.length > 0),
+  );
+  const jsGroups = [...new Set(jsFilesFiltered.map((f) => f.host))].map((host) => {
+    const files = jsFilesFiltered.filter((f) => f.host === host);
+    return { host, files, count: files.length };
+  });
+  /** Row count of the active recon view — shown next to the section title. */
+  const reconTotal = rv === "ips" ? ipsRows.length : rv === "endpoints" ? endpointTotal : rv === "js" ? jsFilesFiltered.length : hostsList.length;
+  /** Wording for that count, matching the active view. */
+  const reconTotalLabel = rv === "ips" ? t("Total IPs") : rv === "endpoints" ? t("Total endpoints") : rv === "js" ? t("Total JS files") : t("Total hosts");
+
+  /* Retuning a filter reseeds the editable pane from what the filter left on
+     screen. Hand edits are dropped on purpose: the filters are the coarse
+     selection and the pane the fine one, so the coarse one has to win. Only the
+     filter inputs are deps — a background hosts refresh must not wipe edits. */
+  useEffect(() => {
+    if (!state.exportPageOpen) return;
+    setStateRaw((s) => {
+      const next = exportLinesFor(s.exportScope).join("\n");
+      return s.exportText === next ? s : { ...s, exportText: next };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.exportPageOpen, state.exportScope, state.hostQuery, state.hostFilters, state.hostCfFilter, state.ipQuery, state.ipCfFilter, state.epHostQuery, state.epPathQuery, state.epMethods]);
 
   // The chip shows the project's real status (active / freeze / …), not the
   // coarse active-vs-archived split the tabs use.
@@ -2355,16 +3699,28 @@ export function StormApp() {
   const sectionLabel =
     sec === "hosts"
       ? ({ hosts: "Hosts", ips: "IPs", endpoints: "Endpoints" } as Record<string, string>)[rv] || "Hosts"
-      : ({ overview: "Overview", vulns: "Vulnerabilities", notes: "Notes", members: "Members", activity: "Activity" } as Record<string, string>)[sec] || "Overview";
+      : ({ overview: "Overview", vulns: "Vulnerabilities", notes: "Notes", creds: "Creds", members: "Members", activity: "Activity" } as Record<string, string>)[sec] || "Overview";
   /** The item open inside the section, if any — the last crumb (e.g. the note's title). */
   const crumbLeaf =
-    sec === "notes" && state.openNoteId != null
-      ? d.notes.find((n) => n.id === state.openNoteId)?.title ?? ""
-      : sec === "vulns" && state.openVulnId != null
-        ? d.vulns.find((v) => v.id === state.openVulnId)?.title ?? ""
-        : sec === "hosts" && _hd
-          ? _hd.host
-          : "";
+    // The recon full-page forms are crumbs of their own: Project / Hosts / Export,
+    // which makes the middle crumb the way back to the list.
+    sec === "hosts" && state.exportPageOpen
+      ? t("Export")
+      : sec === "hosts" && state.hostImportOpen
+        ? t("Add hosts")
+        : sec === "hosts" && state.ipImportOpen
+        ? t("Add IPs")
+        : sec === "hosts" && state.epImportOpen
+        ? t("Add endpoints")
+        : sec === "notes" && state.openNoteId != null
+          ? d.notes.find((n) => n.id === state.openNoteId)?.title ?? ""
+          : sec === "vulns" && state.openVulnId != null
+            ? d.vulns.find((v) => v.id === state.openVulnId)?.title ?? ""
+            : sec === "hosts" && _hd
+              ? _hd.host
+              : sec === "hosts" && _ipd
+                ? _ipd.ip
+                : "";
 
   // ---- editor fields (options that depend on live data are filled in here) ----
   let efCfg = EDITOR_FIELDS[state.editorType] ?? [];
@@ -2374,9 +3730,11 @@ export function StormApp() {
     efCfg = efCfg.map((f) => (f.k === "userKey" ? { ...f, opts: avail.map((u) => u.key) } : f));
   }
   if (state.editorType === "vuln") {
-    // Severity is only meaningful on create: afterwards the CVSS vector drives it
-    // (the backend recomputes it from the score), so the field would be a no-op.
-    if (state.editorMode === "edit") efCfg = efCfg.filter((f) => f.k !== "sev");
+    // On add we ask for just Title + Host — severity/status get sensible defaults
+    // and everything else is filled on the finding's detail card, where we redirect.
+    // On edit, severity is driven by the CVSS vector afterwards, so drop it here too.
+    if (state.editorMode === "add") efCfg = efCfg.filter((f) => f.k === "title" || f.k === "host");
+    else efCfg = efCfg.filter((f) => f.k !== "sev");
     // A finding must point at a real host — the picker offers the project's hosts.
     efCfg = efCfg.map((f) => (f.k === "host" ? { ...f, opts: hosts.map((h) => h.host) } : f));
   }
@@ -2384,44 +3742,101 @@ export function StormApp() {
   if (state.editorType === "ip" || state.editorType === "endpoint") {
     efCfg = efCfg.map((f) => (f.k === "hostName" ? { ...f, opts: hosts.map((h) => h.host) } : f));
   }
-  const editorFields = efCfg.map((f) => ({
-    key: f.k,
-    label: f.label,
-    isText: f.type === "text",
-    isTextarea: f.type === "textarea",
-    isSelect: f.type === "select",
-    isTags: f.type === "tags",
-    isCombo: f.type === "combo",
-    value: fstr(state.editorForm[f.k]),
-    placeholder: f.ph || "",
-    onInput: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => updateForm(f.k, e.target.value),
-    tagDraft: state.tagDrafts[f.k] || "",
-    onTagDraft: (e: ChangeEvent<HTMLInputElement>) => setTagDraft(f.k, e.target.value),
-    onTagKeyDown: (e: ReactKeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        addEditorTag(f.k, e.currentTarget.value);
-      }
-    },
-    tags: (Array.isArray(state.editorForm[f.k]) ? (state.editorForm[f.k] as string[]) : []).map((t, ti) => ({ value: t, onRemove: () => removeEditorTag(f.k, ti) })),
-    options: (f.opts ?? []).map((o) => ({
+  // Cred host binds to a project host — same validated picker as members (the
+  // save resolves the typed value against the project's hosts).
+  if (state.editorType === "cred") {
+    efCfg = efCfg.map((f) => (f.k === "host" ? { ...f, opts: hosts.map((h) => h.host) } : f));
+    // On edit the password is intentionally blank — say what leaving it blank does.
+    if (state.editorMode === "edit") {
+      efCfg = efCfg.map((f) => (f.k === "password" ? { ...f, ph: "leave blank to keep the current password" } : f));
+    }
+  }
+  const editorFields = efCfg.map((f) => {
+    /* `sub` is the secondary line of a suggestion (a user's email); selects only
+       ever render `label`, so widening the shape here leaves them untouched. */
+    const options = (f.opts ?? []).map((o) => ({
       value: o,
-      label:
-        f.k === "userKey"
-          ? (state.workspaceUsers.find((u) => u.key === o)?.email ? `${o} — ${state.workspaceUsers.find((u) => u.key === o)!.email}` : o)
-          : cap(o),
-    })),
-  }));
+      // Selects title-case their options (up → Up); combos (hosts, usernames)
+      // show the value verbatim — capitalising a hostname would misrepresent it.
+      label: f.type === "select" ? cap(o) : o,
+      sub: f.k === "userKey" ? state.workspaceUsers.find((u) => u.key === o)?.email ?? "" : "",
+    }));
+    const typed = fstr(state.editorForm[f.k]);
+    const q = typed.trim().toLowerCase();
+    /* Suggestions are ranked, not just filtered: typing "ad" puts every ad*
+       nickname first, then any other hit on the nickname or email. Capped at
+       COMBO_MAX so the list stays scannable instead of dumping the workspace. */
+    const suggestions = options
+      .map((o) => {
+        if (!q) return { o, rank: 0 };
+        if (o.value.toLowerCase().startsWith(q)) return { o, rank: 0 };
+        if (`${o.value} ${o.sub}`.toLowerCase().includes(q)) return { o, rank: 1 };
+        return null;
+      })
+      .filter((x): x is { o: (typeof options)[number]; rank: number } => x !== null)
+      .sort((a, b) => a.rank - b.rank)
+      .slice(0, COMBO_MAX)
+      .map((x) => x.o);
+    const hi = Math.min(state.comboHi, Math.max(suggestions.length - 1, 0));
+    const pick = (v: string) => setState({ editorForm: { ...state.editorForm, [f.k]: v }, comboOpen: null, comboHi: 0 });
+    return {
+      key: f.k,
+      label: f.label,
+      isText: f.type === "text",
+      isTextarea: f.type === "textarea",
+      isSelect: f.type === "select",
+      isTags: f.type === "tags",
+      isCombo: f.type === "combo",
+      value: typed,
+      placeholder: f.ph || "",
+      onInput: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => updateForm(f.k, e.target.value),
+      tagDraft: state.tagDrafts[f.k] || "",
+      onTagDraft: (e: ChangeEvent<HTMLInputElement>) => setTagDraft(f.k, e.target.value),
+      onTagKeyDown: (e: ReactKeyboardEvent<HTMLInputElement>) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          addEditorTag(f.k, e.currentTarget.value);
+        }
+      },
+      tags: (Array.isArray(state.editorForm[f.k]) ? (state.editorForm[f.k] as string[]) : []).map((t, ti) => ({ value: t, onRemove: () => removeEditorTag(f.k, ti) })),
+      options,
+      // ---- combo (type-to-search) ----
+      suggestions: suggestions.map((o, i) => ({ ...o, active: i === hi, onPick: () => pick(o.value) })),
+      comboOpen: state.comboOpen === f.k && suggestions.length > 0,
+      onComboInput: (e: ChangeEvent<HTMLInputElement>) => {
+        updateForm(f.k, e.target.value);
+        setState({ comboOpen: f.k, comboHi: 0 });
+      },
+      onComboFocus: () => setState({ comboOpen: f.k, comboHi: 0 }),
+      onComboBlur: () => setState({ comboOpen: null }),
+      onComboKeyDown: (e: ReactKeyboardEvent<HTMLInputElement>) => {
+        if (state.comboOpen !== f.k || suggestions.length === 0) {
+          if (e.key === "ArrowDown") setState({ comboOpen: f.k, comboHi: 0 });
+          return;
+        }
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setState({ comboHi: (hi + 1) % suggestions.length });
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setState({ comboHi: (hi - 1 + suggestions.length) % suggestions.length });
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          pick(suggestions[hi].value);
+        } else if (e.key === "Escape") {
+          setState({ comboOpen: null });
+        }
+      },
+    };
+  });
 
   const so = secStyle("overview");
   const sh = secStyle("hosts");
   const sv = secStyle("vulns");
   const sn = secStyle("notes");
+  const scr = secStyle("creds");
   const sm = secStyle("members");
   const sa = secStyle("activity");
-
-  // Those who may view project members (admin / creator / lead) may also manage them.
-  const canManageMembers = canViewMembers;
 
   const vd = state.vulnDetailForm;
   const vdCvss = computeCvss4(vd.vector);
@@ -2429,18 +3844,18 @@ export function StormApp() {
   const vdScore = vdCvss ? vdCvss.score.toFixed(1) : "—";
 
   const pfNav = (tab: ProfileTab): CSSProperties =>
-    state.profileTab === tab ? { background: "#EAF0FC", color: "#2E5FBF", boxShadow: "inset 3px 0 0 #2E5FBF" } : { background: "transparent", color: "#5A6B84", boxShadow: "inset 3px 0 0 transparent" };
+    state.profileTab === tab ? { background: "var(--st-accent-soft)", color: "var(--st-accent)", boxShadow: "inset 3px 0 0 var(--st-accent)" } : { background: "transparent", color: "var(--st-text-2)", boxShadow: "inset 3px 0 0 transparent" };
 
   // ================================================================= RENDER
 
   const eyebrow = (crumbs: { label: string; onClick?: () => void; muted?: boolean }[]): ReactNode => (
-    <div className="mono" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, letterSpacing: 1.2, textTransform: "uppercase", color: "#a0abbd", fontWeight: 700, marginBottom: 10 }}>
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#2E5FBF" }} />
+    <div className="mono" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, letterSpacing: 1.2, textTransform: "uppercase", color: "var(--st-text-faint)", fontWeight: 700, marginBottom: 10 }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--st-accent)" }} />
       {crumbs.map((c, i) => (
         <span key={i} style={{ display: "contents" }}>
           {i > 0 && <span>/</span>}
-          <span className={c.onClick ? "clk" : undefined} onClick={c.onClick} style={{ cursor: c.onClick ? "pointer" : undefined, color: c.muted ? "#7c8aa0" : undefined }}>
-            {c.label}
+          <span className={c.onClick ? "clk" : undefined} onClick={c.onClick} style={{ cursor: c.onClick ? "pointer" : undefined, color: c.muted ? "var(--st-text-3)" : undefined }}>
+            {t(c.label)}
           </span>
         </span>
       ))}
@@ -2452,34 +3867,35 @@ export function StormApp() {
     <div className="route" style={{ padding: "40px 48px 36px", width: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 20 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 40, fontWeight: 800, letterSpacing: "-1px", color: "#0F1B2D" }}>Projects</h1>
-          <div style={{ fontSize: 15, color: "#8A97AB", marginTop: 8 }}>
-            {isActive ? `Showing active projects · ${activeCount} active` : `Showing archived projects · ${archivedCount} archived`}
+          <h1 style={{ margin: 0, fontSize: 40, fontWeight: 800, letterSpacing: "-1px", color: "var(--st-text)" }}>{t("Projects")}</h1>
+          <div style={{ fontSize: 15, color: "var(--st-text-3)", marginTop: 8 }}>
+            {isActive ? `${t("Showing active projects")} · ${activeCount} ${t("active")}` : `${t("Showing archived projects")} · ${archivedCount} ${t("archived")}`}
           </div>
         </div>
-        <button className="clk" onClick={() => setState({ modalOpen: true })} style={{ display: "flex", alignItems: "center", gap: 9, height: 46, padding: "0 22px", border: "none", borderRadius: 13, background: "#4C74C7", color: "#fff", font: "700 14px Inter,sans-serif", boxShadow: "0 6px 18px rgba(76,116,199,.3)" }}>
+        <button className="clk" onClick={() => setState({ modalOpen: true })} style={{ display: "flex", alignItems: "center", gap: 9, height: 46, padding: "0 22px", border: "none", borderRadius: 13, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 14px Inter,sans-serif" }}>
           <Icon name="plus" size={17} sw={2.4} />
-          New project
+          {t("New project")}
         </button>
       </div>
 
       {/* stat cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 16, margin: "26px 0 22px" }}>
         {[
-          { icon: "trend-up" as const, iconColor: "#3d6fd6", label: "Active", value: String(activeCount), spark: "0,24 22,24 32,16 50,16 60,9 74,9", stroke: "#3d6fd6", w: 74 },
-          { icon: "archive" as const, iconColor: "#8A97AB", label: "Archived", value: String(archivedCount), spark: "0,22 36,22 46,13 74,13", stroke: "#b3bccd", w: 74 },
-          { icon: "clock" as const, iconColor: "#E0748A", label: "Open issues", value: String(tabProjects.reduce((s, p) => s + p.openFindings, 0)), spark: "0,23 16,23 26,18 40,18 50,12 62,12 74,10", stroke: "#EF8A9C", w: 74 },
-          { icon: "star" as const, iconColor: "#6E86C6", label: "Projects", value: String(tabProjects.length), spark: "0,24 14,24 22,19 34,19 42,13 56,13 64,7 74,7", stroke: "#7ea3e6", w: 74 },
-          { icon: "server" as const, iconColor: "#3FA26B", label: "Hosts", value: String(tabProjects.reduce((s, p) => s + p.hostsCount, 0)), spark: "0,24 13,21 26,22 39,15 52,11 66,5", stroke: "#43B074", w: 66 },
+          { icon: "trend-up" as const, iconColor: "var(--st-accent-2)", label: "Active", value: String(activeCount), spark: cumulativeSpark(projCreatedTimes(activeRows), ...projWindow(activeRows)), stroke: "var(--st-accent-2)", w: 111 },
+          { icon: "archive" as const, iconColor: "var(--st-text-3)", label: "Archived", value: String(archivedCount), spark: cumulativeSpark(projCreatedTimes(archivedRows), ...projWindow(archivedRows)), stroke: "var(--st-text-faint)", w: 111 },
+          { icon: "clock" as const, iconColor: "var(--st-danger)", label: "Open issues", value: String(tabProjects.reduce((s, p) => s + p.openFindings, 0)), spark: cumulativeSpark(aggOpenVulnTimes(tabProjects), ...projWindow(tabProjects)), stroke: "var(--st-danger)", w: 111 },
+          { icon: "star" as const, iconColor: "var(--st-accent-2)", label: "Projects", value: String(tabProjects.length), spark: cumulativeSpark(projCreatedTimes(tabProjects), ...projWindow(tabProjects)), stroke: "var(--st-accent-muted)", w: 111 },
+          { icon: "server" as const, iconColor: "var(--st-success)", label: "Hosts", value: String(tabProjects.reduce((s, p) => s + p.hostsCount, 0)), spark: cumulativeSpark(aggHostTimes(tabProjects), ...projWindow(tabProjects)), stroke: "var(--st-success)", w: 111 },
         ].map((c) => (
           <div key={c.label} className="statc" style={{ ...CARD, padding: "16px 18px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#8A97AB", font: "600 11.5px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--st-text-3)", font: "600 11.5px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase" }}>
               <Icon name={c.icon} size={15} color={c.iconColor} sw={2.1} />
               {c.label}
             </div>
             <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginTop: 8 }}>
-              <div className="mono" style={{ fontWeight: 800, fontSize: 26, color: "#0F1B2D", lineHeight: 1, letterSpacing: "-1px" }}>{c.value}</div>
+              <div className="mono" style={{ fontWeight: 800, fontSize: 26, color: "var(--st-text)", lineHeight: 1, letterSpacing: "-1px" }}>{c.value}</div>
               <svg width={c.w} height="30" viewBox={`0 0 ${c.w} 30`} fill="none" style={{ flex: "none" }}>
+                <polygon points={sparkArea(c.spark, c.w)} fill={c.stroke} fillOpacity={0.15} />
                 <polyline points={c.spark} stroke={c.stroke} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </div>
@@ -2490,58 +3906,60 @@ export function StormApp() {
       {/* controls */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 8 }}>
-          <div className="tab" onClick={() => setState({ tab: "active" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: isActive ? "#fff" : "transparent", border: `1px solid ${isActive ? "#dbe1ec" : "transparent"}`, color: isActive ? "#0F1B2D" : "#8A97AB" }}>
+          <div className="tab" onClick={() => setState({ tab: "active" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: isActive ? "var(--st-surface)" : "transparent", border: `1px solid ${isActive ? "var(--st-border)" : "transparent"}`, color: isActive ? "var(--st-text)" : "var(--st-text-3)" }}>
             <Icon name="trend-up" size={15} sw={2.2} />
-            Active
-            <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: isActive ? "#4C74C7" : "#E3EBFF", color: isActive ? "#fff" : "#4C74C7", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{activeCount}</span>
+            {t("Active")}
+            <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: isActive ? "var(--st-accent-2)" : "var(--st-accent-soft)", color: isActive ? "var(--st-on-accent)" : "var(--st-accent-2)", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{activeCount}</span>
           </div>
-          <div className="tab" onClick={() => setState({ tab: "archived" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: !isActive ? "#fff" : "transparent", border: `1px solid ${!isActive ? "#dbe1ec" : "transparent"}`, color: !isActive ? "#0F1B2D" : "#8A97AB" }}>
+          <div className="tab" onClick={() => setState({ tab: "archived" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: !isActive ? "var(--st-surface)" : "transparent", border: `1px solid ${!isActive ? "var(--st-border)" : "transparent"}`, color: !isActive ? "var(--st-text)" : "var(--st-text-3)" }}>
             <Icon name="archive" size={15} />
-            Archived
-            <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: !isActive ? "#4C74C7" : "#E3EBFF", color: !isActive ? "#fff" : "#4C74C7", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{archivedCount}</span>
+            {t("Archived")}
+            <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: !isActive ? "var(--st-accent-2)" : "var(--st-accent-soft)", color: !isActive ? "var(--st-on-accent)" : "var(--st-accent-2)", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{archivedCount}</span>
           </div>
         </div>
         <div style={{ flex: 1 }} />
         <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 280 }}>
-          <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" strokeWidth="2" strokeLinecap="round">
+          <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--st-text-faint)" strokeWidth="2" strokeLinecap="round">
             <circle cx="11" cy="11" r="7" />
             <path d="M21 21l-4-4" />
           </svg>
-          <input placeholder="Filter projects…" value={state.query} onChange={(e) => setState({ query: e.target.value })} />
+          <input placeholder={t("Filter projects…")} value={state.query} onChange={(e) => setState({ query: e.target.value })} />
         </label>
-        <div className="clk iconbtn" onClick={() => setState((s) => ({ projSort: s.projSort === "first" ? "last" : "first" }))} style={{ display: "flex", alignItems: "center", gap: 9, height: 40, padding: "0 15px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "600 13px Inter,sans-serif", color: "#5A6B84" }}>
+        <div className="clk iconbtn" onClick={() => setState((s) => ({ projSort: s.projSort === "first" ? "last" : "first" }))} style={{ display: "flex", alignItems: "center", gap: 9, height: 40, padding: "0 15px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "600 13px Inter,sans-serif", color: "var(--st-text-2)" }}>
           <Icon name="sort" size={16} />
-          {state.projSort === "first" ? "First updated" : "Last updated"}
+          {state.projSort === "first" ? t("First updated") : t("Last updated")}
         </div>
       </div>
 
       {/* table */}
       <div style={{ ...CARD, overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 150px 70px", padding: "13px 22px", borderBottom: "1px solid #eef1f7", font: "700 11px Inter,sans-serif", letterSpacing: ".6px", color: "#a0abbd", textTransform: "uppercase" }}>
-          <div>#</div>
-          <div>Project</div>
-          <div>Description</div>
-          <div>Findings</div>
-          <div>Last updated</div>
-          <div style={{ textAlign: "right" }}>Actions</div>
-        </div>
+        {projRows.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 150px 70px", padding: "13px 22px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".6px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+            <div>#</div>
+            <div>{t("Project")}</div>
+            <div>{t("Description")}</div>
+            <div>{t("Findings")}</div>
+            <div>{t("Last updated")}</div>
+            <div style={{ textAlign: "right" }}>{t("Actions")}</div>
+          </div>
+        )}
         {projRows.map((r, i) => {
           const fsev = r.openFindings === 0 ? FINDING_SEV.none : r.openFindings >= 3 ? FINDING_SEV.high : FINDING_SEV.med;
-          const findingsLabel = r.openFindings === 0 ? (r.totalFindings > 0 ? "No open" : "No findings") : `${r.openFindings} open`;
+          const findingsLabel = r.openFindings === 0 ? (r.totalFindings > 0 ? t("No open") : t("No findings")) : `${r.openFindings} ${t("open")}`;
           return (
-            <div key={r.id} className="prow clk" onClick={() => openProject(r.id)} style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 150px 70px", alignItems: "center", padding: "11px 22px", borderBottom: "1px solid #f2f4f9" }}>
-              <div className="mono" style={{ color: "#b3bccd", fontSize: 13, fontWeight: 600 }}>{String(i + 1).padStart(2, "0")}</div>
+            <div key={r.id} className="prow clk" onClick={() => openProject(r.id)} style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 150px 70px", alignItems: "center", padding: "11px 22px", borderBottom: "1px solid var(--st-divider)" }}>
+              <div className="mono" style={{ color: "var(--st-text-faint)", fontSize: 13, fontWeight: 600 }}>{String(i + 1).padStart(2, "0")}</div>
               <div style={{ minWidth: 0, paddingRight: 12 }}>
-                <div style={{ font: "700 14.5px Inter,sans-serif", color: "#0F1B2D", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
+                <div style={{ font: "700 14.5px Inter,sans-serif", color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
               </div>
-              <div style={{ fontSize: 13, color: "#6b7a90", paddingRight: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.description}</div>
+              <div style={{ fontSize: 13, color: "var(--st-text-3)", paddingRight: 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.description}</div>
               <div>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 8, background: fsev.fBg, color: fsev.fColor, font: "600 12px Inter,sans-serif" }}>
                   <span style={{ width: 7, height: 7, borderRadius: "50%", background: fsev.fDot }} />
                   {findingsLabel}
                 </span>
               </div>
-              <div style={{ fontSize: 13, color: "#8A97AB" }}>{r.updated}</div>
+              <div style={{ fontSize: 13, color: "var(--st-text-3)" }}>{r.updated}</div>
               {/* Edit: admin / creator / lead. Delete: admin only — both mirror the backend. */}
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 4 }}>
                 {canEditProjectRow(r) && (
@@ -2554,9 +3972,9 @@ export function StormApp() {
             </div>
           );
         })}
-        {state.projectsLoading && projRows.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>Loading projects…</div>}
-        {state.projectsError && <div style={{ padding: 52, textAlign: "center", color: "#C0455B", fontSize: 14 }}>{state.projectsError}</div>}
-        {!state.projectsLoading && !state.projectsError && projRows.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>No projects found.</div>}
+        {state.projectsLoading && projRows.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("Loading projects…")}</div>}
+        {state.projectsError && <div style={{ padding: 52, textAlign: "center", color: "var(--st-danger)", fontSize: 14 }}>{state.projectsError}</div>}
+        {!state.projectsLoading && !state.projectsError && projRows.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("No projects found.")}</div>}
       </div>
     </div>
   );
@@ -2565,15 +3983,15 @@ export function StormApp() {
   const renderStub = () => (
     <div className="route" style={{ padding: "40px 48px 36px", width: "100%" }}>
       {eyebrow([{ label: "Workspace", onClick: selProjects }, { label: stubTitle, muted: true }])}
-      <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "#0F1B2D" }}>{stubTitle}</h1>
-      <div style={{ fontSize: 13.5, color: "#8A97AB", marginTop: 6 }}>{stubDesc}</div>
+      <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "var(--st-text)" }}>{t(stubTitle)}</h1>
+      <div style={{ fontSize: 13.5, color: "var(--st-text-3)", marginTop: 6 }}>{t(stubDesc)}</div>
       <div style={{ marginTop: 32, ...CARD, padding: "60px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 14 }}>
-        <div style={{ width: 56, height: 56, borderRadius: 14, background: "#f1f4f9", color: "#b3bccd", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 14, background: "var(--st-hover)", color: "var(--st-text-faint)", display: "flex", alignItems: "center", justifyContent: "center" }}>
           <Icon name="calendar" size={26} sw={1.8} />
         </div>
-        <div style={{ font: "700 15px Inter,sans-serif", color: "#0F1B2D" }}>Coming soon</div>
-        <div style={{ fontSize: 13, color: "#8A97AB", maxWidth: 340 }}>This area is under construction. Head back to Projects to continue your work.</div>
-        <button className="clk" onClick={selProjects} style={{ marginTop: 6, height: 40, padding: "0 18px", border: "none", borderRadius: 10, background: "#4C74C7", color: "#fff", font: "700 13px Inter,sans-serif", cursor: "pointer" }}>Back to Projects</button>
+        <div style={{ font: "700 15px Inter,sans-serif", color: "var(--st-text)" }}>{t("Coming soon")}</div>
+        <div style={{ fontSize: 13, color: "var(--st-text-3)", maxWidth: 340 }}>{t("This area is under construction. Head back to Projects to continue your work.")}</div>
+        <button className="clk" onClick={selProjects} style={{ marginTop: 6, height: 40, padding: "0 18px", border: "none", borderRadius: 10, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", cursor: "pointer" }}>{t("Back to Projects")}</button>
       </div>
     </div>
   );
@@ -2584,77 +4002,135 @@ export function StormApp() {
       {eyebrow([{ label: "Workspace", onClick: selProjects }, { label: "Members", muted: true }])}
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "#0F1B2D" }}>Members</h1>
-          <div style={{ fontSize: 13.5, color: "#8A97AB", marginTop: 6 }}>Everyone in your Sbertech workspace — add people here before assigning them to a project</div>
+          <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "var(--st-text)" }}>{t("Members")}</h1>
+          <div style={{ fontSize: 13.5, color: "var(--st-text-3)", marginTop: 6 }}>{t("Invite people by email — they set their own username and password from the link")}</div>
         </div>
-        <button className="clk" onClick={() => openWSUserEditor("add", -1)} style={{ flex: "none", display: "inline-flex", alignItems: "center", gap: 8, height: 42, padding: "0 18px", border: "none", borderRadius: 11, background: "#2E5FBF", color: "#fff", font: "700 13.5px Inter,sans-serif", cursor: "pointer" }}>
+        <button className="clk" onClick={() => openWSUserEditor("add", -1)} style={{ flex: "none", display: "inline-flex", alignItems: "center", gap: 8, height: 42, padding: "0 18px", border: "none", borderRadius: 11, background: "var(--st-accent)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", cursor: "pointer" }}>
           <Icon name="plus" size={15} sw={2.2} />
-          Add member
+          {t("Invite member")}
         </button>
       </div>
+      {/* Активные / архивные (деактивированные) участники — вкладки как у проектов. */}
+      <div style={{ display: "flex", gap: 8, marginTop: 22 }}>
+        <div className="tab" onClick={() => setState({ wsUserTab: "active" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: state.wsUserTab === "active" ? "var(--st-surface)" : "transparent", border: `1px solid ${state.wsUserTab === "active" ? "var(--st-border)" : "transparent"}`, color: state.wsUserTab === "active" ? "var(--st-text)" : "var(--st-text-3)" }}>
+          <Icon name="trend-up" size={15} sw={2.2} />
+          {t("Active")}
+          <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: state.wsUserTab === "active" ? "var(--st-accent-2)" : "var(--st-accent-soft)", color: state.wsUserTab === "active" ? "var(--st-on-accent)" : "var(--st-accent-2)", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{state.workspaceUsers.filter((u) => !u.locked).length}</span>
+        </div>
+        <div className="tab" onClick={() => setState({ wsUserTab: "archived" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: state.wsUserTab === "archived" ? "var(--st-surface)" : "transparent", border: `1px solid ${state.wsUserTab === "archived" ? "var(--st-border)" : "transparent"}`, color: state.wsUserTab === "archived" ? "var(--st-text)" : "var(--st-text-3)" }}>
+          <Icon name="archive" size={15} />
+          {t("Archived")}
+          <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: state.wsUserTab === "archived" ? "var(--st-accent-2)" : "var(--st-accent-soft)", color: state.wsUserTab === "archived" ? "var(--st-on-accent)" : "var(--st-accent-2)", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{state.workspaceUsers.filter((u) => u.locked).length}</span>
+        </div>
+      </div>
       {/* search + role filter */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 22, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
         <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 280 }}>
-          <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
-          <input placeholder="Search by username…" value={state.wsMemberQuery} onChange={(e) => setState({ wsMemberQuery: e.target.value })} />
+          <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--st-text-faint)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
+          <input placeholder={t("Search by username…")} value={state.wsMemberQuery} onChange={(e) => setState({ wsMemberQuery: e.target.value })} />
         </label>
         <div style={{ flex: 1 }} />
         {/* Every pill toggles; filters combine (AND across groups, OR inside one).
             An empty group means "All", so unpicking the last pill re-selects it. */}
-        <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700 }}>ROLE</span>
-        <div className="clk" onClick={() => setState({ wsMemberRoles: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberRoles.length === 0) }}>All</div>
+        <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("ROLE")}</span>
+        <div className="clk" onClick={() => setState({ wsMemberRoles: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberRoles.length === 0) }}>{t("All")}</div>
         {([{ label: "Admin", v: "admin" as const }, { label: "User", v: "user" as const }]).map((o) => (
-          <div key={o.v} className="clk" onClick={() => setState((s) => ({ wsMemberRoles: toggleIn(s.wsMemberRoles, o.v) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberRoles.includes(o.v)) }}>{o.label}</div>
+          <div key={o.v} className="clk" onClick={() => setState((s) => ({ wsMemberRoles: toggleIn(s.wsMemberRoles, o.v) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberRoles.includes(o.v)) }}>{t(o.label)}</div>
         ))}
-        <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700, marginLeft: 8 }}>PROJECT</span>
-        <div className="clk" onClick={() => setState({ wsMemberProjectRoles: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberProjectRoles.length === 0) }}>All</div>
+        <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700, marginLeft: 8 }}>{t("PROJECT")}</span>
+        <div className="clk" onClick={() => setState({ wsMemberProjectRoles: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberProjectRoles.length === 0) }}>{t("All")}</div>
         {([{ label: "Lead", v: "lead" as const }, { label: "Pentester", v: "pentester" as const }]).map((o) => (
-          <div key={o.v} className="clk" onClick={() => setState((s) => ({ wsMemberProjectRoles: toggleIn(s.wsMemberProjectRoles, o.v) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberProjectRoles.includes(o.v)) }}>{o.label}</div>
+          <div key={o.v} className="clk" onClick={() => setState((s) => ({ wsMemberProjectRoles: toggleIn(s.wsMemberProjectRoles, o.v) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.wsMemberProjectRoles.includes(o.v)) }}>{t(o.label)}</div>
         ))}
       </div>
-      <div style={{ marginTop: 16, ...CARD, overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.4fr 168px 72px", padding: "13px 20px", borderBottom: "1px solid #eef1f7", font: "700 11px Inter,sans-serif", letterSpacing: ".6px", color: "#a0abbd", textTransform: "uppercase" }}>
-          <div>Name</div>
-          <div>Email</div>
-          <div>Role</div>
-          <div />
+      {/* Ожидающие приглашения — это будущие активные участники, показываем их
+          только на вкладке «Активные». */}
+      {state.wsUserTab === "active" && state.pendingInvites.length > 0 && (
+        <div style={{ marginTop: 16, ...CARD, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "13px 20px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".6px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+            <Icon name="mail" size={14} color="var(--st-text-faint)" />
+            {t("Pending invitations ·")} {state.pendingInvites.length}
+          </div>
+          {state.pendingInvites.map((inv) => (
+            <div key={inv.id} className="prow" style={{ display: "grid", gridTemplateColumns: "1.4fr 168px 150px", alignItems: "center", padding: "13px 20px", borderBottom: "1px solid var(--st-divider)", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
+                <span style={{ width: 32, height: 32, flex: "none", borderRadius: "50%", background: "var(--st-divider)", color: "var(--st-text-3)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="mail" size={15} color="var(--st-text-3)" /></span>
+                <div style={{ minWidth: 0 }}>
+                  <div className="mono" style={{ fontSize: 12.5, color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{inv.email}</div>
+                  <div style={{ fontSize: 11, color: inv.is_expired ? "var(--st-danger)" : "var(--st-text-3)", fontWeight: 600, marginTop: 2 }}>{inv.is_expired ? "Link expired — resend it" : "Pending activation"}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                <span style={{ font: "700 10px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 6, padding: "3px 9px", background: WS_ROLE[inv.role === "admin" ? "admin" : "user"].bg, color: WS_ROLE[inv.role === "admin" ? "admin" : "user"].color }}>{t(WS_ROLE_LABEL[inv.role === "admin" ? "admin" : "user"])}</span>
+                <span style={{ font: "700 10px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 6, padding: "3px 9px", background: ROLE[inv.project_role].bg, color: ROLE[inv.project_role].color }}>{inv.project_role}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button className="clk" onClick={() => resendInvite(inv.id)} style={{ height: 30, padding: "0 12px", border: "1px solid var(--st-border-strong)", borderRadius: 8, background: "var(--st-surface)", color: "var(--st-accent)", font: "600 12px Inter,sans-serif", cursor: "pointer" }}>{t("Resend")}</button>
+                <div className="actbtn del" onClick={() => revokeInvite(inv.id)} title={t("Revoke invitation")}><Icon name="trash" size={15} /></div>
+              </div>
+            </div>
+          ))}
         </div>
+      )}
+      <div style={{ marginTop: 16, ...CARD, overflow: "hidden" }}>
         {(() => {
           const wq = state.wsMemberQuery.trim().toLowerCase();
           const filtered = state.workspaceUsers
             .map((u, idx) => ({ u, idx }))
             .filter(
               ({ u }) =>
+                // Вкладка: активные = не заблокированные, архив = деактивированные.
+                (state.wsUserTab === "archived" ? u.locked : !u.locked) &&
                 (state.wsMemberRoles.length === 0 || state.wsMemberRoles.includes(u.role)) &&
                 (state.wsMemberProjectRoles.length === 0 || state.wsMemberProjectRoles.includes(u.projectRole)) &&
                 (!wq || u.name.toLowerCase().includes(wq))
             );
-          if (filtered.length === 0) return <div style={{ padding: 44, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>No members match.</div>;
-          return filtered.map(({ u, idx }) => (
-            <div key={u.key + idx} className="prow" style={{ display: "grid", gridTemplateColumns: "1.2fr 1.4fr 168px 72px", alignItems: "center", padding: "14px 20px", borderBottom: "1px solid #f2f4f9" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
-                <span className="mono" style={{ width: 32, height: 32, flex: "none", borderRadius: "50%", background: "#2E5FBF", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 13px 'JetBrains Mono',monospace" }}>{(u.name[0] || "U").toUpperCase()}</span>
-                <span style={{ font: "600 13.5px Inter,sans-serif", color: "#0F1B2D" }}>{u.name}</span>
+          if (filtered.length === 0)
+            return (
+              <div style={{ padding: 44, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>
+                {state.wsUserTab === "archived" ? t("No deactivated members.") : t("No members match.")}
               </div>
-              <div className="mono" style={{ fontSize: 12.5, color: "#5A6B84", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</div>
+            );
+          return (
+            <>
+              {/* Column headers only make sense with rows — hide them when empty. */}
+              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.4fr 168px 72px", padding: "13px 20px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".6px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+                <div>{t("Name")}</div>
+                <div>{t("Email")}</div>
+                <div>{t("Role")}</div>
+                <div />
+              </div>
+              {filtered.map(({ u, idx }) => (
+            <div key={u.key + idx} className="prow" style={{ display: "grid", gridTemplateColumns: "1.2fr 1.4fr 168px 72px", alignItems: "center", padding: "14px 20px", borderBottom: "1px solid var(--st-divider)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
+                <span className="mono" style={{ width: 32, height: 32, flex: "none", borderRadius: "50%", background: u.locked ? "var(--st-text-faint)" : "var(--st-accent)", color: "var(--st-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", font: "700 13px 'JetBrains Mono',monospace" }}>{(u.name[0] || "U").toUpperCase()}</span>
+                <span style={{ font: "600 13.5px Inter,sans-serif", color: "var(--st-text)" }}>{u.name}</span>
+              </div>
+              <div className="mono" style={{ fontSize: 12.5, color: "var(--st-text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                <span style={{ font: "700 10px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 6, padding: "3px 9px", background: WS_ROLE[u.role].bg, color: WS_ROLE[u.role].color }}>{WS_ROLE_LABEL[u.role]}</span>
+                <span style={{ font: "700 10px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 6, padding: "3px 9px", background: WS_ROLE[u.role].bg, color: WS_ROLE[u.role].color }}>{t(WS_ROLE_LABEL[u.role])}</span>
                 <span style={{ font: "700 10px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 6, padding: "3px 9px", background: ROLE[u.projectRole].bg, color: ROLE[u.projectRole].color }}>{u.projectRole}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 2 }}>
                 <div className="actbtn" onClick={() => openWSUserEditor("edit", idx)}><Icon name="edit" size={15} /></div>
-                <div className="actbtn del" onClick={() => deleteWSUser(idx)}><Icon name="trash" size={15} /></div>
+                {u.locked ? (
+                  <div className="actbtn" title={t("Reactivate user")} onClick={() => reactivateUser(idx)}><Icon name="unlock" size={15} /></div>
+                ) : (
+                  <div className="actbtn del" title={t("Deactivate user")} onClick={() => askDeleteWSUser(idx)}><Icon name="trash" size={15} /></div>
+                )}
               </div>
             </div>
-          ));
+              ))}
+            </>
+          );
         })()}
       </div>
     </div>
   );
 
   // ---------- Project detail ----------
-  const tabItem = (label: string, icon: Parameters<typeof Icon>[0]["name"], st: { color: string; bar: string }, onClick: () => void, badge?: { text: string; color: string; bg: string }, extra?: ReactNode) => (
-    <div className="clk" onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 8, padding: "15px 15px", marginBottom: -1, whiteSpace: "nowrap", borderBottom: `2px solid ${st.bar}`, color: st.color, font: "600 14px Inter,sans-serif" }}>
+  const tabItem = (label: string, icon: Parameters<typeof Icon>[0]["name"], st: { active: boolean }, onClick: () => void, badge?: { text: string; color: string; bg: string }, extra?: ReactNode) => (
+    <div className={`clk sectab${st.active ? " on" : ""}`} onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 8, padding: "15px 15px", marginBottom: -1, whiteSpace: "nowrap", font: "600 14px Inter,sans-serif" }}>
       <Icon name={icon} size={17} />
       {label}
       {extra}
@@ -2665,48 +4141,57 @@ export function StormApp() {
   const renderDetail = () => (
     <div className="route" style={{ padding: "0 0 36px", width: "100%" }}>
       {/* tabs */}
-      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "0 48px", borderBottom: "1px solid #e6eaf1", background: "#fff", overflow: "visible" }}>
-        {tabItem("Overview", "layout", so, () => setSection("overview"))}
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "0 48px", borderBottom: "1px solid var(--st-border-light)", background: "var(--st-surface)", overflow: "visible" }}>
+        {tabItem(t("Overview"), "layout", so, () => setSection("overview"))}
         <div style={{ position: "relative", display: "flex" }}>
-          {tabItem("Recon", "server", sh, toggleReconMenu, undefined, <Icon name="chevron-down" size={14} sw={2.2} />)}
-          <div className={`menu ${state.reconMenuOpen ? "open" : ""}`} style={{ position: "absolute", top: 52, left: 8, width: 214, background: "#fff", border: "1px solid #e6eaf1", borderRadius: 14, boxShadow: "0 20px 54px rgba(15,27,45,.16)", zIndex: 50, padding: 8, transformOrigin: "top left" }}>
-            <div className="mono" style={{ fontSize: 10, letterSpacing: 1.5, color: "#a8b2c2", fontWeight: 700, padding: "8px 10px" }}>RECON</div>
+          {/* Recon открывает меню, а не раздел напрямую, но выделяется как
+              обычная вкладка — той же синей линией снизу, что и соседние. */}
+          {tabItem(t("Recon"), "server", sh, toggleReconMenu, undefined, <Icon name="chevron-down" size={14} sw={2.2} />)}
+          {/* Full-screen backdrop: a click anywhere outside the popup dismisses it
+              (Esc is handled by the global keydown listener). */}
+          {state.reconMenuOpen && <div onClick={() => setState({ reconMenuOpen: false })} style={{ position: "fixed", inset: 0, zIndex: 40 }} />}
+          <div className={`menu ${state.reconMenuOpen ? "open" : ""}`} style={{ position: "absolute", top: 52, left: 8, width: 214, background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 14, boxShadow: "0 20px 54px rgba(15,27,45,.16)", zIndex: 50, padding: 8, transformOrigin: "top left" }}>
+            <div className="mono" style={{ fontSize: 10, letterSpacing: 1.5, color: "var(--st-text-faint)", fontWeight: 700, padding: "8px 10px" }}>{t("RECON")}</div>
             {([
               { v: "hosts" as const, icon: "server" as const, label: "Hosts", count: hosts.length },
               { v: "ips" as const, icon: "card" as const, label: "IPs", count: ipsRows.length },
               { v: "endpoints" as const, icon: "link" as const, label: "Endpoints", count: endpointTotal },
+              { v: "js" as const, icon: "doc" as const, label: "JS", count: jsFiles.length },
             ]).map((it) => {
-              const on = rv === it.v;
+              // Nothing is highlighted while another section is open: the recon
+              // view only counts as active when Recon itself is the open section.
+              const on = sec === "hosts" && rv === it.v;
               return (
-                <div key={it.v} className="nav clk" onClick={() => selRecon(it.v)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 11px", borderRadius: 10, font: "600 13.5px Inter,sans-serif", color: on ? "#2E5FBF" : "#334", background: on ? "#eef3fc" : "transparent" }}>
+                <div key={it.v} className={`reconrow clk${on ? " on" : ""}`} onClick={() => selRecon(it.v)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 11px", borderRadius: 10, font: "600 13.5px Inter,sans-serif" }}>
                   <Icon name={it.icon} size={17} />
-                  {it.label}
-                  <span className="mono" style={{ marginLeft: "auto", fontSize: 11, fontWeight: 700, color: "#8A97AB" }}>{it.count}</span>
+                  {t(it.label)}
+                  <span className="mono" style={{ marginLeft: "auto", minWidth: 22, textAlign: "center", fontSize: 11, fontWeight: 700, color: on ? "var(--st-accent)" : "var(--st-text-3)", background: on ? "var(--st-accent-soft)" : "var(--st-hover)", border: `1px solid ${on ? "var(--st-accent-muted)" : "var(--st-border-light)"}`, borderRadius: 6, padding: "1px 6px" }}>{it.count}</span>
                 </div>
               );
             })}
           </div>
         </div>
-        {tabItem("Vulnerabilities", "star2", sv, () => setSection("vulns"), { text: String(d.vulns.length), color: sv.badgeColor, bg: sv.badgeBg })}
-        {tabItem("Notes", "doc", sn, () => setSection("notes"), { text: String(d.notes.length), color: sn.badgeColor, bg: sn.badgeBg })}
-        {canViewMembers && tabItem("Members", "users", sm, () => setSection("members"), { text: String(d.members.length), color: sm.badgeColor, bg: sm.badgeBg })}
-        {tabItem("Activity", "activity", sa, () => setSection("activity"), { text: String(activityGroups.length), color: sa.color, bg: "#EEF1F6" })}
+        {tabItem(t("Vulnerabilities"), "star2", sv, () => setSection("vulns"), { text: String(d.vulns.length), color: sv.badgeColor, bg: sv.badgeBg })}
+        {tabItem(t("Notes"), "doc", sn, () => setSection("notes"), { text: String(d.notes.length), color: sn.badgeColor, bg: sn.badgeBg })}
+        {tabItem(t("Creds"), "lock", scr, () => setSection("creds"), { text: String(d.creds.length), color: scr.badgeColor, bg: scr.badgeBg })}
+        {canViewMembers && tabItem(t("Members"), "users", sm, () => setSection("members"), { text: String(d.members.length), color: sm.badgeColor, bg: sm.badgeBg })}
+        {tabItem(t("Activity"), "activity", sa, () => setSection("activity"), { text: String(activityGroups.length), color: sa.color, bg: "var(--st-bg)" })}
       </div>
 
       <div style={{ padding: "26px 48px 0" }}>
         {/* Project / Section / <open item>. The section stays clickable while an
             item is open, so it is the way back to that section's list. */}
-        <div className="mono" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#a0abbd", fontWeight: 600, marginBottom: 14 }}>
-          <span className="clk" onClick={() => setSection("overview")} style={{ color: "#4C74C7", cursor: "pointer" }}>{projName}</span>
+        <div className="mono" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--st-text-faint)", fontWeight: 600, marginBottom: 14 }}>
+          <span className="clk" onClick={() => setSection("overview")} style={{ color: "var(--st-accent-2)", cursor: "pointer" }}>{projName}</span>
           <span>/</span>
           {crumbLeaf ? (
             <>
-              <span className="clk" onClick={() => setSection(sec)} style={{ color: "#4C74C7", cursor: "pointer" }}>{sectionLabel}</span>
+              <span className="clk" onClick={() => setSection(sec)} style={{ color: "var(--st-accent-2)", cursor: "pointer" }}>{sectionLabel}</span>
               <span>/</span>
-              <span style={{ color: "#7c8aa0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{crumbLeaf}</span>
+              <span style={{ color: "var(--st-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{crumbLeaf}</span>
             </>
           ) : (
-            <span style={{ color: "#7c8aa0" }}>{sectionLabel}</span>
+            <span style={{ color: "var(--st-text-3)" }}>{sectionLabel}</span>
           )}
         </div>
 
@@ -2715,70 +4200,103 @@ export function StormApp() {
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20, marginBottom: 24 }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                <h1 style={{ margin: 0, fontSize: 32, fontWeight: 800, letterSpacing: "-.8px", color: "#0F1B2D" }}>{d.title || projName}</h1>
+                <h1 style={{ margin: 0, fontSize: 32, fontWeight: 800, letterSpacing: "-.8px", color: "var(--st-text)" }}>{d.title || projName}</h1>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 20, background: stCh.bg, color: stCh.color, font: "700 12px Inter,sans-serif" }}>
-                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: stCh.dot }} />
-                  {stCh.label}
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: stCh.dot }} />
+                  {t(stCh.label)}
                 </span>
               </div>
-              <div style={{ fontSize: 14, color: "#8A97AB", marginTop: 8 }}>{d.desc}</div>
+              <div style={{ fontSize: 14, color: "var(--st-text-3)", marginTop: 8 }}>{d.desc}</div>
             </div>
             <div style={{ display: "flex", gap: 10, flex: "none" }}>
-              <button className="clk iconbtn" onClick={openExportModal} style={{ height: 42, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "600 13px Inter,sans-serif", color: "#5A6B84", display: "flex", alignItems: "center", gap: 8 }}>
-                <Icon name="file-check" size={16} />Generate report
+              <button className="clk" onClick={openExportModal} style={{ height: 42, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-accent-2)", display: "inline-flex", alignItems: "center", gap: 7 }}>
+                <Icon name="file-check" size={16} sw={2.2} color="var(--st-accent-2)" />{t("Generate report")}
               </button>
               {canEditProject && (
-                <button className="clk" onClick={openProjEdit} style={{ height: 42, padding: "0 18px", border: "none", borderRadius: 11, background: "#4C74C7", color: "#fff", font: "700 13px Inter,sans-serif", display: "flex", alignItems: "center", gap: 8 }}>
-                  <Icon name="edit" size={16} color="#fff" />Edit
+                <button className="clk" onClick={openProjEdit} style={{ height: 42, padding: "0 18px", border: "none", borderRadius: 11, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", display: "flex", alignItems: "center", gap: 8 }}>
+                  <Icon name="edit" size={16} color="var(--st-on-accent)" />{t("Edit")}
                 </button>
               )}
             </div>
           </div>
         ) : (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 20, marginBottom: 22 }}>
-            <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "#0F1B2D" }}>{sectionLabel}</h1>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+              <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "var(--st-text)" }}>{sectionLabel}</h1>
+              {/* Recon total sits next to the section title; the toolbar below keeps
+                  search on the left and filters on the right. */}
+              {sec === "hosts" && !_hd && !_ipd && (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "var(--st-text-2)", background: "var(--st-surface)", border: "1px solid var(--st-border-strong)", borderRadius: 20, padding: "5px 13px" }}>{reconTotalLabel} <b className="mono" style={{ color: "var(--st-text)" }}>{reconTotal}</b></span>
+              )}
+            </div>
             <div style={{ display: "flex", gap: 10, flex: "none" }}>
-              {sec === "hosts" && rv === "hosts" && (
+              {sec === "hosts" && rv === "hosts" && !state.hostImportOpen && !_hd && (
                 <>
-                  <button className="clk iconbtn" onClick={() => openReconExport("hosts")} style={{ height: 42, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "600 13px Inter,sans-serif", color: "#5A6B84", display: "flex", alignItems: "center", gap: 8 }}>
-                    <Icon name="download" size={16} />Export
+                  <button className="clk" onClick={() => openReconExport("hosts")} style={{ height: 42, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-accent-2)", display: "inline-flex", alignItems: "center", gap: 7 }}>
+                    <Icon name="download" size={16} sw={2.2} color="var(--st-accent-2)" />{t("Export")}
                   </button>
-                  <button className="addbtn clk" onClick={() => openEditor("host", "add", -1)} style={{ height: 42 }}>
-                    <Icon name="plus" size={15} color="#fff" sw={2.6} />Add host
+                  <button className="addbtn clk" onClick={openHostImport} style={{ height: 42 }}>
+                    <Icon name="plus" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Add hosts")}
                   </button>
                 </>
+              )}
+              {/* On the open card the primary action becomes "Edit host" — it takes
+                  the slot the "Add hosts"/"Add IPs" button held on the list. */}
+              {sec === "hosts" && rv === "hosts" && _hd && (
+                <button className="addbtn clk" onClick={() => openEditor("host", "edit", hosts.findIndex((x) => x.id === _hd.id))} style={{ height: 42 }}>
+                  <Icon name="edit" size={15} color="var(--st-on-accent)" sw={2.4} />{t("Edit host")}
+                </button>
               )}
               {/* Each recon view adds the kind of object it lists; the totals row
                   below carries that view's filters. */}
-              {sec === "hosts" && rv === "ips" && (
+              {sec === "hosts" && rv === "ips" && !state.ipImportOpen && !_ipd && (
                 <>
-                  <button className="clk iconbtn" onClick={() => openReconExport("ips")} style={{ height: 42, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "600 13px Inter,sans-serif", color: "#5A6B84", display: "flex", alignItems: "center", gap: 8 }}>
-                    <Icon name="download" size={16} />Export
+                  <button className="clk" onClick={() => openReconExport("ips")} style={{ height: 42, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-accent-2)", display: "inline-flex", alignItems: "center", gap: 7 }}>
+                    <Icon name="download" size={16} sw={2.2} color="var(--st-accent-2)" />{t("Export")}
                   </button>
-                  <button className="addbtn clk" onClick={() => openEditor("ip", "add", -1)} style={{ height: 42 }}>
-                    <Icon name="plus" size={15} color="#fff" sw={2.6} />Add IP
+                  <button className="addbtn clk" onClick={openIpImport} style={{ height: 42 }}>
+                    <Icon name="plus" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Add IPs")}
                   </button>
                 </>
               )}
-              {sec === "hosts" && rv === "endpoints" && (
+              {/* The IP card edits the host the address belongs to. */}
+              {sec === "hosts" && rv === "ips" && _ipd && (
+                <button className="addbtn clk" onClick={() => openEditor("host", "edit", _ipd.hostIdx)} style={{ height: 42 }}>
+                  <Icon name="edit" size={15} color="var(--st-on-accent)" sw={2.4} />{t("Edit host")}
+                </button>
+              )}
+              {sec === "hosts" && rv === "endpoints" && !state.epImportOpen && (
                 <>
-                  <button className="clk iconbtn" onClick={() => openReconExport("endpoints")} style={{ height: 42, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "600 13px Inter,sans-serif", color: "#5A6B84", display: "flex", alignItems: "center", gap: 8 }}>
-                    <Icon name="download" size={16} />Export
+                  <button className="clk" onClick={() => openReconExport("endpoints")} style={{ height: 42, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-accent-2)", display: "inline-flex", alignItems: "center", gap: 7 }}>
+                    <Icon name="download" size={16} sw={2.2} color="var(--st-accent-2)" />{t("Export")}
                   </button>
-                  <button className="addbtn clk" onClick={() => openEditor("endpoint", "add", -1)} style={{ height: 42 }}>
-                    <Icon name="plus" size={15} color="#fff" sw={2.6} />Add endpoint
+                  <button className="addbtn clk" onClick={openEpImport} style={{ height: 42 }}>
+                    <Icon name="plus" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Add endpoints")}
                   </button>
                 </>
+              )}
+              {sec === "hosts" && rv === "js" && (
+                <button className="addbtn clk" onClick={submitJsScan} disabled={isFarmJobInFlight(state.jsFarmJob?.status ?? "")} style={{ height: 42, opacity: isFarmJobInFlight(state.jsFarmJob?.status ?? "") ? 0.6 : 1 }}>
+                  <Icon name="search" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Scan JS")}
+                </button>
               )}
               {/* В карточке уязвимости кнопка живёт в строке «All findings» (см. renderVulnDetail). */}
               {sec === "vulns" && state.openVulnId == null && (
-                <button className="addbtn clk" onClick={() => openEditor("vuln", "add", -1)} style={{ height: 42 }}><Icon name="plus" size={15} color="#fff" sw={2.6} />Add issue</button>
+                <>
+                  <button className="clk" onClick={openBulkJira} style={{ height: 42, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-accent-2)", display: "inline-flex", alignItems: "center", gap: 7 }}>
+                    <Icon name="upload" size={15} sw={2.2} color="var(--st-accent-2)" />{t("Export all to Jira")}
+                  </button>
+                  <button className="addbtn clk" onClick={() => openEditor("vuln", "add", -1)} style={{ height: 42 }}><Icon name="plus" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Add issue")}</button>
+                </>
               )}
               {sec === "notes" && (
-                <button className="addbtn clk" onClick={() => openNoteEditor("add", -1)} style={{ height: 42 }}><Icon name="plus" size={15} color="#fff" sw={2.6} />Add note</button>
+                <button className="addbtn clk" onClick={() => openNoteEditor("add", -1)} style={{ height: 42 }}><Icon name="plus" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Add note")}</button>
+              )}
+              {sec === "creds" && (
+                <button className="addbtn clk" onClick={() => openEditor("cred", "add", -1)} style={{ height: 42 }}><Icon name="plus" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Add credential")}</button>
               )}
               {sec === "members" && canManageMembers && (
-                <button className="addbtn clk" onClick={() => openEditor("member", "add", -1)} style={{ height: 42 }}><Icon name="plus" size={15} color="#fff" sw={2.6} />Add member</button>
+                <button className="addbtn clk" onClick={() => openEditor("member", "add", -1)} style={{ height: 42 }}><Icon name="plus" size={15} color="var(--st-on-accent)" sw={2.6} />{t("Add member")}</button>
               )}
             </div>
           </div>
@@ -2789,10 +4307,11 @@ export function StormApp() {
           {sec === "hosts" && renderRecon()}
           {sec === "vulns" && renderVulns()}
           {sec === "notes" && (state.noteEditorOpen ? renderNoteEditor() : state.openNoteId != null ? renderNoteViewer() : renderNotes())}
+          {sec === "creds" && renderCreds()}
           {sec === "members" &&
             (canViewMembers
               ? renderMembers()
-              : renderNoAccessPage("Состав команды виден администратору, лиду проекта и его создателю."))}
+              : renderNoAccessPage("The team roster is visible to the admin, the project lead and its creator."))}
           {sec === "activity" && renderActivity()}
         </div>
       </div>
@@ -2801,11 +4320,11 @@ export function StormApp() {
 
   const renderNoAccess = (message: string) => (
     <div className="route" style={{ ...CARD, padding: "48px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 12 }}>
-      <div style={{ width: 48, height: 48, borderRadius: 12, background: "#f1f4f9", color: "#b3bccd", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: 48, height: 48, borderRadius: 12, background: "var(--st-hover)", color: "var(--st-text-faint)", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <Icon name="lock" size={22} sw={1.9} />
       </div>
-      <div style={{ font: "700 15px Inter,sans-serif", color: "#0F1B2D" }}>Restricted</div>
-      <div style={{ fontSize: 13, color: "#8A97AB", maxWidth: 360 }}>{message}</div>
+      <div style={{ font: "700 15px Inter,sans-serif", color: "var(--st-text)" }}>{t("Restricted")}</div>
+      <div style={{ fontSize: 13, color: "var(--st-text-3)", maxWidth: 360 }}>{message}</div>
     </div>
   );
 
@@ -2813,21 +4332,21 @@ export function StormApp() {
      refuses (403/404), or a section that is not theirs (workspace members, the
      project's team). 404 is folded in on purpose: "not found" and "not yours"
      must be indistinguishable, otherwise the id becomes an existence oracle. */
-  const NO_ACCESS_PROJECT = "У вас нет доступа к этому проекту. Он доступен только участникам — попросите администратора или лида добавить вас в команду.";
+  const NO_ACCESS_PROJECT = "You don't have access to this project. It's visible to members only — ask an admin or lead to add you to the team.";
   const renderNoAccessPage = (message: string = NO_ACCESS_PROJECT) => (
     <div className="route" style={{ padding: "40px 48px 36px", width: "100%", display: "flex", justifyContent: "center" }}>
       <div style={{ ...CARD, padding: "56px 40px", maxWidth: 520, width: "100%", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 14, marginTop: 40 }}>
-        <div style={{ width: 64, height: 64, borderRadius: 16, background: "#FCEBED", color: "#C0455B", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 64, height: 64, borderRadius: 16, background: "var(--st-danger-soft)", color: "var(--st-danger)", display: "flex", alignItems: "center", justifyContent: "center" }}>
           <Icon name="lock" size={28} sw={1.9} />
         </div>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 800, letterSpacing: "-.5px", color: "#0F1B2D" }}>Доступа нет</h1>
-        <div style={{ fontSize: 14, color: "#8A97AB", maxWidth: 380, lineHeight: 1.6 }}>{message}</div>
+        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 800, letterSpacing: "-.5px", color: "var(--st-text)" }}>{t("No access")}</h1>
+        <div style={{ fontSize: 14, color: "var(--st-text-3)", maxWidth: 380, lineHeight: 1.6 }}>{message}</div>
         <button
           className="clk"
           onClick={selProjects}
-          style={{ marginTop: 10, height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: "#4C74C7", color: "#fff", font: "700 13.5px Inter,sans-serif", cursor: "pointer" }}
+          style={{ marginTop: 10, height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", cursor: "pointer" }}
         >
-          Вернуться к проектам
+          {t("Back to projects")}
         </button>
       </div>
     </div>
@@ -2837,32 +4356,42 @@ export function StormApp() {
     <div className="route">
       <div style={{ ...CARD, padding: "20px 22px", marginBottom: 18 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-          <div style={{ font: "700 14px Inter,sans-serif", color: "#0F1B2D" }}>Engagement timeline</div>
-          <div className="mono" style={{ fontSize: 12, color: "#8A97AB" }}>{d.start} → {d.end}</div>
+          <div style={{ font: "700 14px Inter,sans-serif", color: "var(--st-text)" }}>{t("Engagement timeline")}</div>
+          <div className="mono" style={{ fontSize: 12, color: "var(--st-text-3)" }}>{d.start} → {d.end}</div>
         </div>
-        <div style={{ height: 10, borderRadius: 6, background: "#eef1f6", overflow: "hidden" }}>
-          <div style={{ width: `${d.progress}%`, height: "100%", background: "linear-gradient(90deg,#4C74C7,#6E93DA)", borderRadius: 6 }} />
+        <div style={{ height: 10, borderRadius: 6, background: "var(--st-bg)", overflow: "hidden" }}>
+          <div style={{ width: `${d.progress}%`, height: "100%", background: "linear-gradient(90deg,var(--st-accent-2),var(--st-accent-2))", borderRadius: 6 }} />
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
-          <span className="mono" style={{ fontSize: 11, color: "#a0abbd" }}>Start</span>
-          <span style={{ font: "600 12px Inter,sans-serif", color: "#5A6B84" }}>{d.progress}% elapsed</span>
-          <span className="mono" style={{ fontSize: 11, color: "#a0abbd" }}>End</span>
+          <span className="mono" style={{ fontSize: 11, color: "var(--st-text-faint)" }}>{t("Start")}</span>
+          <span style={{ font: "600 12px Inter,sans-serif", color: "var(--st-text-2)" }}>{d.progress}{t("% elapsed")}</span>
+          <span className="mono" style={{ fontSize: 11, color: "var(--st-text-faint)" }}>{t("End")}</span>
         </div>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
-        {[
-          { icon: "globe" as const, color: "#3d6fd6", label: "Hosts", value: hosts.length, spark: sparkline(3, hosts.length), stroke: "#3d6fd6", onClick: () => setSection("hosts") },
-          { icon: "alert-triangle" as const, color: "#C0455B", label: "Open vulns", value: openVulnCount, spark: sparkline(7, vulnStCounts.open), stroke: "#C0455B", onClick: goToOpenVulns },
-          { icon: "star" as const, color: "#6E86C6", label: "My findings", value: myFindingsCount, spark: sparkline(11, myFindingsCount), stroke: "#7ea3e6", onClick: goToMyFindings },
-        ].map((c) => (
+        {(() => {
+          // Cumulative sparklines over the engagement window — each add pushes the
+          // line up. Open vulns / my findings chart the creation time of the very
+          // findings that make up the shown count, so the curve lands on that total.
+          const wStart = Date.parse(projRow?.startISO ?? "");
+          const wEnd = Date.parse(projRow?.endISO ?? "");
+          const openVulns = d.vulns.filter((v) => (VSTATUS_OPEN as readonly string[]).includes(v.status));
+          const myVulns = d.vulns.filter((v) => v.author === me);
+          return [
+          { icon: "globe" as const, color: "var(--st-accent-2)", label: "Hosts", value: hosts.length, spark: cumulativeSpark(hosts.map((h) => h.created), wStart, wEnd), stroke: "var(--st-accent-2)", onClick: () => setSection("hosts") },
+          { icon: "alert-triangle" as const, color: "var(--st-danger)", label: "Open vulns", value: openVulnCount, spark: cumulativeSpark(openVulns.map((v) => v.created), wStart, wEnd), stroke: "var(--st-danger)", onClick: goToOpenVulns },
+          { icon: "star" as const, color: "var(--st-purple)", label: "My findings", value: myFindingsCount, spark: cumulativeSpark(myVulns.map((v) => v.created), wStart, wEnd), stroke: "var(--st-purple)", onClick: goToMyFindings },
+          ];
+        })().map((c) => (
           <div key={c.label} className="statc clk" onClick={c.onClick} style={{ ...CARD, padding: "16px 18px", cursor: "pointer" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#8A97AB", font: "600 11.5px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--st-text-3)", font: "600 11.5px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase" }}>
               <Icon name={c.icon} size={15} color={c.color} sw={2.1} />{c.label}
             </div>
             <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginTop: 8 }}>
-              <div className="mono" style={{ fontWeight: 800, fontSize: 26, color: "#0F1B2D", lineHeight: 1, letterSpacing: "-1px" }}>{c.value}</div>
-              <svg width="74" height="30" viewBox="0 0 74 30" fill="none" style={{ flex: "none" }}>
+              <div className="mono" style={{ fontWeight: 800, fontSize: 26, color: "var(--st-text)", lineHeight: 1, letterSpacing: "-1px" }}>{c.value}</div>
+              <svg width="111" height="30" viewBox="0 0 111 30" fill="none" style={{ flex: "none" }}>
+                <polygon points={sparkArea(c.spark, 111)} fill={c.stroke} fillOpacity={0.15} />
                 <polyline points={c.spark} stroke={c.stroke} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </div>
@@ -2872,17 +4401,17 @@ export function StormApp() {
 
       <div style={{ ...CARD, padding: "20px 22px", marginBottom: 18 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-          <div style={{ font: "700 14px Inter,sans-serif", color: "#0F1B2D" }}>Vulnerabilities across the project</div>
-          <span className="clk" onClick={() => setSection("vulns")} style={{ font: "600 12px Inter,sans-serif", color: "#4C74C7" }}>View all →</span>
+          <div style={{ font: "700 14px Inter,sans-serif", color: "var(--st-text)" }}>{t("Vulnerabilities across the project")}</div>
+          <span className="clk" onClick={() => setSection("vulns")} style={{ font: "600 12px Inter,sans-serif", color: "var(--st-accent-2)" }}>{t("View all →")}</span>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 12 }}>
           {sevBars.map((b) => (
-            <div key={b.label} className="clk" onClick={b.onClick} style={{ border: "1px solid #eef1f6", borderRadius: 13, padding: "15px 16px", background: b.tileBg, cursor: "pointer" }}>
+            <div key={b.label} className="clk" onClick={b.onClick} style={{ border: "1px solid var(--st-bg)", borderRadius: 13, padding: "15px 16px", background: b.tileBg, cursor: "pointer" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                 <span style={{ width: 9, height: 9, borderRadius: 3, background: b.color }} />
                 <span style={{ font: "700 10.5px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", color: b.color }}>{b.label}</span>
               </div>
-              <div className="mono" style={{ fontSize: 30, fontWeight: 800, color: "#0F1B2D", marginTop: 10, lineHeight: 1 }}>{b.count}</div>
+              <div className="mono" style={{ fontSize: 30, fontWeight: 800, color: "var(--st-text)", marginTop: 10, lineHeight: 1 }}>{b.count}</div>
             </div>
           ))}
         </div>
@@ -2891,15 +4420,15 @@ export function StormApp() {
       {canViewMembers && (
         <div style={{ ...CARD, padding: "20px 22px", marginBottom: 18 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-            <div style={{ font: "700 14px Inter,sans-serif", color: "#0F1B2D" }}>Team</div>
-            <span className="clk" onClick={() => setSection("members")} style={{ font: "600 12px Inter,sans-serif", color: "#4C74C7" }}>Manage →</span>
+            <div style={{ font: "700 14px Inter,sans-serif", color: "var(--st-text)" }}>{t("Team")}</div>
+            <span className="clk" onClick={() => setSection("members")} style={{ font: "600 12px Inter,sans-serif", color: "var(--st-accent-2)" }}>{canManageMembers ? "Manage →" : "View all →"}</span>
           </div>
           {d.members.map((m, i) => (
-            <div key={m.name + i} style={{ display: "flex", alignItems: "center", gap: 11, padding: "7px 0", borderTop: "1px solid #f2f4f9" }}>
-              <span className="mono" style={{ width: 30, height: 30, flex: "none", borderRadius: "50%", background: m.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 11px 'JetBrains Mono',monospace" }}>{m.initials}</span>
+            <div key={m.name + i} style={{ display: "flex", alignItems: "center", gap: 11, padding: "7px 0", borderTop: "1px solid var(--st-divider)" }}>
+              <span className="mono" style={{ width: 30, height: 30, flex: "none", borderRadius: "50%", background: m.color, color: "var(--st-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", font: "700 11px 'JetBrains Mono',monospace" }}>{m.initials}</span>
               <div style={{ minWidth: 0 }}>
-                <div style={{ font: "600 13px Inter,sans-serif", color: "#0F1B2D" }}>{m.name}</div>
-                <div className="mono" style={{ fontSize: 11, color: "#a0abbd" }}>{m.role}</div>
+                <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text)" }}>{m.name}</div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--st-text-faint)" }}>{m.role}</div>
               </div>
             </div>
           ))}
@@ -2908,90 +4437,398 @@ export function StormApp() {
     </div>
   );
 
-  const portPills = (ports: Host["ports"]) => (
+  /* One pill per port holds BOTH the port and its status in a single highlight.
+     A down host shows "down" per port; an up host shows the probed HTTP code. */
+  const portPills = (ports: Host["ports"], hostDown = false) => (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-      {portPillsOf(ports).map((p, i) => (
-        <span key={i} className="mono" style={{ fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "2px 8px", background: p.bg, color: p.color }}>{p.label}</span>
-      ))}
+      {portPillsOf(ports).map((p, i) => {
+        const statusText = hostDown ? "down" : p.http != null ? String(p.http) : null;
+        const statusColor = hostDown ? "var(--st-danger)" : p.http != null ? httpStatusColor(p.http) : undefined;
+        return (
+          <span key={i} className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "2px 8px", background: p.bg, color: p.color }}>
+            <span>{p.label}</span>
+            {statusText != null && (
+              <>
+                <span style={{ opacity: 0.55 }}>-</span>
+                <span style={{ color: statusColor }}>{statusText}</span>
+              </>
+            )}
+          </span>
+        );
+      })}
+      {/* A down host with no probed ports still shows a "down" chip in the ports column. */}
+      {hostDown && ports.length === 0 && (
+        <span className="mono" style={{ fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "2px 8px", background: "var(--st-danger-soft)", color: "var(--st-danger)" }}>down</span>
+      )}
     </div>
   );
 
+  /** Признак Cloudflare чипом: true подсвечен, false приглушён и не отвлекает. */
+  const cloudflarePill = (on: boolean) => (
+    <span
+      className="mono"
+      style={{
+        display: "inline-block",
+        fontSize: 11,
+        fontWeight: 700,
+        borderRadius: 6,
+        padding: "2px 8px",
+        background: on ? "var(--st-warn-soft)" : "var(--st-elevated)",
+        color: on ? "var(--st-warn)" : "var(--st-text-3)",
+      }}
+    >
+      {String(on)}
+    </span>
+  );
+
+  /* Имена, в которые резолвится адрес — серыми чипами по образцу портов: один
+     адрес часто отдаёт несколько имён, и перечисление через запятую в узкой
+     ячейке читается хуже, чем набор плашек. Неподтверждённые (PTR без обратного
+     подтверждения) — приглушены и подписаны в title. */
+  const hostnamePills = (names: { hostname: string; source: string; confirmed: boolean }[]) => {
+    if (names.length === 0) return <span style={{ color: "var(--st-text-faint)", fontSize: 12.5 }}>—</span>;
+    return (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+        {names.map((n) => (
+          <span
+            key={n.hostname}
+            className="mono"
+            title={n.confirmed ? undefined : t("unconfirmed")}
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              borderRadius: 6,
+              padding: "2px 8px",
+              background: "var(--st-elevated)",
+              color: n.confirmed ? "var(--st-text-2)" : "var(--st-text-faint)",
+              opacity: n.confirmed ? 1 : 0.75,
+            }}
+          >
+            {n.hostname}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  /* "Add hosts" is a full page (not a modal): paste a list, submit, and the server
+     creates the hosts up front + probes them in the background. On submit we return
+     to the list and statuses fill in live (see the poll effect + the probing banner). */
+  /* One page, two farms. The IPs view used to open this very page verbatim, which
+     is why "Add IPs" led to something titled "Add hosts" — the label was not the
+     bug, the whole page was reused. Parameterised instead of copied so the two
+     stay in step. */
+  const renderImportPage = (cfg: {
+    title: string;
+    pasteLabel: string;
+    placeholder: string;
+    previewPlaceholder: string;
+    raw: string;
+    preview: string;
+    busy: boolean;
+    submitLabel?: string;
+    busyLabel?: string;
+    onRaw: (v: string) => void;
+    onPreview: (v: string) => void;
+    onCancel: () => void;
+    onSubmit: () => void;
+  }) => {
+    const previewCount = cfg.preview.split(/\r?\n/).filter((l) => l.trim()).length;
+    const fillArea: CSSProperties = { flex: 1, minHeight: 0, resize: "none", width: "100%", fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13 };
+    const paneCol: CSSProperties = { display: "flex", flexDirection: "column", minHeight: 0 };
+    return (
+      // Fills the whole section area: the two textareas grow to take all remaining height.
+      <div className="route" style={{ ...CARD, padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", height: "calc(100vh - 210px)" }}>
+        <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 10, padding: "16px 22px", borderBottom: "1px solid var(--st-divider)" }}>
+          <span className="clk" onClick={cfg.onCancel} style={{ display: "flex", color: "var(--st-text-3)", cursor: "pointer" }}><Icon name="chevron-left" size={20} /></span>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{cfg.title}</h2>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "18px 22px 20px" }}>
+          <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div style={paneCol}>
+              <label className="flabel">{cfg.pasteLabel}</label>
+              <textarea className="finp" placeholder={cfg.placeholder} value={cfg.raw} onChange={(e) => cfg.onRaw(e.target.value)} style={fillArea} />
+            </div>
+            <div style={paneCol}>
+              <label className="flabel">{t("Will be imported")}{previewCount ? ` (${previewCount})` : ""}</label>
+              <textarea className="finp" placeholder={cfg.previewPlaceholder} value={cfg.preview} onChange={(e) => cfg.onPreview(e.target.value)} style={fillArea} />
+            </div>
+          </div>
+          <div style={{ flex: "none", display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+            <button className="clk" onClick={cfg.onCancel} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Cancel")}</button>
+            <button className="clk" onClick={cfg.onSubmit} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif" }}>{cfg.busy ? (cfg.busyLabel ?? t("Starting…")) : (cfg.submitLabel ?? t("Probe & add"))}</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderHostImport = () =>
+    renderImportPage({
+      title: t("Add hosts"),
+      pasteLabel: t("Paste hosts"),
+      placeholder: "https://example.com\nwww.example.com\napp.example.com\napi.example.com:8443\nadmin.acme-corp.com\nstaging.example.org",
+      previewPlaceholder: t("parsed hosts appear here…"),
+      raw: state.hostImportRaw,
+      preview: state.hostImportPreview,
+      busy: state.hostImportBusy,
+      onRaw: (v) => setState({ hostImportRaw: v, hostImportPreview: normalizeHostList(v) }),
+      onPreview: (v) => setState({ hostImportPreview: v }),
+      onCancel: closeHostImport,
+      onSubmit: submitHostImport,
+    });
+
+  const renderIpImport = () =>
+    renderImportPage({
+      title: t("Add IPs"),
+      pasteLabel: t("Paste IPs"),
+      placeholder: "1.2.3.4\n1.2.3.4:8443\nhttps://5.6.7.8:443",
+      previewPlaceholder: t("parsed IPs appear here…"),
+      raw: state.ipImportRaw,
+      preview: state.ipImportPreview,
+      busy: state.ipImportBusy,
+      onRaw: (v) => setState({ ipImportRaw: v, ipImportPreview: normalizeIpList(v) }),
+      onPreview: (v) => setState({ ipImportPreview: v }),
+      onCancel: closeIpImport,
+      onSubmit: submitIpImport,
+    });
+
+  const renderEpImport = () =>
+    renderImportPage({
+      title: t("Add endpoints"),
+      pasteLabel: t("Paste endpoints"),
+      placeholder: "https://api.example.com/v1/login\nhttps://example.com/admin\nPOST https://example.com/api/users",
+      previewPlaceholder: t("parsed endpoints appear here…"),
+      submitLabel: t("Add endpoints"),
+      busyLabel: t("Adding…"),
+      raw: state.epImportRaw,
+      preview: state.epImportPreview,
+      busy: state.epImportBusy,
+      onRaw: (v) => setState({ epImportRaw: v, epImportPreview: normalizeEpList(v) }),
+      onPreview: (v) => setState({ epImportPreview: v }),
+      onCancel: closeEpImport,
+      onSubmit: submitEpImport,
+    });
+
+  const searchBox = (placeholder: string, value: string, onChange: (v: string) => void, width: number | string = 280) => (
+    <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width }}>
+      <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--st-text-faint)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
+      <input placeholder={placeholder} value={value} onChange={(e) => onChange(e.target.value)} />
+    </label>
+  );
+
+  const filterPill = (label: string, on: boolean, onClick: () => void) => (
+    <div key={label} className="clk" onClick={onClick} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(on) }}>{label}</div>
+  );
+
+  /** Группа пилюль Cloudflare — одна на таблицы хостов и IP. Выбор взаимо-
+   *  исключающий: true и false вместе — это и есть All, поэтому повторный клик
+   *  по активной пилюле возвращает в All. Метки — те же true/false, что в колонке. */
+  const cfFilterGroup = (value: "" | "yes" | "no", onChange: (v: "" | "yes" | "no") => void) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ font: "700 11px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase", color: "var(--st-text-faint)" }}>{t("Cloudflare")}</span>
+      {filterPill(t("All"), value === "", () => onChange(""))}
+      {filterPill("true", value === "yes", () => onChange(value === "yes" ? "" : "yes"))}
+      {filterPill("false", value === "no", () => onChange(value === "no" ? "" : "no"))}
+    </div>
+  );
+
+  /* The recon filter rows. The export page renders the same row as the view it
+     exports — sharing one definition is what keeps the two from ever disagreeing
+     about which rows are selected. Empty pill selection means All. */
+  const reconFilterRow = (view: ReconView) => {
+    if (view === "ips") {
+      // One box matches either column of the row: the address or its host.
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16, flexWrap: "wrap" }}>
+          {searchBox(t("Filter by IP or host…"), state.ipQuery, (v) => setState({ ipQuery: v }))}
+          <div style={{ flex: 1 }} />
+          {cfFilterGroup(state.ipCfFilter, (v) => setState({ ipCfFilter: v }))}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ font: "700 11px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase", color: "var(--st-text-faint)" }}>{t("Status")}</span>
+            {filterPill(t("All"), state.ipFilters.length === 0, () => setState({ ipFilters: [] }))}
+            {STATUS_FILTER_KEYS.map((k) => filterPill(k, state.ipFilters.includes(k), () => setState((s) => ({ ipFilters: toggleIn(s.ipFilters, k) }))))}
+          </div>
+        </div>
+      );
+    }
+    if (view === "endpoints") {
+      /* Host and path get separate boxes: they are different questions ("everything
+         on this host" vs "where is /login"), so one combined box would answer neither. */
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16, flexWrap: "wrap" }}>
+          {searchBox(t("Filter by host…"), state.epHostQuery, (v) => setState({ epHostQuery: v }), 190)}
+          {searchBox(t("Filter by endpoint…"), state.epPathQuery, (v) => setState({ epPathQuery: v }), 190)}
+          <div style={{ flex: 1 }} />
+          {/* Подписан так же, как Status и Cloudflare, — иначе единственный ряд
+             пилюль без заголовка читается как «непонятно что фильтрует». */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ font: "700 11px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase", color: "var(--st-text-faint)" }}>{t("Method")}</span>
+            {filterPill(t("All"), state.epMethods.length === 0, () => setState({ epMethods: [] }))}
+            {STORM_METHODS.map((m) => filterPill(m, state.epMethods.includes(m), () => setState((s) => ({ epMethods: toggleIn(s.epMethods, m) }))))}
+          </div>
+        </div>
+      );
+    }
+    if (view === "js") {
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16, flexWrap: "wrap" }}>
+          {searchBox(t("Filter by JS URL or host…"), state.jsQuery, (v) => setState({ jsQuery: v }))}
+          <div style={{ flex: 1 }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ font: "700 11px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase", color: "var(--st-text-faint)" }}>{t("Secrets")}</span>
+            {filterPill(t("All"), !state.jsSecretsOnly, () => setState({ jsSecretsOnly: false }))}
+            {filterPill(t("With secrets"), state.jsSecretsOnly, () => setState({ jsSecretsOnly: true }))}
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16, flexWrap: "wrap" }}>
+        {searchBox(t("Filter by host…"), state.hostQuery, (v) => setState({ hostQuery: v }))}
+        <div style={{ flex: 1 }} />
+        {cfFilterGroup(state.hostCfFilter, (v) => setState({ hostCfFilter: v }))}
+        {/* Label + pills share one flex gap so the spacing between filters is equal. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ font: "700 11px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase", color: "var(--st-text-faint)" }}>{t("Status")}</span>
+          {filterPill(t("All"), state.hostFilters.length === 0, () => setState({ hostFilters: [] }))}
+          {STATUS_FILTER_KEYS.map((k) => filterPill(k, state.hostFilters.includes(k), () => setState((s) => ({ hostFilters: toggleIn(s.hostFilters, k) }))))}
+        </div>
+      </div>
+    );
+  };
+
+  /* Recon export: the same two-pane shape as "Add hosts". The left pane is the full
+     list the filters leave on screen; the right pane is that list, editable. Deleting
+     a row on the right drops it from the left too — the left only renders lines that
+     survive on the right, so the two can't drift apart. The filter row sits above the
+     card, where every other section keeps its filters, and it is the *same* row the
+     list view renders: narrowing it there narrows what lands here. */
+  const renderExport = () => {
+    const scope = state.exportScope;
+    const title = scope === "hosts" ? t("Export hosts") : scope === "ips" ? t("Export IP addresses") : t("Export endpoints");
+    const kept = new Set(exportTextLines(state.exportText));
+    const left = exportLinesFor(scope).filter((l) => kept.has(l));
+    const keptCount = exportTextLines(state.exportText).length;
+    const fillArea: CSSProperties = { flex: 1, minHeight: 0, resize: "none", width: "100%", fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13 };
+    const paneCol: CSSProperties = { display: "flex", flexDirection: "column", minHeight: 0 };
+    return (
+      <div className="route">
+        {reconFilterRow(scope === "ips" ? "ips" : scope === "endpoints" ? "endpoints" : "hosts")}
+        {/* Height leaves room for the filter row the card now sits under. */}
+        <div style={{ ...CARD, padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", height: "calc(100vh - 268px)" }}>
+          <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 10, padding: "16px 22px", borderBottom: "1px solid var(--st-divider)" }}>
+            <span className="clk" onClick={closeReconExport} style={{ display: "flex", color: "var(--st-text-3)", cursor: "pointer" }}><Icon name="chevron-left" size={20} /></span>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{title}</h2>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "18px 22px 20px" }}>
+            <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <div style={paneCol}>
+                <label className="flabel">{t("Found")}{left.length ? ` (${left.length})` : ""}</label>
+                <textarea className="finp" readOnly value={left.join("\n")} style={{ ...fillArea, background: "var(--st-sunken)", color: "var(--st-text-2)" }} />
+              </div>
+              <div style={paneCol}>
+                <label className="flabel">{t("Will be exported")}{keptCount ? ` (${keptCount})` : ""}</label>
+                <textarea
+                  className="finp"
+                  value={state.exportText}
+                  onChange={(e) => setState({ exportText: e.target.value })}
+                  style={fillArea}
+                />
+              </div>
+            </div>
+            <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 10, marginTop: 16 }}>
+              {/* Endpoints can also go out as an OpenAPI doc, rebuilt from these lines. */}
+              {scope === "endpoints" && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {filterPill(t("List"), state.exportFormat === "list", () => setState({ exportFormat: "list" }))}
+                  {filterPill(t("Swagger (OpenAPI 3)"), state.exportFormat === "openapi", () => setState({ exportFormat: "openapi" }))}
+                </div>
+              )}
+              <div style={{ flex: 1 }} />
+              <button className="clk" onClick={closeReconExport} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Cancel")}</button>
+              <button className="clk" onClick={doReconExport} disabled={keptCount === 0} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: keptCount === 0 ? "var(--st-accent-muted)" : "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", cursor: keptCount === 0 ? "default" : "pointer" }}>{t("Download")}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderRecon = () => {
+    if (state.exportPageOpen) return renderExport();
     if (rv === "ips") {
+      if (state.ipImportOpen) return renderIpImport();
+      if (_ipd) return renderIpDetail(_ipd);
+      const ipFarmRunning = isFarmJobInFlight(state.ipFarmJob?.status ?? "");
+      // Grid shared by the header and every row — Status is gone, Cloudflare took its place.
+      const ipGrid = "minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr) 104px 72px";
       return (
         <div className="route">
-          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16, flexWrap: "wrap" }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "#5A6B84", background: "#fff", border: "1px solid #e9edf4", borderRadius: 20, padding: "7px 13px" }}>Total IPs <b className="mono" style={{ color: "#0F1B2D" }}>{ipsRows.length}</b></span>
-            <div style={{ flex: 1 }} />
-            {/* One box for both columns of the row: the address or its host. */}
-            <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 280 }}>
-              <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
-              <input placeholder="Search by IP or host…" value={state.ipQuery} onChange={(e) => setState({ ipQuery: e.target.value })} />
-            </label>
-          </div>
-          <div style={{ ...CARD, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.4fr) 140px 72px", padding: "13px 20px", borderBottom: "1px solid #eef1f7", font: "700 11px Inter,sans-serif", letterSpacing: ".6px", color: "#a0abbd", textTransform: "uppercase" }}>
-              <div>IP address</div><div>Hostname</div><div>Status</div><div />
+          {reconFilterRow("ips")}
+          {/* Та же плашка, что у фермы хостов: синяя, со спиннером. */}
+          {ipFarmRunning && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, padding: "11px 16px", borderRadius: 12, background: "var(--st-accent-soft)", color: "var(--st-accent)", font: "600 12.5px Inter,sans-serif" }}>
+              <span className="storm-spin" style={{ width: 14, height: 14, borderRadius: "50%", border: "2px solid var(--st-accent)", borderTopColor: "transparent", display: "inline-block" }} />
+              {t("Probing")} {state.ipFarmJob?.targets_total ?? ""} {t("IPs — hostnames and ports update automatically.")}
             </div>
+          )}
+          <div style={{ ...CARD, overflow: "hidden" }}>
+            {/* No column headers over an empty table (same as the hosts table). */}
+            {ipsRows.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: ipGrid, gap: 14, padding: "13px 20px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".6px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+                <div>{t("IP address")}</div><div>{t("Hostname")}</div><div>{t("Ports")}</div><div>{t("Cloudflare")}</div><div />
+              </div>
+            )}
             {ipsRows.map((i, idx) => (
-              <div key={idx} className="prow" style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.4fr) 140px 72px", alignItems: "center", padding: "14px 20px", borderBottom: "1px solid #f2f4f9" }}>
-                <div className="mono" style={{ font: "700 13.5px 'JetBrains Mono',monospace", color: "#0F1B2D" }}>{i.ip}</div>
-                <div className="mono" style={{ fontSize: 12.5, color: "#5A6B84", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.host}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 7, font: "600 12px Inter,sans-serif", color: "#5A6B84" }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: i.statusColor }} />{i.status}</div>
+              <div key={idx} className="prow clk" onClick={() => openIpDetail(i.ip)} style={{ display: "grid", gridTemplateColumns: ipGrid, gap: 14, alignItems: "center", padding: "14px 20px", borderBottom: "1px solid var(--st-divider)" }}>
+                <div style={{ minWidth: 0 }}>
+                  <span className="mono hostname" style={{ font: "700 13.5px 'JetBrains Mono',monospace", color: "var(--st-text)", cursor: "pointer" }}>{i.ip}</span>
+                </div>
+                {/* Every name the address resolves to, on the one row. Unconfirmed
+                    names (PTR with no matching forward record) are dimmed, not hidden. */}
+                <div style={{ minWidth: 0 }} title={i.names.map((n) => n.hostname).join(", ")}>{hostnamePills(i.names)}</div>
+                <div style={{ minWidth: 0 }}>{portPills(i.ports, i.status === "down")}</div>
+                <div>{cloudflarePill(i.cloudflare)}</div>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 2 }}>
                   <div className="actbtn" onClick={i.onEdit}><Icon name="edit" size={15} /></div>
                   <div className="actbtn del" onClick={i.onDelete}><Icon name="trash" size={15} /></div>
                 </div>
               </div>
             ))}
+            {ipsRows.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("No IPs found.")}</div>}
           </div>
         </div>
       );
     }
     if (rv === "endpoints") {
+      if (state.epImportOpen) return renderEpImport();
       return (
         <div className="route">
-          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "#5A6B84", background: "#fff", border: "1px solid #e9edf4", borderRadius: 20, padding: "7px 13px" }}>Total endpoints <b className="mono" style={{ color: "#0F1B2D" }}>{endpointTotal}</b></span>
-            {/* Method pills toggle and combine; empty selection means All. */}
-            <div className="clk" onClick={() => setState({ epMethods: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.epMethods.length === 0) }}>All</div>
-            {STORM_METHODS.map((m) => (
-              <div key={m} className="clk" onClick={() => setState((s) => ({ epMethods: toggleIn(s.epMethods, m) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.epMethods.includes(m)) }}>{m}</div>
-            ))}
-            <div style={{ flex: 1 }} />
-            <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 190 }}>
-              <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
-              <input placeholder="Search by host…" value={state.epHostQuery} onChange={(e) => setState({ epHostQuery: e.target.value })} />
-            </label>
-            <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 190 }}>
-              <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
-              <input placeholder="Search by endpoint…" value={state.epPathQuery} onChange={(e) => setState({ epPathQuery: e.target.value })} />
-            </label>
-          </div>
+          {reconFilterRow("endpoints")}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {endpointGroups.map((g) => (
-              <div key={g.host} style={{ background: "#fff", border: "1px solid #e9edf4", borderRadius: 14, overflow: "hidden" }}>
+              <div key={g.host} style={{ background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 14, overflow: "hidden" }}>
                 <div className="prow clk" onClick={() => toggleEpGroup(g.host)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 18px" }}>
-                  <Icon name="chevron-right" size={15} color="#b3bccd" sw={2.4} style={{ transform: g.expanded ? "rotate(90deg)" : "none", transition: "transform .2s" }} />
-                  <Icon name="globe2" size={16} color="#8A97AB" />
-                  <span className="mono" style={{ font: "700 14px 'JetBrains Mono',monospace", color: "#0F1B2D", flex: 1 }}>{g.host}</span>
-                  <span className="mono" style={{ fontSize: 11.5, fontWeight: 700, color: "#5A6B84", background: "#f1f4f9", borderRadius: 7, padding: "3px 9px" }}>{g.count}</span>
+                  <Icon name="chevron-right" size={15} color="var(--st-text-faint)" sw={2.4} style={{ transform: g.expanded ? "rotate(90deg)" : "none", transition: "transform .2s" }} />
+                  <Icon name="globe2" size={16} color="var(--st-text-3)" />
+                  <span className="mono" style={{ font: "700 14px 'JetBrains Mono',monospace", color: "var(--st-text)", flex: 1 }}>{g.host}</span>
+                  <span className="mono" style={{ fontSize: 11.5, fontWeight: 700, color: "var(--st-text-2)", background: "var(--st-hover)", borderRadius: 7, padding: "3px 9px" }}>{g.count}</span>
                 </div>
                 {g.expanded && (
-                  <div style={{ borderTop: "1px solid #f2f4f9", animation: "storm-fade .2s ease both" }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "72px minmax(0,1fr) 90px 96px", gap: 10, padding: "11px 20px 11px 50px", borderBottom: "1px solid #f2f4f9", font: "700 10.5px Inter,sans-serif", letterSpacing: ".5px", color: "#a0abbd", textTransform: "uppercase" }}>
-                      <div>Method</div><div>Path</div><div>Status</div><div />
+                  <div style={{ borderTop: "1px solid var(--st-divider)", animation: "storm-fade .2s ease both" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "72px minmax(0,1fr) 96px", gap: 10, padding: "11px 20px 11px 50px", borderBottom: "1px solid var(--st-divider)", font: "700 10.5px Inter,sans-serif", letterSpacing: ".5px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+                      <div>{t("Method")}</div><div>{t("Path")}</div><div />
                     </div>
                     {g.endpoints.map((e: Endpoint, i: number) => {
                       const m = METHOD[e.m] ?? PORT.closed;
                       return (
-                        <div key={i} className="prow clk" onClick={() => openEndpoint({ method: e.m, path: e.p, host: g.host, hostId: g.hostId, endpointId: e.id })} style={{ display: "grid", gridTemplateColumns: "72px minmax(0,1fr) 90px 96px", alignItems: "center", gap: 10, padding: "11px 20px 11px 50px", borderBottom: "1px solid #f4f6fa" }}>
+                        <div key={i} className="prow clk" onClick={() => openEndpoint({ method: e.m, path: e.p, host: g.host, hostId: g.hostId, endpointId: e.id })} style={{ display: "grid", gridTemplateColumns: "72px minmax(0,1fr) 96px", alignItems: "center", gap: 10, padding: "11px 20px 11px 50px", borderBottom: "1px solid var(--st-elevated)" }}>
                           <span className="mono" style={{ justifySelf: "start", fontWeight: 700, borderRadius: 5, padding: "2px 8px", fontSize: 10.5, background: m.bg, color: m.color }}>{e.m}</span>
-                          <div className="mono" style={{ fontSize: 12.5, color: "#0F1B2D", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.p}</div>
-                          <div className="mono" style={{ fontSize: 12, color: "#2E8B57", fontWeight: 700 }}>{EPSTATUS[e.m] ?? "200"}</div>
+                          <div className="mono" style={{ fontSize: 12.5, color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.p}</div>
                           <div style={{ display: "flex", justifyContent: "flex-end", gap: 2 }}>
-                            <div className="actbtn" title="Copy as cURL" onClick={(ev) => { ev.stopPropagation(); copyCurl({ method: e.m, path: e.p, host: g.host }); }}><Icon name="copy" size={15} /></div>
-                            <div className="actbtn del" title="Delete endpoint" onClick={(ev) => { ev.stopPropagation(); void deleteEndpoint(g.hostId, e.id); }}><Icon name="trash" size={15} /></div>
+                            <div className="actbtn" title={t("Copy as cURL")} onClick={(ev) => { ev.stopPropagation(); copyCurl({ method: e.m, path: e.p, host: g.host }); }}><Icon name="copy" size={15} /></div>
+                            <div className="actbtn del" title={t("Delete endpoint")} onClick={(ev) => { ev.stopPropagation(); void deleteEndpoint(g.hostId, e.id); }}><Icon name="trash" size={15} /></div>
                           </div>
                         </div>
                       );
@@ -3000,43 +4837,132 @@ export function StormApp() {
                 )}
               </div>
             ))}
-            {endpointTotal === 0 && <div style={{ padding: 52, textAlign: "center", color: "#9aa6b8", fontSize: 14, background: "#fff", border: "1px solid #e9edf4", borderRadius: 14 }}>No endpoints discovered.</div>}
+            {endpointTotal === 0 && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14, background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 14 }}>{t("No endpoints discovered.")}</div>}
+          </div>
+        </div>
+      );
+    }
+    if (rv === "js") {
+      const jsRunning = isFarmJobInFlight(state.jsFarmJob?.status ?? "");
+      const fileBase = (url: string) => url.split("/").pop() || url;
+      const kb = (n: number | null) => (n == null ? "" : n < 1024 ? `${n} B` : `${Math.round(n / 1024)} KB`);
+      return (
+        <div className="route">
+          {reconFilterRow("js")}
+          {/* Same blue in-flight banner as the host/IP farms. */}
+          {jsRunning && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, padding: "11px 16px", borderRadius: 12, background: "var(--st-accent-soft)", color: "var(--st-accent)", font: "600 12.5px Inter,sans-serif" }}>
+              <span className="storm-spin" style={{ width: 14, height: 14, borderRadius: "50%", border: "2px solid var(--st-accent)", borderTopColor: "transparent", display: "inline-block" }} />
+              {t("Scanning")} {state.jsFarmJob?.targets_total ?? ""} {t("domains — secrets and paths appear as files are scanned.")}
+            </div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {jsGroups.map((g) => (
+              <div key={g.host} style={{ background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 14, overflow: "hidden" }}>
+                <div className="prow" style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 18px" }}>
+                  <Icon name="globe2" size={16} color="var(--st-text-3)" />
+                  <span className="mono" style={{ font: "700 14px 'JetBrains Mono',monospace", color: "var(--st-text)", flex: 1 }}>{g.host}</span>
+                  <span className="mono" style={{ fontSize: 11.5, fontWeight: 700, color: "var(--st-text-2)", background: "var(--st-hover)", borderRadius: 7, padding: "3px 9px" }}>{g.count}</span>
+                </div>
+                <div style={{ borderTop: "1px solid var(--st-divider)" }}>
+                  {g.files.map((file) => {
+                    const open = state.epExpanded.includes(`js:file:${file.url}`);
+                    return (
+                      <div key={file.id} style={{ borderBottom: "1px solid var(--st-elevated)" }}>
+                        <div className="prow clk" onClick={() => toggleJsFile(file.url)} style={{ display: "grid", gridTemplateColumns: "18px minmax(0,1fr) 72px 72px 68px", alignItems: "center", gap: 12, padding: "12px 20px 12px 22px" }}>
+                          <Icon name="chevron-right" size={14} color="var(--st-text-faint)" sw={2.4} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .2s" }} />
+                          <span className="mono" title={file.url} style={{ fontSize: 12.5, color: file.status === "ok" ? "var(--st-text)" : "var(--st-text-faint)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fileBase(file.url)}</span>
+                          {/* Secret count is the headline signal, so it is colour-flagged. */}
+                          <span className="mono" style={{ fontSize: 11.5, fontWeight: 700, color: file.secrets.length ? "var(--st-danger)" : "var(--st-text-faint)" }}>{file.secrets.length} {t("secrets")}</span>
+                          <span className="mono" style={{ fontSize: 11.5, color: "var(--st-text-3)" }}>{file.endpoints.length} {t("paths")}</span>
+                          <span className="mono" style={{ fontSize: 11, color: "var(--st-text-faint)", textAlign: "right" }}>{file.status === "ok" ? kb(file.size) : file.status}</span>
+                        </div>
+                        {open && (
+                          <div style={{ padding: "4px 20px 16px 40px", animation: "storm-fade .2s ease both" }}>
+                            {file.secrets.length > 0 && (
+                              <div style={{ marginBottom: file.endpoints.length ? 14 : 0 }}>
+                                <div style={{ font: "700 10.5px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase", color: "var(--st-text-faint)", marginBottom: 7 }}>{t("Secrets")}</div>
+                                {file.secrets.map((sec, i) => {
+                                  const c = SECRET_SEV[sec.severity] ?? SECRET_SEV.low;
+                                  return (
+                                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5, minWidth: 0 }}>
+                                      <span className="mono" style={{ flex: "none", fontSize: 10.5, fontWeight: 700, borderRadius: 5, padding: "2px 8px", background: c.bg, color: c.color }}>{sec.kind}</span>
+                                      <span className="mono" style={{ flex: "none", fontSize: 12, color: "var(--st-text-2)" }}>{sec.match}</span>
+                                      {sec.snippet && <span className="mono" title={sec.snippet} style={{ fontSize: 11.5, color: "var(--st-text-faint)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sec.snippet}</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            {file.endpoints.length > 0 && (
+                              <div>
+                                <div style={{ font: "700 10.5px Inter,sans-serif", letterSpacing: ".5px", textTransform: "uppercase", color: "var(--st-text-faint)", marginBottom: 7 }}>{t("Paths")}</div>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                                  {file.endpoints.map((p, i) => (
+                                    <span key={i} className="mono" style={{ fontSize: 11.5, borderRadius: 6, padding: "2px 8px", background: "var(--st-elevated)", color: "var(--st-text-2)" }}>{p}</span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {file.secrets.length === 0 && file.endpoints.length === 0 && (
+                              <div style={{ font: "500 12.5px Inter,sans-serif", color: "var(--st-text-faint)" }}>{file.status === "ok" ? t("Nothing found in this file.") : t("File could not be scanned.")}</div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            {state.apiJsFiles === null && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14, background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 14 }}>{t("Loading JS files…")}</div>}
+            {state.apiJsFiles !== null && jsGroups.length === 0 && (
+              <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14, background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 14 }}>{t("No JS files yet — run Scan JS.")}</div>
+            )}
           </div>
         </div>
       );
     }
     // rv === "hosts"
+    if (state.hostImportOpen) return renderHostImport();
     if (_hd) return renderHostDetail(_hd);
+    const farmRunning = isFarmJobInFlight(state.hostFarmJob?.status ?? "");
+    // Grid shared by the header, each host row and each nested subdomain row.
+    const hostGrid = "24px minmax(0,1.25fr) minmax(0,1fr) 104px 72px";
     return (
       <div className="route">
-        {/* Same toolbar shape as the IPs view: total on the left, search on the right. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 16 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "#5A6B84", background: "#fff", border: "1px solid #e9edf4", borderRadius: 20, padding: "7px 13px" }}>Total hosts <b className="mono" style={{ color: "#0F1B2D" }}>{hostsList.length}</b></span>
-          <div style={{ flex: 1 }} />
-          <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 280 }}>
-            <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
-            <input placeholder="Search by host…" value={state.hostQuery} onChange={(e) => setState({ hostQuery: e.target.value })} />
-          </label>
-        </div>
-        <div style={{ ...CARD, overflow: "hidden" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1.25fr) minmax(0,1fr) 72px", gap: 14, padding: "12px 20px", borderBottom: "1px solid #eef1f7", font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "#a0abbd", textTransform: "uppercase" }}>
-            <div /><div>Host</div><div>Ports</div><div />
+        {/* While a probe job runs, statuses fill in live in the table below. */}
+        {farmRunning && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, padding: "11px 16px", borderRadius: 12, background: "var(--st-accent-soft)", color: "var(--st-accent)", font: "600 12.5px Inter,sans-serif" }}>
+            <span className="storm-spin" style={{ width: 14, height: 14, borderRadius: "50%", border: "2px solid var(--st-accent)", borderTopColor: "transparent", display: "inline-block" }} />
+            {t("Probing")} {state.hostFarmJob?.targets_total ?? ""} {t("hosts — statuses update automatically.")}
           </div>
+        )}
+        {reconFilterRow("hosts")}
+        <div style={{ ...CARD, overflow: "hidden" }}>
+          {/* No column headers over an empty table — only show them with rows. */}
+          {hostsList.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: hostGrid, gap: 14, padding: "12px 20px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+              <div /><div>{t("Host")}</div><div>{t("Ports")}</div><div>{t("Cloudflare")}</div><div />
+            </div>
+          )}
           {hostsList.map(({ h, idx }) => {
             const exp = state.expanded.includes(h.id);
             return (
-              <div key={h.id} style={{ borderBottom: "1px solid #f2f4f9" }}>
-                <div className="prow clk" onClick={() => toggleHost(h.id)} style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1.25fr) minmax(0,1fr) 72px", alignItems: "start", gap: 14, padding: "15px 20px" }}>
-                  <Icon name="chevron-right" size={15} color="#b3bccd" sw={2.4} style={{ marginTop: 3, transform: exp ? "rotate(90deg)" : "none", transition: "transform .2s" }} />
+              <div key={h.id} style={{ borderBottom: "1px solid var(--st-divider)" }}>
+                <div className="prow clk" onClick={() => toggleHost(h.id)} style={{ display: "grid", gridTemplateColumns: hostGrid, alignItems: "start", gap: 14, padding: "15px 20px" }}>
+                  <Icon name="chevron-right" size={15} color="var(--st-text-faint)" sw={2.4} style={{ marginTop: 3, transform: exp ? "rotate(90deg)" : "none", transition: "transform .2s" }} />
                   <div style={{ minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                      <span style={{ width: 8, height: 8, flex: "none", borderRadius: "50%", background: STDOT[h.status] ?? STDOT.unknown }} />
+                      <span style={{ width: 6, height: 6, flex: "none", borderRadius: "50%", background: STDOT[h.status] ?? STDOT.unknown }} />
                       <span className="clk" onClick={(ev) => { ev.stopPropagation(); openHostDetail(h.id); }} style={{ display: "inline-block", minWidth: 0 }}>
-                        <span className="mono hostname" style={{ font: "700 14px 'JetBrains Mono',monospace", color: "#0F1B2D", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }}>{h.host}</span>
+                        <span className="mono hostname" style={{ font: "700 14px 'JetBrains Mono',monospace", color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer" }}>{h.host}</span>
                       </span>
                     </div>
                   </div>
-                  <div style={{ minWidth: 0 }}>{portPills(h.ports)}</div>
+                  <div style={{ minWidth: 0 }}>{portPills(h.ports, h.status === "down")}</div>
+                  {/* True when any address of the host sits in a Cloudflare range. */}
+                  <div style={{ marginTop: 1 }}>{cloudflarePill(h.cloudflare)}</div>
                   <div style={{ display: "flex", justifyContent: "flex-end", gap: 2 }}>
                     <div className="actbtn" onClick={(ev) => { ev.stopPropagation(); openEditor("host", "edit", idx); }}><Icon name="edit" size={15} /></div>
                     <div className="actbtn del" onClick={(ev) => { ev.stopPropagation(); askDelete("host", idx, h.host); }}><Icon name="trash" size={15} /></div>
@@ -3044,93 +4970,166 @@ export function StormApp() {
                 </div>
                 {/* Expanding a host lists its subdomains — the addresses live in the IPs view. */}
                 {exp && (
-                  <div style={{ background: "#fafbfd", animation: "storm-fade .2s ease both" }}>
-                    {subdomainsOf(h).map((sub) => (
-                      <div key={sub.id} className="prow clk" onClick={(ev) => { ev.stopPropagation(); openHostDetail(sub.id); }} style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1.25fr) minmax(0,1fr) 72px", alignItems: "start", gap: 14, padding: "13px 20px 13px 44px", borderTop: "1px solid #f2f4f9" }}>
+                  <div style={{ background: "var(--st-elevated)", animation: "storm-fade .2s ease both" }}>
+                    {visibleSubdomainsOf(h).map((sub) => (
+                      <div key={sub.id} className="prow clk" onClick={(ev) => { ev.stopPropagation(); openHostDetail(sub.id); }} style={{ display: "grid", gridTemplateColumns: hostGrid, alignItems: "start", gap: 14, padding: "13px 20px 13px 44px", borderTop: "1px solid var(--st-divider)" }}>
                         <span style={{ width: 6, height: 6, borderRadius: "50%", background: STDOT[sub.status] ?? STDOT.unknown, marginTop: 8, justifySelf: "end" }} />
                         <div style={{ minWidth: 0 }}>
-                          <span className="mono" style={{ font: "600 13px 'JetBrains Mono',monospace", color: "#334", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{sub.host}</span>
+                          <span className="mono hostname" style={{ font: "600 13px 'JetBrains Mono',monospace", color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block", cursor: "pointer" }}>{sub.host}</span>
                         </div>
-                        <div style={{ minWidth: 0 }}>{portPills(sub.ports)}</div>
-                        <div />
+                        <div style={{ minWidth: 0 }}>{portPills(sub.ports, sub.status === "down")}</div>
+                        <div style={{ marginTop: 1 }}>{cloudflarePill(sub.cloudflare)}</div>
+                        <div style={{ display: "flex", justifyContent: "flex-end", gap: 2 }}>
+                          <div className="actbtn" onClick={(ev) => { ev.stopPropagation(); openEditor("host", "edit", hosts.findIndex((x) => x.id === sub.id)); }}><Icon name="edit" size={15} /></div>
+                          <div className="actbtn del" onClick={(ev) => { ev.stopPropagation(); askDelete("host", hosts.findIndex((x) => x.id === sub.id), sub.host); }}><Icon name="trash" size={15} /></div>
+                        </div>
                       </div>
                     ))}
-                    {subdomainsOf(h).length === 0 && (
-                      <div style={{ padding: "13px 20px 13px 44px", borderTop: "1px solid #f2f4f9", font: "500 12.5px Inter,sans-serif", color: "#a0abbd" }}>No subdomains discovered.</div>
+                    {visibleSubdomainsOf(h).length === 0 && (
+                      <div style={{ padding: "13px 20px 13px 44px", borderTop: "1px solid var(--st-divider)", font: "500 12.5px Inter,sans-serif", color: "var(--st-text-faint)" }}>{t("No subdomains discovered.")}</div>
                     )}
                   </div>
                 )}
               </div>
             );
           })}
-          {state.apiHosts === null && <div style={{ padding: 52, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>Loading hosts…</div>}
-          {state.apiHosts !== null && hostsList.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>No hosts found.</div>}
+          {state.apiHosts === null && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("Loading hosts…")}</div>}
+          {state.apiHosts !== null && hostsList.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("No hosts found.")}</div>}
         </div>
       </div>
     );
   };
 
   const renderHostDetail = (h: Host) => {
-    const hidx = hosts.findIndex((x) => x.id === h.id);
     return (
       <div style={{ animation: "storm-fade .2s ease both" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
-          <span className="clk" onClick={closeHostDetail} style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "#5A6B84", background: "#fff", border: "1px solid #e9edf4", borderRadius: 20, padding: "7px 13px", cursor: "pointer" }}>
-            <Icon name="chevron-left" size={15} />All hosts
+          <span className="clk" onClick={closeHostDetail} style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "var(--st-text-2)", background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 20, padding: "7px 13px", cursor: "pointer" }}>
+            <Icon name="chevron-left" size={15} />{t("All hosts")}
           </span>
         </div>
         <div style={{ ...CARD, padding: "22px 24px", marginBottom: 16 }}>
-          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ width: 9, height: 9, flex: "none", borderRadius: "50%", background: STDOT[h.status] ?? STDOT.unknown }} />
-                <span className="mono" style={{ font: "800 20px 'JetBrains Mono',monospace", color: "#0F1B2D", wordBreak: "break-all" }}>{h.host}</span>
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
-                {h.ips.map((ip, i) => (
-                  <span key={i} className="mono" style={{ fontSize: 11, fontWeight: 600, color: "#5A6B84", background: "#f1f4f9", border: "1px solid #e9edf4", borderRadius: 6, padding: "3px 9px" }}>{ip}</span>
-                ))}
-              </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ width: 6, height: 6, flex: "none", borderRadius: "50%", background: STDOT[h.status] ?? STDOT.unknown }} />
+              <span className="mono" style={{ font: "800 20px 'JetBrains Mono',monospace", color: "var(--st-text)", wordBreak: "break-all" }}>{h.host}</span>
             </div>
-            <button className="clk" onClick={() => openEditor("host", "edit", hidx)} style={{ flex: "none", display: "inline-flex", alignItems: "center", gap: 7, height: 38, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 10, background: "#fff", font: "700 12.5px Inter,sans-serif", color: "#5A6B84", cursor: "pointer" }}>
-              <Icon name="edit" size={14} />Edit host
-            </button>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+              {h.ips.map((ip, i) => (
+                <span key={i} className="mono" style={{ fontSize: 11, fontWeight: 600, color: "var(--st-text-2)", background: "var(--st-hover)", border: "1px solid var(--st-border-light)", borderRadius: 6, padding: "3px 9px" }}>{ip}</span>
+              ))}
+            </div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <span style={{ font: "700 13px Inter,sans-serif", color: "#0F1B2D" }}>Ports <span className="mono" style={{ color: "#8A97AB", fontWeight: 600 }}>{h.ports.length}</span></span>
+          <span style={{ font: "700 13px Inter,sans-serif", color: "var(--st-text)" }}>{t("Ports")} <span className="mono" style={{ color: "var(--st-text-3)", fontWeight: 600 }}>{h.ports.length}</span></span>
         </div>
         <div style={{ ...CARD, overflow: "hidden", marginBottom: 20 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,120px) minmax(0,1fr) 110px", gap: 14, padding: "12px 20px", borderBottom: "1px solid #eef1f7", font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "#a0abbd", textTransform: "uppercase" }}>
-            <div>Port</div><div>Service</div><div>State</div>
-          </div>
+          {h.ports.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0,120px) minmax(0,1fr) 80px 110px", gap: 14, padding: "12px 20px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+              <div>{t("Port")}</div><div>{t("Service")}</div><div>{t("HTTP")}</div><div>{t("State")}</div>
+            </div>
+          )}
           {h.ports.map((p, pi) => (
-            <div key={pi} className="prow" style={{ display: "grid", gridTemplateColumns: "minmax(0,120px) minmax(0,1fr) 110px", alignItems: "center", gap: 14, padding: "14px 20px", borderBottom: "1px solid #f2f4f9" }}>
-              <span className="mono" style={{ font: "700 13px 'JetBrains Mono',monospace", color: "#0F1B2D" }}>{p.n}/{p.proto}</span>
-              <span className="mono" style={{ fontSize: 12.5, color: "#5A6B84", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.svc || "—"}</span>
+            <div key={pi} className="prow" style={{ display: "grid", gridTemplateColumns: "minmax(0,120px) minmax(0,1fr) 80px 110px", alignItems: "center", gap: 14, padding: "14px 20px", borderBottom: "1px solid var(--st-divider)" }}>
+              <span className="mono" style={{ font: "700 13px 'JetBrains Mono',monospace", color: "var(--st-text)" }}>{p.n}/{p.proto}</span>
+              {/* Весь стек технологий чипами (whatweb); пусто → unknown. */}
+              {p.techs.length > 0 ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, minWidth: 0 }}>
+                  {p.techs.map((tech, ti) => (
+                    <span key={ti} className="mono" title={tech.version ? `${tech.name} ${tech.version}` : tech.name} style={{ fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "2px 8px", background: "var(--st-elevated)", color: "var(--st-text-2)" }}>
+                      {tech.name}{tech.version ? ` ${tech.version}` : ""}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span className="mono" style={{ fontSize: 12.5, color: "var(--st-text-faint)" }}>{t("unknown")}</span>
+              )}
+              <span className="mono" style={{ fontSize: 12.5, fontWeight: 700, color: h.status === "down" ? "var(--st-danger)" : p.http != null ? httpStatusColor(p.http) : "var(--st-text-faint)" }}>{h.status === "down" ? "down" : p.http != null ? p.http : "—"}</span>
               <span className="mono" style={{ justifySelf: "start", fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "3px 9px", ...(PORT[p.state] ?? PORT.closed) }}>{p.state}</span>
             </div>
           ))}
-          {h.ports.length === 0 && <div style={{ padding: 40, textAlign: "center", color: "#9aa6b8", fontSize: 13.5 }}>No ports yet.</div>}
+          {h.ports.length === 0 && <div style={{ padding: 40, textAlign: "center", color: "var(--st-text-faint)", fontSize: 13.5 }}>{t("No ports yet.")}</div>}
         </div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <span style={{ font: "700 13px Inter,sans-serif", color: "#0F1B2D" }}>Endpoints <span className="mono" style={{ color: "#8A97AB", fontWeight: 600 }}>{h.endpoints.length}</span></span>
+          <span style={{ font: "700 13px Inter,sans-serif", color: "var(--st-text)" }}>{t("Endpoints")} <span className="mono" style={{ color: "var(--st-text-3)", fontWeight: 600 }}>{h.endpoints.length}</span></span>
         </div>
         <div style={{ ...CARD, overflow: "hidden" }}>
           {h.endpoints.map((e, ei) => {
             const m = METHOD[e.m] ?? PORT.closed;
             return (
-              <div key={ei} className="prow clk" onClick={() => openEndpoint({ method: e.m, path: e.p, host: h.host, hostId: h.id, endpointId: e.id })} style={{ display: "grid", gridTemplateColumns: "72px minmax(0,1fr) 96px", alignItems: "center", gap: 12, padding: "13px 20px", borderBottom: "1px solid #f2f4f9" }}>
+              <div key={ei} className="prow clk" onClick={() => openEndpoint({ method: e.m, path: e.p, host: h.host, hostId: h.id, endpointId: e.id })} style={{ display: "grid", gridTemplateColumns: "72px minmax(0,1fr) 96px", alignItems: "center", gap: 12, padding: "13px 20px", borderBottom: "1px solid var(--st-divider)" }}>
                 <span className="mono" style={{ justifySelf: "start", fontWeight: 700, borderRadius: 5, padding: "2px 8px", fontSize: 10.5, background: m.bg, color: m.color }}>{e.m}</span>
-                <div className="mono" style={{ fontSize: 12.5, color: "#0F1B2D", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.p}</div>
+                <div className="mono" style={{ fontSize: 12.5, color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.p}</div>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 2 }}>
-                  <div className="actbtn" title="Copy as cURL" onClick={(ev) => { ev.stopPropagation(); copyCurl({ method: e.m, path: e.p, host: h.host }); }}><Icon name="copy" size={15} /></div>
-                  <div className="actbtn del" title="Delete endpoint" onClick={(ev) => { ev.stopPropagation(); void deleteEndpoint(h.id, e.id); }}><Icon name="trash" size={15} /></div>
+                  <div className="actbtn" title={t("Copy as cURL")} onClick={(ev) => { ev.stopPropagation(); copyCurl({ method: e.m, path: e.p, host: h.host }); }}><Icon name="copy" size={15} /></div>
+                  <div className="actbtn del" title={t("Delete endpoint")} onClick={(ev) => { ev.stopPropagation(); void deleteEndpoint(h.id, e.id); }}><Icon name="trash" size={15} /></div>
                 </div>
               </div>
             );
           })}
-          {h.endpoints.length === 0 && <div style={{ padding: 40, textAlign: "center", color: "#9aa6b8", fontSize: 13.5 }}>No endpoints yet.</div>}
+          {h.endpoints.length === 0 && <div style={{ padding: 40, textAlign: "center", color: "var(--st-text-faint)", fontSize: 13.5 }}>{t("No endpoints yet.")}</div>}
+        </div>
+      </div>
+    );
+  };
+
+  /* The IP card mirrors the host card: the address takes the host's place in the
+     header, the names it resolves to take the host's IP chips, and the ports table
+     is identical. IPs own no endpoints (those belong to a host), so there is no
+     endpoints section — the resolved hostnames stand in as the address's context. */
+  const renderIpDetail = (row: (typeof ipsRows)[number]) => {
+    return (
+      <div style={{ animation: "storm-fade .2s ease both" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
+          <span className="clk" onClick={closeIpDetail} style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "var(--st-text-2)", background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 20, padding: "7px 13px", cursor: "pointer" }}>
+            <Icon name="chevron-left" size={15} />{t("All IPs")}
+          </span>
+        </div>
+        <div style={{ ...CARD, padding: "22px 24px", marginBottom: 16 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ width: 6, height: 6, flex: "none", borderRadius: "50%", background: STDOT[row.status] ?? STDOT.unknown }} />
+              <span className="mono" style={{ font: "800 20px 'JetBrains Mono',monospace", color: "var(--st-text)", wordBreak: "break-all" }}>{row.ip}</span>
+              {row.cloudflare && (
+                <span className="mono" style={{ fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "3px 9px", background: "var(--st-warn-soft)", color: "var(--st-warn)" }}>{t("Cloudflare")}</span>
+              )}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+              <span style={{ font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>{t("Hostnames")}</span>
+              <span title={row.names.map((n) => n.hostname).join(", ")}>{hostnamePills(row.names)}</span>
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <span style={{ font: "700 13px Inter,sans-serif", color: "var(--st-text)" }}>{t("Ports")} <span className="mono" style={{ color: "var(--st-text-3)", fontWeight: 600 }}>{row.ports.length}</span></span>
+        </div>
+        <div style={{ ...CARD, overflow: "hidden" }}>
+          {row.ports.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0,120px) minmax(0,1fr) 80px 110px", gap: 14, padding: "12px 20px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+              <div>{t("Port")}</div><div>{t("Service")}</div><div>{t("HTTP")}</div><div>{t("State")}</div>
+            </div>
+          )}
+          {row.ports.map((p, pi) => (
+            <div key={pi} className="prow" style={{ display: "grid", gridTemplateColumns: "minmax(0,120px) minmax(0,1fr) 80px 110px", alignItems: "center", gap: 14, padding: "14px 20px", borderBottom: "1px solid var(--st-divider)" }}>
+              <span className="mono" style={{ font: "700 13px 'JetBrains Mono',monospace", color: "var(--st-text)" }}>{p.n}/{p.proto}</span>
+              {/* Весь стек технологий чипами (whatweb); пусто → unknown. */}
+              {p.techs.length > 0 ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, minWidth: 0 }}>
+                  {p.techs.map((tech, ti) => (
+                    <span key={ti} className="mono" title={tech.version ? `${tech.name} ${tech.version}` : tech.name} style={{ fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "2px 8px", background: "var(--st-elevated)", color: "var(--st-text-2)" }}>
+                      {tech.name}{tech.version ? ` ${tech.version}` : ""}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span className="mono" style={{ fontSize: 12.5, color: "var(--st-text-faint)" }}>{t("unknown")}</span>
+              )}
+              <span className="mono" style={{ fontSize: 12.5, fontWeight: 700, color: row.status === "down" ? "var(--st-danger)" : p.http != null ? httpStatusColor(p.http) : "var(--st-text-faint)" }}>{row.status === "down" ? "down" : p.http != null ? p.http : "—"}</span>
+              <span className="mono" style={{ justifySelf: "start", fontSize: 11, fontWeight: 700, borderRadius: 6, padding: "3px 9px", ...(PORT[p.state] ?? PORT.closed) }}>{p.state}</span>
+            </div>
+          ))}
+          {row.ports.length === 0 && <div style={{ padding: 40, textAlign: "center", color: "var(--st-text-faint)", fontSize: 13.5 }}>{t("No ports yet.")}</div>}
         </div>
       </div>
     );
@@ -3140,49 +5139,53 @@ export function StormApp() {
     if (state.openVulnId != null) return renderVulnDetail();
     return (
       <div className="route">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, font: "600 12.5px Inter,sans-serif", color: "#8A97AB" }}>
-            <Icon name="info" size={15} /><b className="mono" style={{ color: "#0F1B2D" }}>{vulns.length}</b> findings on this page
+        {/* Flat wrapping toolbar: a flex spacer keeps the filters right-aligned when
+            they fit and lets them wrap cleanly to the next line otherwise, so a
+            longer (e.g. Russian) label never pushes the layout out of place. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap", rowGap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, font: "600 12.5px Inter,sans-serif", color: "var(--st-text-3)" }}>
+            <Icon name="info" size={15} /><b className="mono" style={{ color: "var(--st-text)" }}>{vulns.length}</b> {t("findings on this page")}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700 }}>AUTHOR</span>
-            <input placeholder="Filter by author…" value={state.vulnFilterAuthor} onChange={(e) => setState({ vulnFilterAuthor: e.target.value })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 10px", borderRadius: 20, background: "#fff", color: "#5A6B84", border: "1px solid #dbe1ec", width: 150 }} />
+          <div style={{ flex: "1 1 auto" }} />
+            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("HOST")}</span>
+            <input placeholder={t("Filter by host…")} value={state.vulnFilterHost} onChange={(e) => setState({ vulnFilterHost: e.target.value })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 10px", borderRadius: 20, background: "var(--st-surface)", color: "var(--st-text-2)", border: "1px solid var(--st-border)", width: 150 }} />
             {/* Status / severity are multi-select: pills toggle, several can be held at
                 once, and clearing the last one falls back to "All". Driven by the token
                 lists so they cannot drift from the backend's vocabularies. */}
-            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700, marginLeft: 6 }}>STATUS</span>
-            <div className="clk" onClick={() => setState({ vulnFilterStatuses: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfS.length === 0) }}>All</div>
+            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700, marginLeft: 6 }}>{t("STATUS")}</span>
+            <div className="clk" onClick={() => setState({ vulnFilterStatuses: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfS.length === 0) }}>{t("All")}</div>
             {VSTATUS_ORDER.map((s) => (
-              <div key={s} className="clk" onClick={() => setState((st) => ({ vulnFilterStatuses: toggleIn(st.vulnFilterStatuses, s) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfS.includes(s)) }}>{VSTATUS_LABEL[s]}</div>
+              <div key={s} className="clk" onClick={() => setState((st) => ({ vulnFilterStatuses: toggleIn(st.vulnFilterStatuses, s) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfS.includes(s)) }}>{t(VSTATUS_LABEL[s])}</div>
             ))}
-            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700, marginLeft: 6 }}>SEVERITY</span>
-            <div className="clk" onClick={() => setState({ vulnFilterSeverities: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfSev.length === 0) }}>All</div>
-            {(["critical", "high", "medium", "low", "info"] as Severity[]).map((s) => (
+            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700, marginLeft: 6 }}>{t("SEVERITY")}</span>
+            <div className="clk" onClick={() => setState({ vulnFilterSeverities: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfSev.length === 0) }}>{t("All")}</div>
+            {(["unknown", "critical", "high", "medium", "low", "info"] as Severity[]).map((s) => (
               <div key={s} className="clk" onClick={() => setState((st) => ({ vulnFilterSeverities: toggleIn(st.vulnFilterSeverities, s) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfSev.includes(s)) }}>{cap(s)}</div>
             ))}
-            <input placeholder="Filter by host…" value={state.vulnFilterHost} onChange={(e) => setState({ vulnFilterHost: e.target.value })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 10px", borderRadius: 20, background: "#fff", color: "#5A6B84", border: "1px solid #dbe1ec", width: 150 }} />
-          </div>
         </div>
         <div style={{ ...CARD, overflow: "hidden" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1.8fr) minmax(0,1fr) 140px 110px 130px 120px 64px", gap: 10, padding: "13px 20px", borderBottom: "1px solid #eef1f7", font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "#a0abbd", textTransform: "uppercase" }}>
-            <div>#</div><div>Title</div><div>Asset</div><div>Status</div><div>Severity</div><div>Author</div><div>Updated</div><div />
-          </div>
+          {vulns.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1.8fr) minmax(0,1fr) 140px 110px 130px 120px 64px", gap: 10, padding: "13px 20px", borderBottom: "1px solid var(--st-divider)", font: "700 11px Inter,sans-serif", letterSpacing: ".5px", color: "var(--st-text-faint)", textTransform: "uppercase" }}>
+              <div>#</div><div>{t("Title")}</div><div>{t("Asset")}</div><div>{t("Status")}</div><div>{t("Severity")}</div><div>{t("Author")}</div><div>{t("Updated")}</div><div />
+            </div>
+          )}
           {vulns.map((v) => (
-            <div key={v.num} className="prow clk" onClick={v.onOpen} style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1.8fr) minmax(0,1fr) 140px 110px 130px 120px 64px", alignItems: "center", gap: 10, padding: "14px 20px", borderBottom: "1px solid #f2f4f9" }}>
-              <div className="mono" style={{ fontSize: 13, color: "#b3bccd", fontWeight: 600 }}>{String(v.num).padStart(2, "0")}</div>
-              <div style={{ font: "600 14px Inter,sans-serif", color: "#0F1B2D", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.title}</div>
-              <div className="mono" style={{ fontSize: 12, color: "#8A97AB", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.host}</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 7, font: "600 12px Inter,sans-serif", color: VSTATUS[v.status] ?? "#6b7a90" }}><span style={{ width: 7, height: 7, flex: "none", borderRadius: "50%", background: VSTATUS[v.status] ?? "#6b7a90" }} />{VSTATUS_LABEL[v.status] ?? v.status}</div>
+            <div key={v.num} className="prow clk" onClick={v.onOpen} style={{ display: "grid", gridTemplateColumns: "48px minmax(0,1.8fr) minmax(0,1fr) 140px 110px 130px 120px 64px", alignItems: "center", gap: 10, padding: "14px 20px", borderBottom: "1px solid var(--st-divider)" }}>
+              <div className="mono" style={{ fontSize: 13, color: "var(--st-text-faint)", fontWeight: 600 }}>{String(v.num).padStart(2, "0")}</div>
+              <div style={{ font: "600 14px Inter,sans-serif", color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.title}</div>
+              <div className="mono" style={{ fontSize: 12, color: "var(--st-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.host}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, font: "600 12px Inter,sans-serif", color: VSTATUS[v.status] ?? "var(--st-text-3)" }}><span style={{ width: 6, height: 6, flex: "none", borderRadius: "50%", background: VSTATUS[v.status] ?? "var(--st-text-3)" }} />{t(VSTATUS_LABEL[v.status] ?? v.status)}</div>
               <span style={{ justifySelf: "start", font: "700 10.5px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 7, padding: "4px 9px", background: SEV[v.sev].bg, color: SEV[v.sev].color }}>{v.sev}</span>
-              <div className="mono" style={{ fontSize: 12, color: "#5A6B84", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.author}</div>
-              <div className="mono" style={{ fontSize: 11.5, color: "#a0abbd" }}>{v.updated}</div>
+              <div className="mono" style={{ fontSize: 12, color: "var(--st-text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.author}</div>
+              <div className="mono" style={{ fontSize: 11.5, color: "var(--st-text-faint)" }}>{v.updated}</div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 2 }}>
+                <div className="actbtn" title={t("Export to Jira")} onClick={(e) => { e.stopPropagation(); openJiraExport(v.id); }}><Icon name="upload" size={15} /></div>
                 <div className="actbtn" onClick={v.onEdit}><Icon name="edit" size={15} /></div>
                 <div className="actbtn del" onClick={v.onDelete}><Icon name="trash" size={15} /></div>
               </div>
             </div>
           ))}
-          {vulns.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>No findings match these filters.</div>}
+          {vulns.length === 0 && <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("No findings match these filters.")}</div>}
         </div>
       </div>
     );
@@ -3194,63 +5197,63 @@ export function StormApp() {
     return (
       <div style={{ width: "100%" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 18 }}>
-          <span className="clk" onClick={closeVulnDetail} style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "#5A6B84", background: "#fff", border: "1px solid #e9edf4", borderRadius: 20, padding: "7px 13px", cursor: "pointer" }}>
-            <Icon name="chevron-left" size={15} />All findings
+          <span className="clk" onClick={closeVulnDetail} style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "var(--st-text-2)", background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 20, padding: "7px 13px", cursor: "pointer" }}>
+            <Icon name="chevron-left" size={15} />{t("All findings")}
           </span>
-          <button className="addbtn clk" onClick={() => openEditor("vuln", "add", -1)} style={{ height: 38, flex: "none" }}>
-            <Icon name="plus" size={15} color="#fff" sw={2.6} />Add issue
+          <button className="addbtn clk" onClick={() => state.openVulnId != null && openJiraExport(state.openVulnId)} style={{ height: 38, flex: "none" }}>
+            <Icon name="upload" size={15} color="var(--st-on-accent)" sw={2.4} />{t("Export to Jira")}
           </button>
         </div>
         <div style={{ ...CARD, padding: "26px 28px" }}>
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, marginBottom: 20 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <label className="flabel">Title</label>
+              <label className="flabel">{t("Title")}</label>
               <input className="finp" value={vd.title || ""} onChange={(e) => updateVulnDetailForm("title", e.target.value)} style={{ font: "800 18px Inter,sans-serif" }} />
             </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
-            <div><label className="flabel">Affected host</label><input className="finp" value={vd.host || ""} onChange={(e) => updateVulnDetailForm("host", e.target.value)} /></div>
-            <div><label className="flabel">CWE ID</label><input className="finp mono" placeholder="e.g. CWE-89" value={vd.cwe || ""} onChange={(e) => updateVulnDetailForm("cwe", e.target.value)} /></div>
+            <div><label className="flabel">{t("Affected host")}</label><input className="finp" value={vd.host || ""} onChange={(e) => updateVulnDetailForm("host", e.target.value)} /></div>
+            <div><label className="flabel">{t("CWE ID")}</label><input className="finp mono" placeholder={t("e.g. CWE-89")} value={vd.cwe || ""} onChange={(e) => updateVulnDetailForm("cwe", e.target.value)} /></div>
           </div>
           <div style={{ marginBottom: 18 }}>
             <div style={{ display: "flex", alignItems: "flex-end", gap: 14 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <label className="flabel">CVSS 4.0 vector</label>
-                <input className="finp mono" placeholder="CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N" value={vd.vector || ""} onChange={(e) => updateVulnDetailForm("vector", e.target.value)} style={{ width: "100%", fontSize: 12.5 }} />
+                <label className="flabel">{t("CVSS 4.0 vector")}</label>
+                <input className="finp mono" placeholder={t("CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N")} value={vd.vector || ""} onChange={(e) => updateVulnDetailForm("vector", e.target.value)} style={{ width: "100%", fontSize: 12.5 }} />
               </div>
               <div style={{ flex: "none", width: 150 }}>
-                <label className="flabel">Severity</label>
+                <label className="flabel">{t("Severity")}</label>
                 <div className="finp" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, cursor: "default" }}>
                   <span style={{ font: "700 11px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 6, padding: "3px 8px", background: SEV[vdSev].bg, color: SEV[vdSev].color }}>{vdSev}</span>
-                  <span className="mono" style={{ fontSize: 12.5, color: "#5A6B84" }}>{vdScore}</span>
+                  <span className="mono" style={{ fontSize: 12.5, color: "var(--st-text-2)" }}>{vdScore}</span>
                 </div>
               </div>
               <div style={{ flex: "none", width: 170 }}>
-                <label className="flabel">Status</label>
+                <label className="flabel">{t("Status")}</label>
                 <select className="finp" value={vd.status || "open"} onChange={(e) => updateVulnDetailForm("status", e.target.value as VStatus)}>
-                  {VSTATUS_ORDER.map((s) => <option key={s} value={s}>{VSTATUS_LABEL[s]}</option>)}
+                  {VSTATUS_ORDER.map((s) => <option key={s} value={s}>{t(VSTATUS_LABEL[s])}</option>)}
                 </select>
               </div>
             </div>
           </div>
           <div style={{ marginBottom: 18 }}>
-            <label className="flabel">Steps to reproduce</label>
+            <label className="flabel">{t("Steps to reproduce")}</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
               {(vd.stepsList ?? []).map((s, i) => {
                 const imgs = (vd.stepImages ?? {})[i] ?? [];
                 return (
                   <div key={i} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <span className="mono" style={{ flex: "none", width: 26, height: 26, borderRadius: 8, background: "#EAF0FC", color: "#2E5FBF", fontWeight: 700, fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center" }}>{i + 1}</span>
-                      <input className="finp" placeholder="Describe this step… (paste a screenshot to attach)" value={s} onChange={(e) => updateVdStep(i, e.target.value)} onPaste={(e) => pasteVdStepImage(i, e)} style={{ flex: 1, fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12.5 }} />
+                      <span className="mono" style={{ flex: "none", width: 26, height: 26, borderRadius: 8, background: "var(--st-accent-soft)", color: "var(--st-accent)", fontWeight: 700, fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center" }}>{i + 1}</span>
+                      <input className="finp" placeholder={t("Describe this step… (paste a screenshot to attach)")} value={s} onChange={(e) => updateVdStep(i, e.target.value)} onPaste={(e) => pasteVdStepImage(i, e)} style={{ flex: 1, fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12.5 }} />
                       <div className="actbtn del" onClick={() => removeVdStep(i)}><Icon name="trash" size={15} /></div>
                     </div>
                     {imgs.length > 0 && (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginLeft: 36 }}>
                         {imgs.map((src, ii) => (
                           <div key={ii} style={{ position: "relative" }}>
-                            <img src={src} alt={`Step ${i + 1} screenshot ${ii + 1}`} title="Click to view" onClick={() => setState({ lightboxSrc: src })} style={{ height: 78, borderRadius: 9, border: "1px solid #e3e8f0", display: "block", cursor: "zoom-in" }} />
-                            <div className="clk" onClick={() => removeVdStepImage(i, ii)} style={{ position: "absolute", top: -7, right: -7, width: 20, height: 20, borderRadius: "50%", background: "#C0455B", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 13px Inter,sans-serif", lineHeight: 1, cursor: "pointer", border: "2px solid #fff" }}>×</div>
+                            <img src={src} alt={`Step ${i + 1} screenshot ${ii + 1}`} title={t("Click to view")} onClick={() => setState({ lightboxSrc: src })} style={{ height: 78, borderRadius: 9, border: "1px solid var(--st-border-strong)", display: "block", cursor: "zoom-in" }} />
+                            <div className="clk" onClick={() => removeVdStepImage(i, ii)} style={{ position: "absolute", top: -7, right: -7, width: 20, height: 20, borderRadius: "50%", background: "var(--st-danger)", color: "var(--st-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", font: "700 13px Inter,sans-serif", lineHeight: 1, cursor: "pointer", border: "2px solid var(--st-surface)" }}>×</div>
                           </div>
                         ))}
                       </div>
@@ -3259,17 +5262,17 @@ export function StormApp() {
                 );
               })}
             </div>
-            <button className="clk" onClick={addVdStep} style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 14px", border: "1px dashed #dbe1ec", borderRadius: 10, background: "#fff", font: "700 12.5px Inter,sans-serif", color: "#5A6B84", cursor: "pointer" }}>
-              <Icon name="plus" size={13} sw={2.4} />Add step
+            <button className="clk" onClick={addVdStep} style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 6, height: 36, padding: "0 14px", border: "1px dashed var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 12.5px Inter,sans-serif", color: "var(--st-text-2)", cursor: "pointer" }}>
+              <Icon name="plus" size={13} sw={2.4} />{t("Add step")}
             </button>
           </div>
-          <div style={{ marginBottom: 18 }}><label className="flabel">Impact</label><textarea className="finp" rows={2} placeholder="Business/security impact if exploited…" value={vd.impact || ""} onChange={(e) => updateVulnDetailForm("impact", e.target.value)} /></div>
-          <div><label className="flabel">Remediation</label><textarea className="finp" rows={3} placeholder="How to fix or mitigate this vulnerability…" value={vd.remediation || ""} onChange={(e) => updateVulnDetailForm("remediation", e.target.value)} /></div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 22, fontSize: 12, color: "#a0abbd" }}>
-            <span>Reported by <b style={{ color: "#7c8aa0" }}>{original?.author}</b> · {original?.updated}</span>
+          <div style={{ marginBottom: 18 }}><label className="flabel">{t("Impact")}</label><textarea className="finp" rows={2} placeholder={t("Business/security impact if exploited…")} value={vd.impact || ""} onChange={(e) => updateVulnDetailForm("impact", e.target.value)} /></div>
+          <div><label className="flabel">{t("Remediation")}</label><textarea className="finp" rows={3} placeholder={t("How to fix or mitigate this vulnerability…")} value={vd.remediation || ""} onChange={(e) => updateVulnDetailForm("remediation", e.target.value)} /></div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 22, fontSize: 12, color: "var(--st-text-faint)" }}>
+            <span>{t("Reported by")} <b style={{ color: "var(--st-text-3)" }}>{original?.author}</b> · {original?.updated}</span>
             <div style={{ display: "flex", gap: 10 }}>
-              <button className="clk" onClick={closeVulnDetail} style={{ height: 40, padding: "0 18px", border: "1px solid #dbe1ec", borderRadius: 10, background: "#fff", font: "700 13px Inter,sans-serif", color: "#5A6B84" }}>Cancel</button>
-              <button className="clk" onClick={saveVulnDetail} style={{ height: 40, padding: "0 20px", border: "none", borderRadius: 10, background: "#4C74C7", color: "#fff", font: "700 13px Inter,sans-serif" }}>Save changes</button>
+              <button className="clk" onClick={closeVulnDetail} style={{ height: 40, padding: "0 18px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Cancel")}</button>
+              <button className="clk" onClick={saveVulnDetail} style={{ height: 40, padding: "0 20px", border: "none", borderRadius: 10, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif" }}>{t("Save changes")}</button>
             </div>
           </div>
         </div>
@@ -3289,6 +5292,75 @@ export function StormApp() {
       .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   };
 
+  /* The project credential vault: a shared table of username/password accounts.
+     Passwords are masked by default; the eye reveals one row, the copy button
+     lifts a value to the clipboard without revealing it. Everyone who can open
+     the project can view and edit these, like notes. */
+  // Fixed action column (not `auto`) so the header and every row share identical
+  // column widths — otherwise the empty header cell and the 2-button rows compute
+  // different 1fr widths and the "Password" header drifts off its column.
+  const credCols = "34px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 72px";
+  // Fixed-width password box: the mask fills it, so nothing moves when a row is
+  // revealed — the eye/copy buttons stay put (the shift bug). Long values ellipsize.
+  const CRED_MASK = "••••••••••••••••";
+  const renderCreds = () => {
+    if (state.apiCreds === null) {
+      return <div className="route" style={{ ...CARD, padding: 48, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("Loading credentials…")}</div>;
+    }
+    const monoCell: CSSProperties = { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13.5, color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+    const empty = d.creds.length === 0;
+    return (
+      <div className="route" style={{ ...CARD, padding: 0, overflow: "hidden" }}>
+        {/* Column headers only make sense with rows — hide them for an empty vault. */}
+        {!empty && (
+          <div className="mono" style={{ display: "grid", gridTemplateColumns: credCols, gap: 16, alignItems: "center", padding: "11px 20px", borderBottom: "1px solid var(--st-divider)", background: "var(--st-elevated)", fontSize: 11, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--st-text-faint)", fontWeight: 700 }}>
+            <div>#</div>
+            <div>{t("Username")}</div>
+            <div>{t("Password")}</div>
+            <div>{t("Host")}</div>
+            <div />
+          </div>
+        )}
+        {d.creds.map((c, idx) => {
+          const revealed = state.revealedCredIds.includes(c.id);
+          return (
+            <div key={c.id} className="statc" style={{ display: "grid", gridTemplateColumns: credCols, gap: 16, alignItems: "center", padding: "11px 20px", borderBottom: "1px solid var(--st-divider)" }}>
+              {/* row index */}
+              <div className="mono" style={{ fontSize: 13, fontWeight: 600, color: "var(--st-text-faint)" }}>{String(idx + 1).padStart(2, "0")}</div>
+              {/* username + copy — one line */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <span style={{ ...monoCell, flex: "0 1 auto" }}>{c.username || <span style={{ color: "var(--st-text-faint)" }}>—</span>}</span>
+                {c.username && <div className="actbtn" title={t("Copy username")} onClick={() => copyText(c.username, "Username")}><Icon name="copy" size={14} /></div>}
+              </div>
+              {/* password (masked) + reveal + copy — the value box is a fixed width so
+                  revealing never shifts the icons */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <span style={{ ...monoCell, flex: "0 1 18ch" }}>{revealed ? c.password : CRED_MASK}</span>
+                <div className="actbtn" title={revealed ? t("Hide password") : t("Reveal password")} onClick={() => toggleCredReveal(c.id)}><Icon name={revealed ? "lock" : "eye"} size={14} /></div>
+                <div className="actbtn" title={t("Copy password")} onClick={() => copyText(c.password, "Password")}><Icon name="copy" size={14} /></div>
+              </div>
+              {/* host — which host these creds belong to */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <span style={{ ...monoCell, flex: "0 1 auto" }}>{c.host || <span style={{ color: "var(--st-text-faint)" }}>—</span>}</span>
+                {c.host && <div className="actbtn" title={t("Copy host")} onClick={() => copyText(c.host, "Host")}><Icon name="copy" size={14} /></div>}
+              </div>
+              {/* row actions */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
+                <div className="actbtn" title={t("Edit")} onClick={() => openEditor("cred", "edit", idx)}><Icon name="edit" size={15} /></div>
+                <div className="actbtn del" title={t("Delete")} onClick={() => askDelete("cred", idx, c.username || "credential")}><Icon name="trash" size={15} /></div>
+              </div>
+            </div>
+          );
+        })}
+        {empty && (
+          <div style={{ padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>
+            {t("No credentials yet. Add a username and password for this project.")}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderNotes = () => (
     <div className="route" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {d.notes.map((n, idx) => {
@@ -3297,7 +5369,7 @@ export function StormApp() {
           // Clicking a note always opens it rendered — your own notes included.
           <div key={n.id} className="statc clk" onClick={() => openNoteViewer(n.id)} style={{ ...CARD, padding: "18px 20px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-              <div style={{ font: "700 15px Inter,sans-serif", color: "#0F1B2D" }}>{n.title}</div>
+              <div style={{ font: "700 15px Inter,sans-serif", color: "var(--st-text)" }}>{n.title}</div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "none" }}>
                 {mine && (
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -3305,15 +5377,15 @@ export function StormApp() {
                     <div className="actbtn del" onClick={(e) => { e.stopPropagation(); askDelete("note", idx, n.title); }}><Icon name="trash" size={15} /></div>
                   </div>
                 )}
-                <span className="mono" style={{ fontSize: 11.5, color: "#a0abbd" }}>{n.when}</span>
+                <span className="mono" style={{ fontSize: 11.5, color: "var(--st-text-faint)" }}>{n.when}</span>
               </div>
             </div>
-            <div style={{ fontSize: 13, color: "#6b7a90", marginTop: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{notePreview(n.excerpt)}</div>
-            <div className="mono" style={{ fontSize: 11.5, color: "#8A97AB", marginTop: 12 }}>{n.author}</div>
+            <div style={{ fontSize: 13, color: "var(--st-text-3)", marginTop: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{notePreview(n.excerpt)}</div>
+            <div className="mono" style={{ fontSize: 11.5, color: "var(--st-text-3)", marginTop: 12 }}>{n.author}</div>
           </div>
         );
       })}
-      {d.notes.length === 0 && <div style={{ ...CARD, padding: 52, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>No notes yet.</div>}
+      {d.notes.length === 0 && <div style={{ ...CARD, padding: 52, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("No notes yet.")}</div>}
     </div>
   );
 
@@ -3323,30 +5395,30 @@ export function StormApp() {
     const idx = d.notes.findIndex((x) => x.id === state.openNoteId);
     const n = idx === -1 ? undefined : d.notes[idx];
     if (!n) {
-      if (state.apiNotes === null) return <div className="route" style={{ ...CARD, padding: 48, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>Loading note…</div>;
-      return renderNoAccess("Заметка не найдена.");
+      if (state.apiNotes === null) return <div className="route" style={{ ...CARD, padding: 48, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("Loading note…")}</div>;
+      return renderNoAccess("Note not found.");
     }
     const mine = n.author === me;
     return (
       <div className="route" style={{ ...CARD, padding: 0, overflow: "hidden" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 22px", borderBottom: "1px solid #eef1f7" }}>
-          <span className="clk" onClick={closeNoteViewer} style={{ display: "flex", color: "#8A97AB", cursor: "pointer" }}><Icon name="chevron-left" size={20} /></span>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#0F1B2D" }}>{n.title}</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 22px", borderBottom: "1px solid var(--st-divider)" }}>
+          <span className="clk" onClick={closeNoteViewer} style={{ display: "flex", color: "var(--st-text-3)", cursor: "pointer" }}><Icon name="chevron-left" size={20} /></span>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{n.title}</h2>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
             {mine ? (
-              <button className="clk" onClick={() => openNoteEditor("edit", idx)} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 36, padding: "0 14px", border: "1px solid #dbe1ec", borderRadius: 10, background: "#fff", font: "700 12.5px Inter,sans-serif", color: "#5A6B84", cursor: "pointer" }}>
-                <Icon name="edit" size={14} />Edit
+              <button className="clk" onClick={() => openNoteEditor("edit", idx)} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 36, padding: "0 14px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 12.5px Inter,sans-serif", color: "var(--st-text-2)", cursor: "pointer" }}>
+                <Icon name="edit" size={14} />{t("Edit")}
               </button>
             ) : (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 11px Inter,sans-serif", color: "#8A97AB", background: "#f2f4f9", borderRadius: 20, padding: "5px 11px" }}>
-                <Icon name="eye" size={12} />Read only
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 11px Inter,sans-serif", color: "var(--st-text-3)", background: "var(--st-divider)", borderRadius: 20, padding: "5px 11px" }}>
+                <Icon name="eye" size={12} />{t("Read only")}
               </span>
             )}
           </div>
         </div>
         <div style={{ padding: "24px 22px" }}>
           <div style={{ maxWidth: 720 }}>{renderMarkdown(n.excerpt)}</div>
-          <div className="mono" style={{ fontSize: 11.5, color: "#a0abbd", marginTop: 24, paddingTop: 16, borderTop: "1px solid #f0f2f7" }}>{n.author} · {n.when}</div>
+          <div className="mono" style={{ fontSize: 11.5, color: "var(--st-text-faint)", marginTop: 24, paddingTop: 16, borderTop: "1px solid var(--st-elevated)" }}>{n.author} · {n.when}</div>
         </div>
       </div>
     );
@@ -3354,30 +5426,30 @@ export function StormApp() {
 
   const renderNoteEditor = () => (
     <div className="route" style={{ ...CARD, padding: 0, overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "16px 22px", borderBottom: "1px solid #eef1f7" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "16px 22px", borderBottom: "1px solid var(--st-divider)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span className="clk" onClick={closeNoteEditor} style={{ display: "flex", color: "#8A97AB", cursor: "pointer" }}><Icon name="chevron-left" size={20} /></span>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#0F1B2D" }}>{state.noteEditorMode === "add" ? "New note" : "Edit note"}</h2>
+          <span className="clk" onClick={closeNoteEditor} style={{ display: "flex", color: "var(--st-text-3)", cursor: "pointer" }}><Icon name="chevron-left" size={20} /></span>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{state.noteEditorMode === "add" ? "New note" : "Edit note"}</h2>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
-          <button className="clk" onClick={closeNoteEditor} style={{ height: 38, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 10, background: "#fff", font: "700 13px Inter,sans-serif", color: "#5A6B84", cursor: "pointer" }}>Cancel</button>
-          <button className="clk" onClick={saveNote} style={{ height: 38, padding: "0 18px", border: "none", borderRadius: 10, background: "#4C74C7", color: "#fff", font: "700 13px Inter,sans-serif", cursor: "pointer" }}>Save note</button>
+          <button className="clk" onClick={closeNoteEditor} style={{ height: 38, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-text-2)", cursor: "pointer" }}>{t("Cancel")}</button>
+          <button className="clk" onClick={saveNote} style={{ height: 38, padding: "0 18px", border: "none", borderRadius: 10, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", cursor: "pointer" }}>{t("Save note")}</button>
         </div>
       </div>
       <div style={{ padding: "22px 22px 8px" }}>
-        <label className="flabel">Title</label>
-        <input className="finp" placeholder="Give this note a title…" value={state.noteForm.title} onChange={(e) => updateNoteForm("title", e.target.value)} style={{ font: "700 16px Inter,sans-serif", height: 48, background: "#f7f9fc" }} />
+        <label className="flabel">{t("Title")}</label>
+        <input className="finp" placeholder={t("Give this note a title…")} value={state.noteForm.title} onChange={(e) => updateNoteForm("title", e.target.value)} style={{ font: "700 16px Inter,sans-serif", height: 48, background: "var(--st-elevated)" }} />
       </div>
       {/* Markdown renders as you type (### + space → heading, right in the line) —
           the note is still stored as Markdown, so the viewer and the reports read
           exactly what was typed. */}
       <div style={{ padding: "14px 22px 24px" }}>
-        <label className="flabel">Content</label>
-        <Suspense fallback={<div className="stormmd" style={{ minHeight: 260, color: "#9aa6b8", font: "500 14px Inter,sans-serif" }}>Loading editor…</div>}>
+        <label className="flabel">{t("Content")}</label>
+        <Suspense fallback={<div className="stormmd" style={{ minHeight: 260, color: "var(--st-text-faint)", font: "500 14px Inter,sans-serif" }}>{t("Loading editor…")}</div>}>
           <StormMarkdownEditor
             value={state.noteForm.excerpt}
             onChange={(md) => updateNoteForm("excerpt", md)}
-            placeholder="Write your note… «### » makes a heading, «- » a list"
+            placeholder={t("Write your note… «### » makes a heading, «- » a list")}
           />
         </Suspense>
       </div>
@@ -3394,27 +5466,27 @@ export function StormApp() {
         {/* search + role filter */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
           <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 280 }}>
-            <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa6b8" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
-            <input placeholder="Search by username…" value={state.memberQuery} onChange={(e) => setState({ memberQuery: e.target.value })} />
+            <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--st-text-faint)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
+            <input placeholder={t("Search by username…")} value={state.memberQuery} onChange={(e) => setState({ memberQuery: e.target.value })} />
           </label>
           <div style={{ flex: 1 }} />
           {/* Every pill toggles; an empty selection means "All". */}
-          <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700 }}>ROLE</span>
-          <div className="clk" onClick={() => setState({ memberRoles: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.memberRoles.length === 0) }}>All</div>
+          <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("ROLE")}</span>
+          <div className="clk" onClick={() => setState({ memberRoles: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.memberRoles.length === 0) }}>{t("All")}</div>
           {([{ label: "Lead", v: "lead" as const }, { label: "Pentester", v: "pentester" as const }]).map((o) => (
-            <div key={o.v} className="clk" onClick={() => setState((s) => ({ memberRoles: toggleIn(s.memberRoles, o.v) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.memberRoles.includes(o.v)) }}>{o.label}</div>
+            <div key={o.v} className="clk" onClick={() => setState((s) => ({ memberRoles: toggleIn(s.memberRoles, o.v) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(state.memberRoles.includes(o.v)) }}>{t(o.label)}</div>
           ))}
         </div>
         <div style={{ ...CARD, overflow: "hidden" }}>
           {filtered.map(({ m, idx }) => (
-            <div key={m.name + idx} className="prow" style={{ display: "flex", alignItems: "center", gap: 13, padding: "15px 20px", borderBottom: "1px solid #f2f4f9" }}>
-              <span className="mono" style={{ width: 38, height: 38, flex: "none", borderRadius: "50%", background: m.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 13px 'JetBrains Mono',monospace" }}>{m.initials}</span>
+            <div key={m.name + idx} className="prow" style={{ display: "flex", alignItems: "center", gap: 13, padding: "15px 20px", borderBottom: "1px solid var(--st-divider)" }}>
+              <span className="mono" style={{ width: 38, height: 38, flex: "none", borderRadius: "50%", background: m.color, color: "var(--st-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", font: "700 13px 'JetBrains Mono',monospace" }}>{m.initials}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ font: "600 14px Inter,sans-serif", color: "#0F1B2D" }}>{m.name}</span>
+                  <span style={{ font: "600 14px Inter,sans-serif", color: "var(--st-text)" }}>{m.name}</span>
                   <span style={{ font: "700 10px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 6, padding: "2px 8px", background: ROLE[m.role].bg, color: ROLE[m.role].color }}>{m.role}</span>
                 </div>
-                <div className="mono" style={{ fontSize: 12, color: "#a0abbd", marginTop: 2 }}>{m.email}</div>
+                <div className="mono" style={{ fontSize: 12, color: "var(--st-text-faint)", marginTop: 2 }}>{m.email}</div>
               </div>
               {canManageMembers && (
                 <div style={{ display: "flex", gap: 2 }}>
@@ -3423,7 +5495,7 @@ export function StormApp() {
               )}
             </div>
           ))}
-          {filtered.length === 0 && <div style={{ padding: 44, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>No members match.</div>}
+          {filtered.length === 0 && <div style={{ padding: 44, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("No members match.")}</div>}
         </div>
       </div>
     );
@@ -3457,12 +5529,12 @@ export function StormApp() {
       <span className="mono" style={{ flex: "none", width: 10, textAlign: "center", font: "700 12.5px 'JetBrains Mono',monospace", color: tone.color }}>
         {tone.mark}
       </span>
-      <span style={{ font: "600 12.5px 'JetBrains Mono',monospace", color: "#C8D3E4", textOverflow: "ellipsis", overflow: "hidden" }}>{l.text}</span>
+      <span style={{ font: "600 12.5px 'JetBrains Mono',monospace", color: "var(--st-code-text)", textOverflow: "ellipsis", overflow: "hidden" }}>{l.text}</span>
       {/* Severity sits in a chip filled with that severity's own colour. */}
       {l.severity && (
         <span
           className="mono"
-          style={{ flex: "none", font: "700 9.5px 'JetBrains Mono',monospace", letterSpacing: ".4px", textTransform: "uppercase", borderRadius: 4, padding: "3px 6px", background: ACT_SEV[l.severity], color: "#fff" }}
+          style={{ flex: "none", font: "700 9.5px 'JetBrains Mono',monospace", letterSpacing: ".4px", textTransform: "uppercase", borderRadius: 4, padding: "3px 6px", background: ACT_SEV[l.severity], color: "var(--st-on-accent)" }}
         >
           {l.severity}
         </span>
@@ -3477,11 +5549,11 @@ export function StormApp() {
   const renderActivity = () => {
     const logs = state.activity ?? [];
     if (state.activityLoading && logs.length === 0)
-      return <div className="route" style={{ ...CARD, padding: 48, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>Loading activity…</div>;
+      return <div className="route" style={{ ...CARD, padding: 48, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("Loading activity…")}</div>;
     if (state.activityError) return renderNoAccess(state.activityError);
     const groups = activityGroups;
     if (groups.length === 0)
-      return <div className="route" style={{ ...CARD, padding: 48, textAlign: "center", color: "#9aa6b8", fontSize: 14 }}>No activity yet.</div>;
+      return <div className="route" style={{ ...CARD, padding: 48, textAlign: "center", color: "var(--st-text-faint)", fontSize: 14 }}>{t("No activity yet.")}</div>;
     return (
       <div className="route" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {groups.map((g) => {
@@ -3491,7 +5563,7 @@ export function StormApp() {
             <div key={g.key} style={{ ...CARD, padding: "16px 18px", display: "flex", gap: 13 }}>
               <span
                 className="mono"
-                style={{ width: 32, height: 32, flex: "none", borderRadius: "50%", background: g.actor === "System" ? "#EEF3FC" : "#2E5FBF", color: g.actor === "System" ? "#4C74C7" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 11px 'JetBrains Mono',monospace" }}
+                style={{ width: 32, height: 32, flex: "none", borderRadius: "50%", background: g.actor === "System" ? "var(--st-accent-soft)" : "var(--st-accent)", color: g.actor === "System" ? "var(--st-accent-2)" : "var(--st-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", font: "700 11px 'JetBrains Mono',monospace" }}
               >
                 {g.actor === "System" ? <Icon name="clock2" size={15} /> : initialsOf(g.actor)}
               </span>
@@ -3499,20 +5571,20 @@ export function StormApp() {
                 {/* The count reads inline — "admin added 3 IP addresses" — rather
                     than as a separate badge repeating what the list already shows. */}
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                  <div style={{ fontSize: 13.5, color: "#3a4a60", lineHeight: 1.5, flex: 1, minWidth: 0 }}>
-                    <b className="mono" style={{ color: "#0F1B2D" }}>{g.actor}</b> {g.verb} <b style={{ color: "#0F1B2D" }}>{g.subject}</b>
+                  <div style={{ fontSize: 13.5, color: "var(--st-text-2)", lineHeight: 1.5, flex: 1, minWidth: 0 }}>
+                    <b className="mono" style={{ color: "var(--st-text)" }}>{g.actor}</b> {g.verb} <b style={{ color: "var(--st-text)" }}>{g.subject}</b>
                   </div>
-                  <span className="mono" style={{ flex: "none", fontSize: 11.5, color: "#a0abbd" }}>{g.time}</span>
+                  <span className="mono" style={{ flex: "none", fontSize: 11.5, color: "var(--st-text-faint)" }}>{g.time}</span>
                 </div>
-                <div style={{ marginTop: 11, background: "#111C2E", borderRadius: 10, padding: "11px 13px", display: "flex", flexDirection: "column", gap: 6, overflowX: "auto" }}>
+                <div style={{ marginTop: 11, background: "var(--st-code-bg)", borderRadius: 10, padding: "11px 13px", display: "flex", flexDirection: "column", gap: 6, overflowX: "auto" }}>
                   {shown.map((l) => activityLineRow(l, g.tone))}
                   {hidden > 0 && (
                     <div
                       className="clk"
                       onClick={() => setState({ activityModalKey: g.key })}
-                      style={{ marginTop: 3, font: "700 11.5px Inter,sans-serif", color: "#8FB4F5", cursor: "pointer" }}
+                      style={{ marginTop: 3, font: "700 11.5px Inter,sans-serif", color: "var(--st-accent-muted)", cursor: "pointer" }}
                     >
-                      Show more · ещё {hidden}
+                      {t("Show more ·")} {hidden} {t("more")}
                     </div>
                   )}
                 </div>
@@ -3521,9 +5593,9 @@ export function StormApp() {
                   <div
                     className="clk"
                     onClick={() => openVulnDetail(g.vulnId as number)}
-                    style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 5, font: "700 12px Inter,sans-serif", color: "#4C74C7", cursor: "pointer" }}
+                    style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 5, font: "700 12px Inter,sans-serif", color: "var(--st-accent-2)", cursor: "pointer" }}
                   >
-                    Show details<Icon name="chevron-right" size={13} sw={2.4} />
+                    {t("Show details")}<Icon name="chevron-right" size={13} sw={2.4} />
                   </div>
                 )}
               </div>
@@ -3537,26 +5609,27 @@ export function StormApp() {
   // ---------- Profile ----------
   const renderProfile = () => (
     <div className="route" style={{ padding: "40px 48px 36px", width: "100%" }}>
-      {eyebrow([{ label: "Account", onClick: selProjects }, { label: "Profile settings", muted: true }])}
-      <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "#0F1B2D" }}>Profile Settings</h1>
-      <div style={{ fontSize: 13.5, color: "#8A97AB", marginTop: 6 }}>Signed in as <b style={{ color: "#5A6B84" }}>{me}</b> · manage your account, security, integrations &amp; automation</div>
+      {eyebrow([{ label: "Account", muted: true }, { label: "Profile settings", muted: true }])}
+      <h1 style={{ margin: 0, fontSize: 30, fontWeight: 800, letterSpacing: "-.7px", color: "var(--st-text)" }}>{t("Profile Settings")}</h1>
+      <div style={{ fontSize: 13.5, color: "var(--st-text-3)", marginTop: 6 }}>{t("Signed in as")} <b style={{ color: "var(--st-text-2)" }}>{me}</b> · manage your account, security, integrations &amp; automation</div>
 
       <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 22, alignItems: "start", marginTop: 26 }}>
         <div style={{ ...CARD, padding: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 12px 16px" }}>
-            <div style={{ width: 44, height: 44, flex: "none", borderRadius: "50%", background: "#2E5FBF", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 17px 'JetBrains Mono',monospace" }}>{meInitials}</div>
+            {meAvatar(44, 17, meInitials)}
             <div style={{ minWidth: 0 }}>
-              <div style={{ font: "700 14px Inter,sans-serif", color: "#0F1B2D" }}>{meDisplay}</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3, font: "600 11.5px Inter,sans-serif", color: "#2E8B57" }}><Icon name="shield-check" size={12} sw={2.2} />Active</div>
+              <div style={{ font: "700 14px Inter,sans-serif", color: "var(--st-text)" }}>{meDisplay}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3, font: "600 11.5px Inter,sans-serif", color: "var(--st-success)" }}><Icon name="shield-check" size={12} sw={2.2} />{t("Active")}</div>
             </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <div className="clk" onClick={() => setState({ profileTab: "account" })} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 10, cursor: "pointer", font: "600 13.5px Inter,sans-serif", ...pfNav("account") }}><Icon name="user1" size={17} />Account</div>
+            <div className="clk" onClick={() => setState({ profileTab: "account" })} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 10, cursor: "pointer", font: "600 13.5px Inter,sans-serif", ...pfNav("account") }}><Icon name="user1" size={17} />{t("Account")}</div>
             <div className="clk" onClick={() => setState({ profileTab: "security" })} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 10, cursor: "pointer", font: "600 13.5px Inter,sans-serif", ...pfNav("security") }}>
-              <Icon name="lock" size={17} /><span style={{ flex: 1 }}>Security</span>
-              {state.twoFAEnabled && <span className="mono" style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: ".5px", color: "#2E8B57", background: "#E7F5EC", borderRadius: 6, padding: "2px 6px" }}>2FA</span>}
+              <Icon name="lock" size={17} /><span style={{ flex: 1 }}>{t("Security")}</span>
+              {twoFAEnabled && <span className="mono" style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: ".5px", color: "var(--st-success)", background: "var(--st-success-soft)", borderRadius: 6, padding: "2px 6px" }}>{t("2FA")}</span>}
             </div>
             <div className="clk" onClick={() => setState({ profileTab: "api" })} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 10, cursor: "pointer", font: "600 13.5px Inter,sans-serif", ...pfNav("api") }}><Icon name="plug" size={17} />API &amp; Automation</div>
+            <div className="clk" onClick={() => setState({ profileTab: "customizing" })} style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 10, cursor: "pointer", font: "600 13.5px Inter,sans-serif", ...pfNav("customizing") }}><Icon name={theme === "dark" ? "moon" : "sun"} size={17} />{t("Customizing")}</div>
           </div>
         </div>
 
@@ -3564,6 +5637,7 @@ export function StormApp() {
           {state.profileTab === "account" && renderProfileAccount()}
           {state.profileTab === "security" && renderProfileSecurity()}
           {state.profileTab === "api" && renderProfileApi()}
+          {state.profileTab === "customizing" && renderProfileCustomizing()}
         </div>
       </div>
     </div>
@@ -3572,8 +5646,8 @@ export function StormApp() {
   const cardHeader = (icon: Parameters<typeof Icon>[0]["name"], title: string, sub: string, right?: ReactNode) => (
     <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 14, marginBottom: 18 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ width: 38, height: 38, flex: "none", borderRadius: 10, background: "#EAF0FC", color: "#2E5FBF", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name={icon} size={19} /></div>
-        <div><div style={{ font: "700 15px Inter,sans-serif", color: "#0F1B2D" }}>{title}</div><div style={{ fontSize: 12.5, color: "#8A97AB", marginTop: 2 }}>{sub}</div></div>
+        <div style={{ width: 38, height: 38, flex: "none", borderRadius: 10, background: "var(--st-accent-soft)", color: "var(--st-accent)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name={icon} size={19} /></div>
+        <div><div style={{ font: "700 15px Inter,sans-serif", color: "var(--st-text)" }}>{title}</div><div style={{ fontSize: 12.5, color: "var(--st-text-3)", marginTop: 2 }}>{sub}</div></div>
       </div>
       {right}
     </div>
@@ -3584,29 +5658,38 @@ export function StormApp() {
       <div style={{ ...CARD, padding: "22px 24px" }}>
         {cardHeader("image", "Profile Picture", "Shown next to your name across the workspace")}
         <div style={{ display: "flex", alignItems: "center", gap: 28 }}>
-          <div style={{ width: 84, height: 84, flex: "none", borderRadius: "50%", background: "#2E5FBF", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 30px 'JetBrains Mono',monospace" }}>{meInitials[0]}</div>
+          {meAvatar(84, 30, meInitials[0], avatarPreview || (authUser?.avatar_url ?? null))}
           <div style={{ flex: 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <input id="pfFileInput" type="file" accept="image/png,image/jpeg" style={{ display: "none" }} />
-              <label htmlFor="pfFileInput" className="clk" style={{ display: "inline-flex", alignItems: "center", gap: 8, height: 42, padding: "0 18px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "700 13px Inter,sans-serif", color: "#5A6B84", cursor: "pointer" }}><Icon name="image" size={15} />Choose file</label>
-              <button className="clk" style={{ display: "inline-flex", alignItems: "center", gap: 8, height: 42, padding: "0 18px", border: "none", borderRadius: 11, background: "#2E5FBF", color: "#fff", font: "700 13px Inter,sans-serif", cursor: "pointer" }}><Icon name="upload" size={15} color="#fff" />Upload</button>
+              <input id="pfFileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={onAvatarPick} />
+              <label htmlFor="pfFileInput" className="clk" style={{ display: "inline-flex", alignItems: "center", gap: 8, height: 42, padding: "0 18px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-text-2)", cursor: "pointer" }}><Icon name="image" size={15} />{t("Choose file")}</label>
+              <button className="clk" disabled={!avatarFile || avatarUploading} onClick={submitAvatar} style={{ display: "inline-flex", alignItems: "center", gap: 8, height: 42, padding: "0 18px", border: "none", borderRadius: 11, background: !avatarFile || avatarUploading ? "var(--st-accent-muted)" : "var(--st-accent)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", cursor: !avatarFile || avatarUploading ? "not-allowed" : "pointer" }}><Icon name="upload" size={15} color="var(--st-on-accent)" />{avatarUploading ? "Uploading…" : "Upload"}</button>
+              {avatarFile && !avatarUploading && (
+                <button className="clk" onClick={clearAvatarPick} style={{ display: "inline-flex", alignItems: "center", height: 42, padding: "0 14px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-text-3)", cursor: "pointer" }}>{t("Cancel")}</button>
+              )}
             </div>
-            <div style={{ fontSize: 12.5, color: "#a0abbd", marginTop: 12 }}>JPEG / PNG only, up to <b style={{ color: "#7c8aa0" }}>1 MB</b>. Square images look best.</div>
+            <div style={{ fontSize: 12.5, color: "var(--st-text-faint)", marginTop: 12 }}>
+              {avatarFile ? (
+                <span style={{ color: "var(--st-text-2)" }}>{t("Selected:")} <b>{avatarFile.name}</b> {t("— press Upload to save.")}</span>
+              ) : (
+                <>{t("PNG / JPEG / WEBP / GIF, up to")} <b style={{ color: "var(--st-text-3)" }}>{t("5 MB")}</b>{t(". Square images look best.")}</>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
       <div style={{ ...CARD, padding: "22px 24px" }}>
-        {cardHeader("idcard", "Account identity", "Read-only — managed by your administrator", <span style={{ font: "700 11px Inter,sans-serif", color: "#5A6B84", background: "#f1f4f9", border: "1px solid #e6eaf1", borderRadius: 8, padding: "5px 11px" }}>Active</span>)}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", border: "1px solid #eef1f7", borderRadius: 12, overflow: "hidden" }}>
+        {cardHeader("idcard", "Account identity", "Read-only — managed by your administrator", <span style={{ font: "700 11px Inter,sans-serif", color: "var(--st-text-2)", background: "var(--st-hover)", border: "1px solid var(--st-border-light)", borderRadius: 8, padding: "5px 11px" }}>{t("Active")}</span>)}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", border: "1px solid var(--st-divider)", borderRadius: 12, overflow: "hidden" }}>
           {[
-            { label: "Username", value: me, mono: true, color: "#0F1B2D" },
-            { label: "Email", value: meEmail, mono: true, color: "#0F1B2D", small: true },
-            { label: "Role", value: meRoleLabel, mono: false, color: "#2E5FBF" },
-            { label: "User ID", value: String(meId), mono: true, color: "#4C74C7", last: true },
+            { label: "Username", value: me, mono: true, color: "var(--st-text)" },
+            { label: "Email", value: meEmail, mono: true, color: "var(--st-text)", small: true },
+            { label: "Role", value: meRoleLabel, mono: false, color: "var(--st-accent)" },
+            { label: "User ID", value: String(meId), mono: true, color: "var(--st-accent-2)", last: true },
           ].map((c, i) => (
-            <div key={i} style={{ padding: "15px 18px", borderRight: c.last ? "none" : "1px solid #eef1f7" }}>
-              <div className="mono" style={{ fontSize: 10, letterSpacing: ".8px", color: "#a8b2c2", fontWeight: 700, textTransform: "uppercase" }}>{c.label}</div>
+            <div key={i} style={{ padding: "15px 18px", borderRight: c.last ? "none" : "1px solid var(--st-divider)" }}>
+              <div className="mono" style={{ fontSize: 10, letterSpacing: ".8px", color: "var(--st-text-faint)", fontWeight: 700, textTransform: "uppercase" }}>{c.label}</div>
               <div className={c.mono ? "mono" : undefined} style={{ fontSize: c.small ? 13 : 14, color: c.color, fontWeight: c.mono ? 600 : 700, marginTop: 7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...(c.mono ? {} : { font: "700 13px Inter,sans-serif" }) }}>{c.value}</div>
             </div>
           ))}
@@ -3615,35 +5698,104 @@ export function StormApp() {
     </div>
   );
 
+  const renderProfileCustomizing = () => {
+    // One selectable option tile, shared by the Appearance and Language cards.
+    const tile = (key: string, active: boolean, onClick: () => void, icon: Parameters<typeof Icon>[0]["name"], title: string, desc: string) => (
+      <div
+        key={key}
+        className="clk"
+        onClick={onClick}
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 13,
+          padding: "16px 18px",
+          border: `1.5px solid ${active ? "var(--st-accent)" : "var(--st-border-light)"}`,
+          borderRadius: 14,
+          background: active ? "var(--st-accent-soft)" : "var(--st-surface)",
+          cursor: "pointer",
+          transition: "border-color .12s, background .12s",
+        }}
+      >
+        <div style={{ width: 38, height: 38, flex: "none", borderRadius: 10, background: active ? "var(--st-surface)" : "var(--st-hover)", color: active ? "var(--st-accent)" : "var(--st-text-2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Icon name={icon} size={19} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ font: "700 14px Inter,sans-serif", color: active ? "var(--st-accent)" : "var(--st-text)" }}>{title}</span>
+            {active && <Icon name="check-circle" size={15} color="var(--st-accent)" sw={2.2} />}
+          </div>
+          <div style={{ fontSize: 12.5, color: "var(--st-text-3)", marginTop: 4, lineHeight: 1.45 }}>{desc}</div>
+        </div>
+      </div>
+    );
+    const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 14 };
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+        {/* Appearance / theme */}
+        <div style={{ ...CARD, padding: "22px 24px" }}>
+          {cardHeader("sun", t("Appearance"), t("Choose how STORM looks — saved on this browser"))}
+          <div style={grid}>
+            {tile("light", theme === "light", () => setTheme("light"), "sun", t("Light"), t("Bright interface — the STORM default."))}
+            {tile("dark", theme === "dark", () => setTheme("dark"), "moon", t("Dark"), t("Dimmed palette, easier on the eyes in low light."))}
+          </div>
+        </div>
+        {/* Language */}
+        <div style={{ ...CARD, padding: "22px 24px" }}>
+          {cardHeader("globe", t("Language"), t("Language of the interface — saved on this browser"))}
+          <div style={grid}>
+            {tile("en", lang === "en", () => setLang("en"), "globe", "English", t("Interface in English."))}
+            {tile("ru", lang === "ru", () => setLang("ru"), "globe2", "Русский", t("Interface in Russian."))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderProfileSecurity = () => (
     <div style={{ ...CARD, padding: "22px 24px" }}>
       {cardHeader("lock", "Two-factor authentication", "Protect sign-in with a Google Authenticator code")}
-      {state.twoFAEnabled ? (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, border: "1px solid #e7f5ec", background: "#F3FAF6", borderRadius: 12, padding: "14px 16px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Icon name="check-circle" size={18} color="#2E8B57" sw={2.2} /><span style={{ font: "600 13.5px Inter,sans-serif", color: "#0F1B2D" }}>Enabled via Google Authenticator</span></div>
-          <button className="clk" onClick={disableTwoFA} style={{ height: 38, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 10, background: "#fff", font: "700 12.5px Inter,sans-serif", color: "#C0455B", cursor: "pointer" }}>Disable</button>
-        </div>
-      ) : state.twoFASetupOpen ? (
-        <div style={{ border: "1px solid #eef1f7", borderRadius: 12, padding: 18 }}>
-          <div style={{ font: "600 13px Inter,sans-serif", color: "#0F1B2D", marginBottom: 14 }}>1. Scan this QR in Google Authenticator</div>
-          <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
-            <div style={{ width: 120, height: 120, flex: "none", borderRadius: 10, background: "repeating-conic-gradient(#0F1B2D 0% 25%, #fff 0% 50%) 50% / 14px 14px", border: "1px solid #eef1f7" }} />
-            <div>
-              <div style={{ font: "600 13px Inter,sans-serif", color: "#0F1B2D", marginBottom: 6 }}>Or enter this key manually</div>
-              <div className="mono" style={{ fontSize: 13, letterSpacing: 1, background: "#f6f8fc", border: "1px solid #eef1f7", borderRadius: 8, padding: "8px 12px", display: "inline-block" }}>JBSW Y3DP EHPK 3PXP</div>
+      {twoFAEnabled ? (
+        state.twoFADisableOpen ? (
+          <div style={{ border: "1px solid var(--st-divider)", borderRadius: 12, padding: 18 }}>
+            <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text)", marginBottom: 12 }}>{t("Confirm your account password to disable 2FA")}</div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <input className="finp" type="password" autoComplete="current-password" placeholder={t("Account password")} value={state.twoFADisablePassword} onChange={(e) => setState({ twoFADisablePassword: e.target.value })} style={{ maxWidth: 240 }} />
+              <button className="clk" onClick={disableTwoFA} disabled={!state.twoFADisablePassword || state.twoFABusy} style={{ height: 44, padding: "0 18px", border: "none", borderRadius: 11, background: !state.twoFADisablePassword || state.twoFABusy ? "var(--st-danger-muted)" : "var(--st-danger)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", cursor: !state.twoFADisablePassword || state.twoFABusy ? "not-allowed" : "pointer" }}>{state.twoFABusy ? "Disabling…" : "Disable 2FA"}</button>
+              <button className="clk" onClick={cancelDisableTwoFA} style={{ height: 44, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-text-2)", cursor: "pointer" }}>{t("Cancel")}</button>
             </div>
           </div>
-          <div style={{ font: "600 13px Inter,sans-serif", color: "#0F1B2D", margin: "18px 0 10px" }}>2. Enter the 6-digit code</div>
-          <div style={{ display: "flex", gap: 10 }}>
-            <input className="finp" placeholder="000000" value={state.twoFACode} onChange={(e) => setState({ twoFACode: e.target.value })} style={{ maxWidth: 160, font: "700 16px 'JetBrains Mono',monospace", letterSpacing: 4, textAlign: "center" }} />
-            <button className="clk" onClick={confirmTwoFA} style={{ height: 44, padding: "0 18px", border: "none", borderRadius: 11, background: "#2E5FBF", color: "#fff", font: "700 13px Inter,sans-serif", cursor: "pointer" }}>Verify &amp; enable</button>
-            <button className="clk" onClick={cancelTwoFA} style={{ height: 44, padding: "0 16px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "700 13px Inter,sans-serif", color: "#5A6B84", cursor: "pointer" }}>Cancel</button>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, border: "1px solid var(--st-success-soft)", background: "var(--st-success-soft)", borderRadius: 12, padding: "14px 16px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}><Icon name="check-circle" size={18} color="var(--st-success)" sw={2.2} /><span style={{ font: "600 13.5px Inter,sans-serif", color: "var(--st-text)" }}>{t("Enabled via authenticator app")}</span></div>
+            <button className="clk" onClick={openDisableTwoFA} style={{ height: 38, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 12.5px Inter,sans-serif", color: "var(--st-danger)", cursor: "pointer" }}>{t("Disable")}</button>
+          </div>
+        )
+      ) : state.twoFASetupOpen ? (
+        <div style={{ border: "1px solid var(--st-divider)", borderRadius: 12, padding: 18 }}>
+          <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text)", marginBottom: 14 }}>{t("1. Scan this QR in your authenticator app")}</div>
+          <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
+            {state.twoFAQr ? (
+              <img src={state.twoFAQr} alt="TOTP QR code" width={120} height={120} style={{ flex: "none", borderRadius: 10, border: "1px solid var(--st-divider)", imageRendering: "pixelated" }} />
+            ) : (
+              <div style={{ width: 120, height: 120, flex: "none", borderRadius: 10, background: "var(--st-hover)", border: "1px solid var(--st-divider)" }} />
+            )}
+            <div>
+              <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text)", marginBottom: 6 }}>{t("Or enter this key manually")}</div>
+              <div className="mono" style={{ fontSize: 13, letterSpacing: 1, background: "var(--st-hover)", border: "1px solid var(--st-divider)", borderRadius: 8, padding: "8px 12px", display: "inline-block", whiteSpace: "nowrap", maxWidth: "100%", overflowX: "auto" }}>{state.twoFASecret || "…"}</div>
+            </div>
+          </div>
+          <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text)", margin: "18px 0 10px" }}>{t("2. Enter the 6-digit code")}</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <input className="finp" inputMode="numeric" maxLength={6} placeholder="000000" value={state.twoFACode} onChange={(e) => setState({ twoFACode: e.target.value.replace(/\D/g, "") })} style={{ maxWidth: 160, font: "700 16px 'JetBrains Mono',monospace", letterSpacing: 4, textAlign: "center" }} />
+            <button className="clk" onClick={confirmTwoFA} disabled={state.twoFACode.trim().length < 6 || state.twoFABusy} style={{ height: 44, padding: "0 18px", border: "none", borderRadius: 11, background: state.twoFACode.trim().length < 6 || state.twoFABusy ? "var(--st-accent-muted)" : "var(--st-accent)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", cursor: state.twoFACode.trim().length < 6 || state.twoFABusy ? "not-allowed" : "pointer" }}>{state.twoFABusy ? "Verifying…" : "Verify & enable"}</button>
+            <button className="clk" onClick={cancelTwoFA} style={{ height: 44, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-text-2)", cursor: "pointer" }}>{t("Cancel")}</button>
           </div>
         </div>
       ) : (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, border: "1px solid #eef1f7", borderRadius: 12, padding: "14px 16px" }}>
-          <span style={{ font: "600 13.5px Inter,sans-serif", color: "#5A6B84" }}>Two-factor authentication is currently disabled.</span>
-          <button className="clk" onClick={startTwoFA} style={{ height: 38, padding: "0 16px", border: "none", borderRadius: 10, background: "#2E5FBF", color: "#fff", font: "700 12.5px Inter,sans-serif", cursor: "pointer" }}>Enable 2FA</button>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, border: "1px solid var(--st-divider)", borderRadius: 12, padding: "14px 16px" }}>
+          <span style={{ font: "600 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Two-factor authentication is currently disabled.")}</span>
+          <button className="clk" onClick={startTwoFA} disabled={state.twoFABusy} style={{ height: 38, padding: "0 16px", border: "none", borderRadius: 10, background: state.twoFABusy ? "var(--st-accent-muted)" : "var(--st-accent)", color: "var(--st-on-accent)", font: "700 12.5px Inter,sans-serif", cursor: state.twoFABusy ? "not-allowed" : "pointer" }}>{state.twoFABusy ? "Preparing…" : "Enable 2FA"}</button>
         </div>
       )}
     </div>
@@ -3652,24 +5804,29 @@ export function StormApp() {
   const renderProfileApi = () => (
     <div style={{ ...CARD, padding: "22px 24px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <div><div style={{ font: "700 15px Inter,sans-serif", color: "#0F1B2D" }}>API keys</div><div style={{ fontSize: 12.5, color: "#8A97AB", marginTop: 2 }}>Scoped tokens for CI, bots and automation — no interactive login</div></div>
-        <button className="clk" onClick={openApiKeyModal} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 40, padding: "0 16px", border: "none", borderRadius: 10, background: "#2E5FBF", color: "#fff", font: "700 13px Inter,sans-serif", cursor: "pointer" }}><Icon name="plus" size={14} color="#fff" sw={2.2} />Generate new key</button>
+        <div><div style={{ font: "700 15px Inter,sans-serif", color: "var(--st-text)" }}>{t("API keys")}</div><div style={{ fontSize: 12.5, color: "var(--st-text-3)", marginTop: 2 }}>{t("Scoped tokens for CI, bots and automation — no interactive login")}</div></div>
+        <button className="clk" onClick={openApiKeyModal} style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 40, padding: "0 16px", border: "none", borderRadius: 10, background: "var(--st-accent)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", cursor: "pointer" }}><Icon name="plus" size={14} color="var(--st-on-accent)" sw={2.2} />{t("Generate new key")}</button>
       </div>
-      <div style={{ marginTop: 14, border: "1px solid #eef1f7", borderRadius: 12, overflow: "hidden" }}>
+      <div style={{ marginTop: 14, border: "1px solid var(--st-divider)", borderRadius: 12, overflow: "hidden" }}>
         {state.apiKeys.map((k) => (
-          <div key={k.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", borderTop: "1px solid #f2f4f9" }}>
+          <div key={k.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px", borderTop: "1px solid var(--st-divider)" }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ font: "600 13.5px Inter,sans-serif", color: "#0F1B2D" }}>{k.name}</div>
-              <div className="mono" style={{ fontSize: 12, color: "#8A97AB", marginTop: 4 }}>{k.key}</div>
+              <div style={{ font: "600 13.5px Inter,sans-serif", color: "var(--st-text)" }}>{k.name}</div>
+              <div className="mono" style={{ fontSize: 12, color: "var(--st-text-3)", marginTop: 4 }}>{k.key}</div>
+              <div style={{ fontSize: 11, color: "var(--st-text-faint)", marginTop: 4 }}>
+                {k.allProjects ? t("All projects") : `${t("Projects:")} ${k.projectCount ?? 0}`}
+                {" · "}
+                {k.expires ? `until ${k.expires}` : "no expiry"}
+              </div>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 5, maxWidth: 280, justifyContent: "flex-end" }}>
-              {k.scopes.map((sc) => <span key={sc} className="mono" style={{ fontSize: 10, fontWeight: 700, color: "#2E5FBF", background: "#EAF0FC", borderRadius: 6, padding: "3px 8px" }}>{sc}</span>)}
+              {k.scopes.map((sc) => <span key={sc} className="mono" style={{ fontSize: 10, fontWeight: 700, color: "var(--st-accent)", background: "var(--st-accent-soft)", borderRadius: 6, padding: "3px 8px" }}>{sc}</span>)}
             </div>
-            <div className="mono" style={{ fontSize: 11.5, color: "#a0abbd", width: 80, textAlign: "right" }}>{k.created}</div>
+            <div className="mono" style={{ fontSize: 11.5, color: "var(--st-text-faint)", width: 80, textAlign: "right" }}>{k.created}</div>
             <div className="actbtn del" onClick={() => revokeApiKey(k.id)} style={{ flex: "none" }}><Icon name="trash" size={15} /></div>
           </div>
         ))}
-        {state.apiKeys.length === 0 && <div style={{ padding: "22px 16px", textAlign: "center", color: "#9aa6b8", fontSize: 13 }}>No API keys yet.</div>}
+        {state.apiKeys.length === 0 && <div style={{ padding: "22px 16px", textAlign: "center", color: "var(--st-text-faint)", fontSize: 13 }}>{t("No API keys yet.")}</div>}
       </div>
     </div>
   );
@@ -3677,67 +5834,67 @@ export function StormApp() {
   // ---------- Modals ----------
   const modalShell = (open: boolean, onClose: () => void, zIndex: number, width: number, children: ReactNode, align: "center" | "flex-start" = "center", pad = "24px") => (
     <div className={`modalback ${open ? "open" : ""}`} onClick={onClose} style={{ position: "absolute", inset: 0, zIndex, background: "rgba(20,28,40,.42)", display: "flex", alignItems: align, justifyContent: "center", padding: pad, overflow: align === "flex-start" ? "auto" : undefined }}>
-      <div className="modalcard" onClick={stop} style={{ width, maxWidth: "100%", background: "#fff", borderRadius: 20, boxShadow: "0 30px 80px rgba(15,27,45,.3)", padding: "28px 28px 24px" }}>
+      <div className="modalcard" onClick={stop} style={{ width, maxWidth: "100%", background: "var(--st-surface)", borderRadius: 20, boxShadow: "0 30px 80px rgba(15,27,45,.3)", padding: "28px 28px 24px" }}>
         {children}
       </div>
     </div>
   );
 
-  const modalFooter = (onCancel: () => void, onSave: () => void, saveLabel: string, saveBg = "#4C74C7") => (
+  const modalFooter = (onCancel: () => void, onSave: () => void, saveLabel: string, saveBg = "var(--st-accent-2)") => (
     <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 24 }}>
-      <button className="clk" onClick={onCancel} style={{ height: 42, padding: "0 20px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "700 13.5px Inter,sans-serif", color: "#5A6B84" }}>Cancel</button>
-      <button className="clk" onClick={onSave} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: saveBg, color: "#fff", font: "700 13.5px Inter,sans-serif" }}>{saveLabel}</button>
+      <button className="clk" onClick={onCancel} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Cancel")}</button>
+      <button className="clk" onClick={onSave} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: saveBg, color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif" }}>{saveLabel}</button>
     </div>
   );
 
   return (
-    <div className="storm" style={{ height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", background: "#eef1f6", position: "relative" }}>
+    <div className="storm" style={{ height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--st-bg)", position: "relative" }}>
       {/* top app bar */}
-      <header style={{ height: 58, flex: "none", display: "flex", alignItems: "center", gap: 14, padding: "0 22px", background: "#fff", borderBottom: "1px solid #e6eaf1", zIndex: 30 }}>
+      <header style={{ height: 58, flex: "none", display: "flex", alignItems: "center", gap: 14, padding: "0 22px", background: "var(--st-surface)", borderBottom: "1px solid var(--st-border-light)", zIndex: 30 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <SberMark size={23} />
-          <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-.3px" }}><span style={{ color: "#1a2431" }}>Sber</span><span style={{ color: "#1F6FE5" }}>Tech</span></div>
-          <div style={{ width: 1, height: 22, background: "#e2e6ee", margin: "0 4px" }} />
-          <div className="mono" style={{ fontSize: 10.5, letterSpacing: 2, color: "#aeb7c6", fontWeight: 600 }}>OFFENSIVE RESEARCH &amp; MANAGEMENT</div>
+          <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-.3px" }}><span style={{ color: "var(--st-text)" }}>{t("Sber")}</span><span style={{ color: "var(--st-accent-2)" }}>{t("Tech")}</span></div>
+          <div style={{ width: 1, height: 22, background: "var(--st-border-strong)", margin: "0 4px" }} />
+          <div className="mono" style={{ fontSize: 10.5, letterSpacing: 2, color: "var(--st-text-faint)", fontWeight: 600 }}>OFFENSIVE RESEARCH &amp; MANAGEMENT</div>
         </div>
         <div style={{ flex: 1 }} />
         <div className="clk nav iconbtn" onClick={() => toggle("notifOpen")} style={{ width: 40, height: 40, borderRadius: 11, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
-          <Icon name="bell" size={19} color="#6b7a90" />
-          {hasUnread && <span style={{ position: "absolute", top: 6, right: 7, width: 8, height: 8, borderRadius: "50%", background: "#EF5F73", border: "2px solid #fff" }} />}
+          <Icon name="bell" size={19} color="var(--st-text-3)" />
+          {hasUnread && <span style={{ position: "absolute", top: 6, right: 7, width: 8, height: 8, borderRadius: "50%", background: "var(--st-danger)", border: "2px solid var(--st-surface)" }} />}
         </div>
         <div className="clk" onClick={() => toggle("userMenuOpen")} style={{ display: "flex", alignItems: "center", gap: 9, padding: 4, borderRadius: 24 }}>
-          <div style={{ width: 34, height: 34, flex: "none", borderRadius: "50%", background: "#2E5FBF", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 12.5px 'JetBrains Mono',monospace" }}>{meInitials}</div>
-          <Icon name="chevron-down" size={15} color="#9aa6b8" sw={2.2} style={{ transform: state.userMenuOpen ? "rotate(180deg)" : "none", transition: "transform .2s" }} />
+          {meAvatar(34, 12.5, meInitials)}
+          <Icon name="chevron-down" size={15} color="var(--st-text-faint)" sw={2.2} style={{ transform: state.userMenuOpen ? "rotate(180deg)" : "none", transition: "transform .2s" }} />
         </div>
       </header>
 
       {/* user menu */}
       {state.userMenuOpen && <div onClick={() => setState({ userMenuOpen: false })} style={{ position: "absolute", inset: 0, zIndex: 40 }} />}
-      <div className={`menu ${state.userMenuOpen ? "open" : ""}`} style={{ position: "absolute", top: 56, right: 16, width: 270, background: "#fff", border: "1px solid #e6eaf1", borderRadius: 16, boxShadow: "0 20px 54px rgba(15,27,45,.18)", zIndex: 50, overflow: "hidden" }}>
-        <div style={{ padding: "22px 20px 16px", textAlign: "center", borderBottom: "1px solid #f0f2f7" }}>
-          <div style={{ width: 60, height: 60, margin: "0 auto 12px", borderRadius: "50%", border: "1px solid #e6eaf1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}><SberMark size={34} /></div>
-          <div style={{ fontWeight: 700, fontSize: 16, color: "#0F1B2D" }}>{meDisplay}</div>
-          <div className="mono" style={{ fontSize: 12, color: "#9aa6b8", marginTop: 3 }}>{meEmail}</div>
+      <div className={`menu ${state.userMenuOpen ? "open" : ""}`} style={{ position: "absolute", top: 56, right: 16, width: 270, background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 16, boxShadow: "0 20px 54px rgba(15,27,45,.18)", zIndex: 50, overflow: "hidden" }}>
+        <div style={{ padding: "22px 20px 16px", textAlign: "center", borderBottom: "1px solid var(--st-elevated)" }}>
+          <div style={{ width: 60, height: 60, margin: "0 auto 12px", borderRadius: "50%", border: "1px solid var(--st-border-light)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}><SberMark size={34} /></div>
+          <div style={{ fontWeight: 700, fontSize: 16, color: "var(--st-text)" }}>{meDisplay}</div>
+          <div className="mono" style={{ fontSize: 12, color: "var(--st-text-faint)", marginTop: 3 }}>{meEmail}</div>
         </div>
         <div style={{ padding: 8 }}>
-          <div className="nav clk" onClick={openProfile} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", borderRadius: 10, font: "600 13.5px Inter,sans-serif", color: "#334" }}><Icon name="user" size={18} color="#6b7a90" />Profile</div>
-          <div style={{ height: 1, background: "#f0f2f7", margin: "6px 4px" }} />
-          <div className="nav clk" onClick={() => { setState({ userMenuOpen: false }); void signOut(); }} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", borderRadius: 10, font: "600 13.5px Inter,sans-serif", color: "#D14B60" }}><Icon name="logout" size={18} color="currentColor" />Logout</div>
+          <div className="nav clk" onClick={openProfile} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", borderRadius: 10, font: "600 13.5px Inter,sans-serif", color: "var(--st-text)" }}><Icon name="user" size={18} color="var(--st-text-3)" />{t("Profile")}</div>
+          <div style={{ height: 1, background: "var(--st-elevated)", margin: "6px 4px" }} />
+          <div className="nav clk" onClick={() => { setState({ userMenuOpen: false }); void signOut(); }} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", borderRadius: 10, font: "600 13.5px Inter,sans-serif", color: "var(--st-danger)" }}><Icon name="logout" size={18} color="currentColor" />{t("Logout")}</div>
         </div>
       </div>
 
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* sidebar */}
-        <aside className={`sb ${state.sidebarCollapsed ? "collapsed" : ""}`} style={{ width: sideW, flex: "none", background: "#fff", borderRight: "1px solid #e6eaf1", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <aside className={`sb ${state.sidebarCollapsed ? "collapsed" : ""}`} style={{ width: sideW, flex: "none", background: "var(--st-surface)", borderRight: "1px solid var(--st-border-light)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <div className="sbhead" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 14px 18px 18px" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, overflow: "hidden" }}>
-              <div className="lbl" style={{ fontWeight: 800, fontSize: 16, letterSpacing: 3, color: "#1a2431" }}>STORM</div>
+              <div className="lbl" style={{ fontWeight: 800, fontSize: 16, letterSpacing: 3, color: "var(--st-text)" }}>{t("STORM")}</div>
             </div>
-            <div className="clk nav iconbtn" onClick={() => toggle("sidebarCollapsed")} style={{ width: 26, height: 26, flex: "none", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", color: "#b3bccd" }}>
+            <div className="clk nav iconbtn" onClick={() => toggle("sidebarCollapsed")} style={{ width: 26, height: 26, flex: "none", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--st-text-faint)" }}>
               <Icon name="chevrons-left" size={18} color="currentColor" sw={2.4} style={{ transform: state.sidebarCollapsed ? "rotate(180deg)" : "none", transition: "transform .26s ease" }} />
             </div>
           </div>
-          <div className="lbl mono" style={{ padding: "0 20px 8px", fontSize: 10, letterSpacing: 1.5, color: "#b3bccd", fontWeight: 700 }}>WORKSPACE</div>
+          <div className="lbl mono" style={{ padding: "0 20px 8px", fontSize: 10, letterSpacing: 1.5, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("WORKSPACE")}</div>
           <nav style={{ padding: "0 12px", display: "flex", flexDirection: "column", gap: 3 }}>
             {([
               { id: "projects" as const, icon: "folder" as const, label: "Projects", onClick: selProjects },
@@ -3748,7 +5905,7 @@ export function StormApp() {
             ]).map((it) => (
               <div key={it.id} className="nav clk" onClick={it.onClick} style={{ display: "flex", alignItems: "center", gap: 13, padding: "10px 12px", borderRadius: 11, font: "600 14px Inter,sans-serif", color: navColor(it.id), background: navBg(it.id) }}>
                 <Icon name={it.icon} size={19} color="currentColor" style={{ flex: "none" }} />
-                <span className="lbl">{it.label}</span>
+                <span className="lbl">{t(it.label)}</span>
               </div>
             ))}
           </nav>
@@ -3758,18 +5915,23 @@ export function StormApp() {
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
           <main style={{ flex: 1, overflow: "auto" }}>
             {isList && renderProjects()}
+            {isDocs && (
+              <Suspense fallback={<div className="route" style={{ padding: "40px 48px", color: "var(--st-text-faint)", font: "500 14px Inter,sans-serif" }}>{t("Loading docs…")}</div>}>
+                <StormDocs isAdmin={isAdmin} onNavigateWorkspace={selProjects} />
+              </Suspense>
+            )}
             {isStub && renderStub()}
             {/* /members is admin-only (GET /users is too) — say so rather than
                 quietly showing the projects list instead. */}
             {state.view === "workspaceMembers" &&
               (isAdmin
                 ? renderWorkspaceMembers()
-                : renderNoAccessPage("Раздел «Members» доступен только администраторам — здесь заводят пользователей и назначают роли."))}
+                : renderNoAccessPage("The Members section is admin-only — this is where users are created and roles assigned."))}
             {state.view === "detail" && (state.accessDenied ? renderNoAccessPage() : renderDetail())}
             {state.view === "profile" && renderProfile()}
           </main>
-          <footer style={{ flex: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: 16, background: "transparent", fontSize: 12.5, color: "#a0abbd", flexWrap: "wrap" }}>
-            <span style={{ fontWeight: 700, color: "#7c8aa0" }}>STORM</span><span>·</span><span>Licensed to SberTech · Copyright © 2026. All rights reserved.</span>
+          <footer style={{ flex: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: 16, background: "transparent", fontSize: 12.5, color: "var(--st-text-faint)", flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 700, color: "var(--st-text-3)" }}>{t("STORM")}</span><span>·</span><span>{t("Licensed to SberTech · Copyright © 2026. All rights reserved.")}</span>
           </footer>
         </div>
       </div>
@@ -3782,26 +5944,43 @@ export function StormApp() {
         60,
         440,
         <>
-          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px" }}>{state.wsUserMode === "add" ? "Add member" : "Edit member"}</h2>
-          <div style={{ marginTop: 20 }}><label className="flabel">Username</label><input className="finp" placeholder="e.g. i.volkov" value={state.wsUserName} onChange={(e) => setState({ wsUserName: e.target.value })} /></div>
-          <div style={{ marginTop: 16 }}><label className="flabel">Email</label><input className="finp" placeholder="user@sbertech.ru" value={state.wsUserEmail} onChange={(e) => setState({ wsUserEmail: e.target.value })} /></div>
+          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>{state.wsUserMode === "add" ? "Invite member" : "Edit member"}</h2>
+          {state.wsUserMode === "add" ? (
+            <>
+              <div style={{ marginTop: 16 }}><label className="flabel">{t("Email")}</label><input className="finp" placeholder={t("user@sbertech.ru")} value={state.wsUserEmail} onChange={(e) => setState({ wsUserEmail: e.target.value })} /></div>
+            </>
+          ) : (
+            <>
+              {/* Юзернейм неизменяем (даже админом) — как и email: только для чтения. */}
+              <div style={{ marginTop: 20 }}><label className="flabel">{t("Username")}</label><input className="finp" value={state.wsUserName} disabled style={{ background: "var(--st-elevated)", color: "var(--st-text-3)" }} /></div>
+              <div style={{ marginTop: 16 }}><label className="flabel">{t("Email")}</label><input className="finp" placeholder={t("user@sbertech.ru")} value={state.wsUserEmail} disabled style={{ background: "var(--st-elevated)", color: "var(--st-text-3)" }} /></div>
+            </>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 16 }}>
             <div>
-              <label className="flabel">Workspace role</label>
-              <select className="esel" value={state.wsUserRole} onChange={(e) => setState({ wsUserRole: e.target.value as WsRole })}>
-                <option value="user">User</option>
-                <option value="admin">Admin</option>
-              </select>
+              <label className="flabel">{t("Workspace role")}</label>
+              <StormSelect
+                value={state.wsUserRole}
+                onChange={(v) => setState({ wsUserRole: v as WsRole })}
+                options={[
+                  { value: "user", label: "User", dot: WS_ROLE.user.color, desc: "Works on assigned projects" },
+                  { value: "admin", label: "Admin", dot: WS_ROLE.admin.color, desc: "Manages the whole workspace" },
+                ]}
+              />
             </div>
             <div>
-              <label className="flabel">Project role</label>
-              <select className="esel" value={state.wsUserProjectRole} onChange={(e) => setState({ wsUserProjectRole: e.target.value as Role })}>
-                <option value="lead">Lead</option>
-                <option value="pentester">Pentester</option>
-              </select>
+              <label className="flabel">{t("Project role")}</label>
+              <StormSelect
+                value={state.wsUserProjectRole}
+                onChange={(v) => setState({ wsUserProjectRole: v as Role })}
+                options={[
+                  { value: "lead", label: "Lead", dot: ROLE.lead.color, desc: "Leads the project team" },
+                  { value: "pentester", label: "Pentester", dot: ROLE.pentester.color, desc: "Tests and reports findings" },
+                ]}
+              />
             </div>
           </div>
-          {modalFooter(closeWSUserEditor, saveWSUser, "Save", "#2E5FBF")}
+          {modalFooter(closeWSUserEditor, saveWSUser, state.wsUserMode === "add" ? t("Send invite") : t("Save"), "var(--st-accent)")}
         </>
       )}
 
@@ -3812,26 +5991,53 @@ export function StormApp() {
         60,
         460,
         <>
-          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px" }}>Generate API key</h2>
-          <div style={{ fontSize: 13, color: "#8A97AB", marginTop: 6 }}>Choose a name and the permissions this key should have.</div>
-          <div style={{ marginTop: 20 }}><label className="flabel">Key name</label><input className="finp" placeholder="e.g. CI pipeline" value={state.apiKeyName} onChange={(e) => setState({ apiKeyName: e.target.value })} /></div>
+          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>{t("Generate API key")}</h2>
+          <div style={{ marginTop: 20 }}><label className="flabel">{t("Key name")}</label><input className="finp" placeholder={t("e.g. CI pipeline")} value={state.apiKeyName} onChange={(e) => setState({ apiKeyName: e.target.value })} /></div>
           <div style={{ marginTop: 16 }}>
-            <label className="flabel">Permissions</label>
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, border: "1px solid #eef1f7", borderRadius: 11, overflow: "hidden", marginTop: 6 }}>
+            <label className="flabel">{t("Permissions")}</label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, border: "1px solid var(--st-divider)", borderRadius: 11, overflow: "hidden", marginTop: 6 }}>
               {API_SCOPES.map((s) => {
                 const checked = !!state.apiKeyScopes[s];
                 return (
-                  <div key={s} className="clk" onClick={() => toggleApiScope(s)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", borderTop: "1px solid #f2f4f9", cursor: "pointer" }}>
-                    <span style={{ width: 18, height: 18, flex: "none", borderRadius: 5, border: `1.5px solid ${checked ? "#2E5FBF" : "#dbe1ec"}`, background: checked ? "#2E5FBF" : "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      {checked && <Icon name="check" size={12} color="#fff" sw={3} />}
+                  <div key={s} className="clk" onClick={() => toggleApiScope(s)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", borderTop: "1px solid var(--st-divider)", cursor: "pointer" }}>
+                    <span style={{ width: 18, height: 18, flex: "none", borderRadius: 5, border: `1.5px solid ${checked ? "var(--st-accent)" : "var(--st-border)"}`, background: checked ? "var(--st-accent)" : "var(--st-surface)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {checked && <Icon name="check" size={12} color="var(--st-on-accent)" sw={3} />}
                     </span>
-                    <span className="mono" style={{ fontSize: 12.5, color: "#334" }}>{s}</span>
+                    <span className="mono" style={{ fontSize: 12, color: "var(--st-text)", flex: "none" }}>{s}</span>
+                    <span style={{ fontSize: 12, color: "var(--st-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{API_SCOPE_LABELS[s]}</span>
                   </div>
                 );
               })}
             </div>
           </div>
-          {modalFooter(closeApiKeyModal, createApiKey, "Generate key", "#2E5FBF")}
+          <div style={{ marginTop: 16 }}>
+            <label className="flabel">{t("Project access")}</label>
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <div className="clk" onClick={() => setState({ apiKeyAllProjects: true })} style={{ font: "600 12.5px Inter,sans-serif", padding: "7px 13px", borderRadius: 9, cursor: "pointer", ...vfPill(state.apiKeyAllProjects) }}>{t("All my projects")}</div>
+              <div className="clk" onClick={() => setState({ apiKeyAllProjects: false })} style={{ font: "600 12.5px Inter,sans-serif", padding: "7px 13px", borderRadius: 9, cursor: "pointer", ...vfPill(!state.apiKeyAllProjects) }}>{t("Selected projects")}</div>
+            </div>
+            {!state.apiKeyAllProjects && (
+              <div style={{ marginTop: 8, border: "1px solid var(--st-divider)", borderRadius: 11, maxHeight: 168, overflow: "auto" }}>
+                {(state.apiProjects ?? []).map((p) => {
+                  const checked = state.apiKeyProjectIds.includes(p.id);
+                  return (
+                    <div key={p.id} className="clk" onClick={() => toggleApiProject(p.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderTop: "1px solid var(--st-divider)", cursor: "pointer" }}>
+                      <span style={{ width: 18, height: 18, flex: "none", borderRadius: 5, border: `1.5px solid ${checked ? "var(--st-accent)" : "var(--st-border)"}`, background: checked ? "var(--st-accent)" : "var(--st-surface)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {checked && <Icon name="check" size={12} color="var(--st-on-accent)" sw={3} />}
+                      </span>
+                      <span style={{ fontSize: 12.5, color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                    </div>
+                  );
+                })}
+                {(state.apiProjects ?? []).length === 0 && <div style={{ padding: 16, textAlign: "center", color: "var(--st-text-faint)", fontSize: 12.5 }}>{t("No projects available.")}</div>}
+              </div>
+            )}
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <label className="flabel">{t("Expiry")}</label>
+            <StormDatePicker value={state.apiKeyExpiry} onChange={(v) => setState({ apiKeyExpiry: v })} min={new Date().toISOString().slice(0, 10)} placeholder={t("No expiry")} />
+          </div>
+          {modalFooter(closeApiKeyModal, createApiKey, t("Generate key"), "var(--st-accent)")}
         </>
       )}
 
@@ -3842,17 +6048,17 @@ export function StormApp() {
         60,
         480,
         <>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px" }}>New project</h2>
-          <div style={{ fontSize: 13.5, color: "#8A97AB", marginTop: 6 }}>Create a project workspace for a new engagement.</div>
-          <div style={{ marginTop: 22 }}><label className="flabel">Project name</label><input className="finp" placeholder="e.g. Acme Corp — External Perimeter" value={state.newName} onChange={(e) => setState({ newName: e.target.value })} /></div>
-          <div style={{ marginTop: 16 }}><label className="flabel">Description</label><textarea className="finp" rows={3} placeholder="Short summary of the engagement scope…" value={state.newDesc} onChange={(e) => setState({ newDesc: e.target.value })} /></div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>{t("New project")}</h2>
+          <div style={{ fontSize: 13.5, color: "var(--st-text-3)", marginTop: 6 }}>{t("Create a project workspace for a new engagement.")}</div>
+          <div style={{ marginTop: 22 }}><label className="flabel">{t("Project name")}</label><input className="finp" placeholder={t("e.g. Acme Corp — External Perimeter")} value={state.newName} onChange={(e) => setState({ newName: e.target.value })} /></div>
+          <div style={{ marginTop: 16 }}><label className="flabel">{t("Description")}</label><textarea className="finp" rows={3} placeholder={t("Short summary of the engagement scope…")} value={state.newDesc} onChange={(e) => setState({ newDesc: e.target.value })} /></div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 16 }}>
             {/* min/max keep the pickers themselves from offering an inverted range. */}
-            <div><label className="flabel">Start date</label><input className="finp" type="date" max={state.newEnd || undefined} value={state.newStart} onChange={(e) => setState({ newStart: e.target.value })} /></div>
-            <div><label className="flabel">End date</label><input className="finp" type="date" min={state.newStart || undefined} value={state.newEnd} onChange={(e) => setState({ newEnd: e.target.value })} /></div>
+            <div><label className="flabel">{t("Start date")}</label><StormDatePicker value={state.newStart} onChange={(v) => setState({ newStart: v })} max={state.newEnd || undefined} /></div>
+            <div><label className="flabel">{t("End date")}</label><StormDatePicker value={state.newEnd} onChange={(v) => setState({ newEnd: v })} min={state.newStart || undefined} /></div>
           </div>
           {datesInvalid(state.newStart, state.newEnd) && (
-            <div style={{ marginTop: 8, font: "600 12px Inter,sans-serif", color: "#C0455B" }}>{DATES_ERROR}</div>
+            <div style={{ marginTop: 8, font: "600 12px Inter,sans-serif", color: "var(--st-danger)" }}>{DATES_ERROR}</div>
           )}
           {modalFooter(() => setState({ modalOpen: false, newName: "", newDesc: "", newStart: "", newEnd: "" }), createProject, "Create project")}
         </>
@@ -3865,23 +6071,23 @@ export function StormApp() {
         60,
         480,
         <>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px" }}>Edit project</h2>
-          <div style={{ marginTop: 20 }}><label className="flabel">Project name</label><input className="finp" value={state.projEditName} onChange={(e) => setState({ projEditName: e.target.value })} /></div>
-          <div style={{ marginTop: 16 }}><label className="flabel">Description</label><textarea className="finp" rows={3} value={state.projEditDesc} onChange={(e) => setState({ projEditDesc: e.target.value })} /></div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>{t("Edit project")}</h2>
+          <div style={{ marginTop: 20 }}><label className="flabel">{t("Project name")}</label><input className="finp" value={state.projEditName} onChange={(e) => setState({ projEditName: e.target.value })} /></div>
+          <div style={{ marginTop: 16 }}><label className="flabel">{t("Description")}</label><textarea className="finp" rows={3} value={state.projEditDesc} onChange={(e) => setState({ projEditDesc: e.target.value })} /></div>
           <div style={{ marginTop: 16 }}>
-            <label className="flabel">Status</label>
+            <label className="flabel">{t("Status")}</label>
             <select className="finp" value={state.projEditStatus} onChange={(e) => setState({ projEditStatus: e.target.value as ProjectStatus })}>
-              {PROJECT_STATUS_ORDER.map((s) => <option key={s} value={s}>{PROJ_STATUS[s]?.label ?? s}</option>)}
+              {PROJECT_STATUS_ORDER.map((s) => <option key={s} value={s}>{t(PROJ_STATUS[s]?.label ?? s)}</option>)}
             </select>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 16 }}>
-            <div><label className="flabel">Start date</label><input className="finp" type="date" max={state.projEditEnd || undefined} value={state.projEditStart} onChange={(e) => setState({ projEditStart: e.target.value })} /></div>
-            <div><label className="flabel">End date</label><input className="finp" type="date" min={state.projEditStart || undefined} value={state.projEditEnd} onChange={(e) => setState({ projEditEnd: e.target.value })} /></div>
+            <div><label className="flabel">{t("Start date")}</label><StormDatePicker value={state.projEditStart} onChange={(v) => setState({ projEditStart: v })} max={state.projEditEnd || undefined} /></div>
+            <div><label className="flabel">{t("End date")}</label><StormDatePicker value={state.projEditEnd} onChange={(v) => setState({ projEditEnd: v })} min={state.projEditStart || undefined} /></div>
           </div>
           {datesInvalid(state.projEditStart, state.projEditEnd) && (
-            <div style={{ marginTop: 8, font: "600 12px Inter,sans-serif", color: "#C0455B" }}>{DATES_ERROR}</div>
+            <div style={{ marginTop: 8, font: "600 12px Inter,sans-serif", color: "var(--st-danger)" }}>{DATES_ERROR}</div>
           )}
-          {modalFooter(closeProjEdit, saveProjEdit, "Save")}
+          {modalFooter(closeProjEdit, saveProjEdit, t("Save"))}
         </>
       )}
 
@@ -3895,63 +6101,19 @@ export function StormApp() {
           60,
           620,
           <>
-            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px" }}>
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>
               {g ? `${g.actor} ${g.verb} ${g.subject}` : ""}
             </h2>
-            {g && <div className="mono" style={{ marginTop: 6, fontSize: 11.5, color: "#a0abbd" }}>{g.time}</div>}
-            <div style={{ marginTop: 16, background: "#111C2E", borderRadius: 10, padding: "12px 13px", display: "flex", flexDirection: "column", gap: 6, maxHeight: 420, overflow: "auto" }}>
+            {g && <div className="mono" style={{ marginTop: 6, fontSize: 11.5, color: "var(--st-text-faint)" }}>{g.time}</div>}
+            <div style={{ marginTop: 16, background: "var(--st-code-bg)", borderRadius: 10, padding: "12px 13px", display: "flex", flexDirection: "column", gap: 6, maxHeight: 420, overflow: "auto" }}>
               {g?.lines.map((l) => activityLineRow(l, g.tone))}
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
-              <button className="clk" onClick={close} style={{ height: 40, padding: "0 20px", border: "1px solid #dbe1ec", borderRadius: 10, background: "#fff", font: "700 13px Inter,sans-serif", color: "#5A6B84", cursor: "pointer" }}>Закрыть</button>
+              <button className="clk" onClick={close} style={{ height: 40, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 10, background: "var(--st-surface)", font: "700 13px Inter,sans-serif", color: "var(--st-text-2)", cursor: "pointer" }}>{t("Close")}</button>
             </div>
           </>
         );
       })()}
-
-      {/* export: recon lists (hosts / IPs / endpoints), filtered exactly as on screen */}
-      {modalShell(
-        state.exportModalOpen && state.exportScope !== "report",
-        closeExportModal,
-        60,
-        480,
-        <>
-          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px" }}>
-            {state.exportScope === "hosts" ? "Экспорт хостов" : state.exportScope === "ips" ? "Экспорт IP-адресов" : "Экспорт эндпоинтов"}
-          </h2>
-          <div style={{ fontSize: 13, color: "#8A97AB", marginTop: 6, lineHeight: 1.6 }}>
-            Выгружается то, что осталось после фильтров на странице — <b style={{ color: "#0F1B2D" }}>{exportCount}</b>{" "}
-            {state.exportScope === "hosts" ? "хост(ов)" : state.exportScope === "ips" ? "адрес(ов)" : "эндпоинт(ов)"}. Чтобы выгрузить другое — измените фильтры и откройте экспорт снова.
-          </div>
-          {state.exportScope === "endpoints" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 18 }}>
-              {([
-                { k: "list" as const, title: "Список", desc: "Текстовый файл: по строке на эндпоинт — METHOD https://host/path." },
-                { k: "openapi" as const, title: "Swagger (OpenAPI 3)", desc: "JSON-спецификация: путь на каждый эндпоинт, хост в servers." },
-              ]).map((f) => {
-                const on = state.exportFormat === f.k;
-                return (
-                  <div key={f.k} className="clk" onClick={() => setState({ exportFormat: f.k })} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "14px 16px", borderRadius: 12, cursor: "pointer", border: `1.5px solid ${on ? "#4C74C7" : "#e6eaf1"}`, background: on ? "#f6f9ff" : "#fff" }}>
-                    <span style={{ width: 18, height: 18, flex: "none", marginTop: 2, borderRadius: "50%", border: `1.5px solid ${on ? "#2E5FBF" : "#dbe1ec"}`, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "#2E5FBF" : "#fff" }}>
-                      {on && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#fff" }} />}
-                    </span>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ font: "700 13.5px Inter,sans-serif", color: "#0F1B2D" }}>{f.title}</div>
-                      <div style={{ fontSize: 12.5, color: "#8A97AB", marginTop: 3, lineHeight: 1.5 }}>{f.desc}</div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22 }}>
-            <button className="clk" onClick={closeExportModal} style={{ height: 42, padding: "0 20px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "700 13.5px Inter,sans-serif", color: "#5A6B84" }}>Отмена</button>
-            <button className="clk" onClick={doReconExport} disabled={exportCount === 0} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: exportCount === 0 ? "#9db3de" : "#4C74C7", color: "#fff", font: "700 13.5px Inter,sans-serif", cursor: exportCount === 0 ? "default" : "pointer" }}>
-              Скачать
-            </button>
-          </div>
-        </>
-      )}
 
       {/* export: Word report generation (backend templates szi / pp) */}
       {modalShell(
@@ -3960,7 +6122,7 @@ export function StormApp() {
         60,
         480,
         <>
-          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px" }}>Экспорт отчёта</h2>
+          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>{t("Export report")}</h2>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 18 }}>
             {REPORT_KINDS.map((r) => {
               const on = state.exportKind === r.kind;
@@ -3969,26 +6131,151 @@ export function StormApp() {
                   key={r.kind}
                   className="clk"
                   onClick={() => setState({ exportKind: r.kind })}
-                  style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "14px 16px", borderRadius: 12, cursor: "pointer", border: `1.5px solid ${on ? "#4C74C7" : "#e6eaf1"}`, background: on ? "#f6f9ff" : "#fff" }}
+                  style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "14px 16px", borderRadius: 12, cursor: "pointer", border: `1.5px solid ${on ? "var(--st-accent-2)" : "var(--st-border-light)"}`, background: on ? "var(--st-accent-soft)" : "var(--st-surface)" }}
                 >
-                  <span style={{ width: 18, height: 18, flex: "none", marginTop: 2, borderRadius: "50%", border: `1.5px solid ${on ? "#2E5FBF" : "#dbe1ec"}`, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "#2E5FBF" : "#fff" }}>
-                    {on && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#fff" }} />}
+                  <span style={{ width: 18, height: 18, flex: "none", marginTop: 2, borderRadius: "50%", border: `1.5px solid ${on ? "var(--st-accent)" : "var(--st-border)"}`, display: "flex", alignItems: "center", justifyContent: "center", background: on ? "var(--st-accent)" : "var(--st-surface)" }}>
+                    {on && <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--st-surface)" }} />}
                   </span>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ font: "700 13.5px Inter,sans-serif", color: "#0F1B2D" }}>{r.title}</div>
-                    <div style={{ fontSize: 12.5, color: "#8A97AB", marginTop: 3, lineHeight: 1.5 }}>{r.desc}</div>
+                    <div style={{ font: "700 13.5px Inter,sans-serif", color: "var(--st-text)" }}>{t(r.title)}</div>
+                    <div style={{ fontSize: 12.5, color: "var(--st-text-3)", marginTop: 3, lineHeight: 1.5 }}>{t(r.desc)}</div>
                   </div>
                 </div>
               );
             })}
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22 }}>
-            <button className="clk" onClick={closeExportModal} style={{ height: 42, padding: "0 20px", border: "1px solid #dbe1ec", borderRadius: 11, background: "#fff", font: "700 13.5px Inter,sans-serif", color: "#5A6B84" }}>Отмена</button>
-            <button className="clk" onClick={doExport} disabled={state.exportBusy} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: state.exportBusy ? "#9db3de" : "#4C74C7", color: "#fff", font: "700 13.5px Inter,sans-serif", cursor: state.exportBusy ? "default" : "pointer" }}>
-              {state.exportBusy ? "Формируется…" : "Скачать .docx"}
+            <button className="clk" onClick={closeExportModal} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Cancel")}</button>
+            <button className="clk" onClick={doExport} disabled={state.exportBusy} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: state.exportBusy ? "var(--st-accent-muted)" : "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", cursor: state.exportBusy ? "default" : "pointer" }}>
+              {state.exportBusy ? t("Generating…") : t("Download .docx")}
             </button>
           </div>
         </>
+      )}
+
+      {/* export: single vulnerability -> Jira issue */}
+      {modalShell(
+        state.jiraExportOpen,
+        closeJiraExport,
+        60,
+        460,
+        (() => {
+          const v = state.jiraExportVulnId != null ? d.vulns.find((x) => x.id === state.jiraExportVulnId) : undefined;
+          const link = state.jiraExportLink;
+          const isLinked = !!(link && link.status === "linked" && link.jira_issue_key);
+          const exportDisabled = state.jiraExportBusy || state.jiraExportChecking;
+          return (
+            <>
+              <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>{t("Export to Jira")}</h2>
+
+              {v && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 16, padding: "12px 14px", border: "1px solid var(--st-divider)", borderRadius: 12 }}>
+                  <span style={{ font: "700 10px Inter,sans-serif", textTransform: "uppercase", letterSpacing: ".5px", borderRadius: 7, padding: "4px 9px", background: SEV[v.sev].bg, color: SEV[v.sev].color, flex: "none" }}>{v.sev}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ font: "600 14px Inter,sans-serif", color: "var(--st-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.title}</div>
+                    <div className="mono" style={{ fontSize: 12, color: "var(--st-text-3)", marginTop: 2 }}>{v.host}</div>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ marginTop: 16, minHeight: 40 }}>
+                {state.jiraExportChecking ? (
+                  <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text-3)" }}>{t("Checking status…")}</div>
+                ) : isLinked ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid var(--st-success-soft)", background: "var(--st-success-soft)", borderRadius: 12, padding: "13px 15px" }}>
+                    <Icon name="check-circle" size={18} color="var(--st-success)" sw={2.2} />
+                    <div style={{ font: "600 13.5px Inter,sans-serif", color: "var(--st-text)" }}>
+                      {t("Already exported:")}{" "}
+                      <a href={link!.jira_issue_url} target="_blank" rel="noreferrer" style={{ color: "var(--st-accent)", fontWeight: 700 }}>{link!.jira_issue_key}</a>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text-2)", lineHeight: 1.5 }}>
+                    {t("A Jira issue (")}<span className="mono" style={{ color: "var(--st-text)" }}>{t("STORM-")}{state.jiraExportVulnId}</span>{t(") will be created in To Do with the finding details, a start date of today and a due date in 2 weeks.")}
+                    {state.jiraExportError && (
+                      <div style={{ marginTop: 10, color: "var(--st-danger)", font: "600 12.5px Inter,sans-serif" }}>{state.jiraExportError}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22 }}>
+                {isLinked ? (
+                  <>
+                    <a className="clk" href={link!.jira_issue_url} target="_blank" rel="noreferrer" style={{ height: 42, padding: "0 20px", borderRadius: 11, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", display: "inline-flex", alignItems: "center", textDecoration: "none" }}>{t("Open in Jira")}</a>
+                    <button className="clk" onClick={closeJiraExport} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Done")}</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="clk" onClick={closeJiraExport} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Cancel")}</button>
+                    <button className="clk" onClick={doJiraExport} disabled={exportDisabled} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: exportDisabled ? "var(--st-accent-muted)" : "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", cursor: exportDisabled ? "default" : "pointer" }}>
+                      {state.jiraExportBusy ? t("Exporting…") : t("Export")}
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          );
+        })()
+      )}
+
+      {/* export: all listed vulnerabilities -> Jira issues */}
+      {modalShell(
+        state.jiraBulkOpen,
+        closeBulkJira,
+        60,
+        460,
+        (() => {
+          const total = vulns.length;
+          const pct = state.jiraBulkTotal > 0 ? Math.round((state.jiraBulkDone / state.jiraBulkTotal) * 100) : 0;
+          return (
+            <>
+              <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px" }}>{t("Export all to Jira")}</h2>
+
+              <div style={{ marginTop: 16 }}>
+                {state.jiraBulkFinished ? (
+                  <div style={{ border: "1px solid var(--st-success-soft)", background: "var(--st-success-soft)", borderRadius: 12, padding: "14px 16px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}><Icon name="check-circle" size={18} color="var(--st-success)" sw={2.2} /><span style={{ font: "700 13.5px Inter,sans-serif", color: "var(--st-text)" }}>{t("Export finished")}</span></div>
+                    <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text-2)", lineHeight: 1.7 }}>
+                      {t("Created:")} <b>{state.jiraBulkCreated}</b><br />
+                      {t("Already linked (skipped):")} <b>{state.jiraBulkSkipped}</b><br />
+                      {t("Failed:")} <b style={{ color: state.jiraBulkFailed ? "var(--st-danger)" : "var(--st-text-2)" }}>{state.jiraBulkFailed}</b>
+                    </div>
+                  </div>
+                ) : state.jiraBulkRunning ? (
+                  <div>
+                    <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text-2)", marginBottom: 10 }}>{t("Exporting")} {state.jiraBulkDone} / {state.jiraBulkTotal}…</div>
+                    <div style={{ height: 8, background: "var(--st-divider)", borderRadius: 6, overflow: "hidden" }}>
+                      <div style={{ width: `${pct}%`, height: "100%", background: "var(--st-accent)", transition: "width .2s" }} />
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ font: "600 13px Inter,sans-serif", color: "var(--st-text-2)", lineHeight: 1.5 }}>
+                    {t("This will create a Jira issue (in To Do) for each of the")} <b style={{ color: "var(--st-text)" }}>{total}</b> {t("listed")} {total === 1 ? "vulnerability" : "vulnerabilities"} {t("(page filters apply). Already-linked findings are skipped.")}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 22 }}>
+                {state.jiraBulkFinished ? (
+                  <>
+                    {state.jiraBulkProjectUrl && (
+                      <a className="clk" href={state.jiraBulkProjectUrl} target="_blank" rel="noreferrer" style={{ height: 42, padding: "0 20px", borderRadius: 11, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", display: "inline-flex", alignItems: "center", textDecoration: "none" }}>{t("Open Jira")}</a>
+                    )}
+                    <button className="clk" onClick={closeBulkJira} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>{t("Done")}</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="clk" onClick={closeBulkJira} disabled={state.jiraBulkRunning} style={{ height: 42, padding: "0 20px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "700 13.5px Inter,sans-serif", color: "var(--st-text-2)", cursor: state.jiraBulkRunning ? "default" : "pointer" }}>{t("Cancel")}</button>
+                    <button className="clk" onClick={doBulkJiraExport} disabled={state.jiraBulkRunning || total === 0} style={{ height: 42, padding: "0 22px", border: "none", borderRadius: 11, background: state.jiraBulkRunning || total === 0 ? "var(--st-accent-muted)" : "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13.5px Inter,sans-serif", cursor: state.jiraBulkRunning || total === 0 ? "default" : "pointer" }}>
+                      {state.jiraBulkRunning ? t("Exporting…") : `${t("Export")} ${total}`}
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          );
+        })()
       )}
 
       {/* entity editor */}
@@ -3998,48 +6285,76 @@ export function StormApp() {
         60,
         480,
         <>
-          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "#0F1B2D", letterSpacing: "-.4px", textTransform: "capitalize" }}>{(state.editorMode === "add" ? "Add " : "Edit ") + TYPELABEL[state.editorType]}</h2>
+          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 800, color: "var(--st-text)", letterSpacing: "-.4px", textTransform: "capitalize" }}>{`${state.editorMode === "add" ? t("Add") : t("Edit")} ${t(TYPELABEL[state.editorType])}`}</h2>
           <div style={{ display: "flex", flexDirection: "column", gap: 15, marginTop: 22 }}>
             {editorFields.map((f) => (
               <div key={f.key}>
-                <label className="flabel">{f.label}</label>
-                {f.isText && <input className="finp" placeholder={f.placeholder} value={f.value} onChange={f.onInput} />}
-                {f.isTextarea && <textarea className="finp" rows={3} placeholder={f.placeholder} value={f.value} onChange={f.onInput} />}
+                <label className="flabel">{t(f.label)}</label>
+                {f.isText && <input className="finp" placeholder={t(f.placeholder)} value={f.value} onChange={f.onInput} />}
+                {f.isTextarea && <textarea className="finp" rows={3} placeholder={t(f.placeholder)} value={f.value} onChange={f.onInput} />}
                 {f.isSelect && (
                   <select className="esel" value={f.value} onChange={f.onInput}>
-                    {f.value === "" && <option value="" disabled>Select…</option>}
+                    {f.value === "" && <option value="" disabled>{t("Select…")}</option>}
                     {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
                 )}
-                {/* Type-to-search over a long option list (hosts): a native datalist
-                    filters as you type and still accepts free text. */}
+                {/* Type-to-search over a long option list (hosts, workspace users).
+                    A native datalist renders as an unstyleable OS popup, so the
+                    suggestions are drawn here instead — top COMBO_MAX matches,
+                    prefix hits first. Free text is still accepted. */}
                 {f.isCombo && (
-                  <>
-                    <input className="finp" list={`dl-${f.key}`} placeholder={f.placeholder} value={f.value} onChange={f.onInput} autoComplete="off" />
-                    <datalist id={`dl-${f.key}`}>
-                      {f.options.map((o) => <option key={o.value} value={o.value}>{o.label !== o.value ? o.label : undefined}</option>)}
-                    </datalist>
-                  </>
+                  <div style={{ position: "relative" }}>
+                    <input
+                      className="finp"
+                      placeholder={t(f.placeholder)}
+                      value={f.value}
+                      onChange={f.onComboInput}
+                      onFocus={f.onComboFocus}
+                      onBlur={f.onComboBlur}
+                      onKeyDown={f.onComboKeyDown}
+                      autoComplete="off"
+                    />
+                    {f.comboOpen && (
+                      <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, background: "var(--st-surface)", border: "1px solid var(--st-border-light)", borderRadius: 12, boxShadow: "0 18px 44px rgba(15,27,45,.16)", zIndex: 60, padding: 6, overflow: "hidden" }}>
+                        {f.suggestions.map((o) => (
+                          <div
+                            key={o.value}
+                            className="clk"
+                            /* mousedown would blur the input and unmount the list
+                               before the click lands, so pick on mousedown. */
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              o.onPick();
+                            }}
+                            style={{ display: "flex", flexDirection: "column", gap: 1, padding: "8px 10px", borderRadius: 9, background: o.active ? "var(--st-accent-soft)" : "transparent" }}
+                          >
+                            <span style={{ font: "600 13.5px Inter,sans-serif", color: o.active ? "var(--st-accent)" : "var(--st-text)" }}>{o.label}</span>
+                            {o.sub && <span className="mono" style={{ fontSize: 11.5, color: "var(--st-text-3)" }}>{o.sub}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
                 {f.isTags && (
                   <div>
                     {f.tags.length > 0 && (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
                         {f.tags.map((t, ti) => (
-                          <span key={ti} className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 600, color: "#5A6B84", background: "#f1f4f9", border: "1px solid #e9edf4", borderRadius: 7, padding: "4px 6px 4px 9px" }}>
+                          <span key={ti} className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 600, color: "var(--st-text-2)", background: "var(--st-hover)", border: "1px solid var(--st-border-light)", borderRadius: 7, padding: "4px 6px 4px 9px" }}>
                             {t.value}
-                            <span className="clk" onClick={t.onRemove} style={{ display: "flex", color: "#a0abbd" }}><Icon name="close" size={12} sw={2.4} /></span>
+                            <span className="clk" onClick={t.onRemove} style={{ display: "flex", color: "var(--st-text-faint)" }}><Icon name="close" size={12} sw={2.4} /></span>
                           </span>
                         ))}
                       </div>
                     )}
-                    <input className="finp" placeholder={f.placeholder} value={f.tagDraft} onChange={f.onTagDraft} onKeyDown={f.onTagKeyDown} />
+                    <input className="finp" placeholder={t(f.placeholder)} value={f.tagDraft} onChange={f.onTagDraft} onKeyDown={f.onTagKeyDown} />
                   </div>
                 )}
               </div>
             ))}
           </div>
-          {modalFooter(closeEditor, saveEditor, state.editorMode === "add" ? "Create" : "Save changes")}
+          {modalFooter(closeEditor, saveEditor, state.editorMode === "add" ? t("Create") : t("Save changes"))}
         </>
       )}
 
@@ -4049,92 +6364,93 @@ export function StormApp() {
         closeConfirm,
         65,
         420,
-        <>
-          <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 14 }}>
-            <span style={{ width: 42, height: 42, flex: "none", borderRadius: "50%", background: "#fbeaee", color: "#C0455B", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="trash" size={20} /></span>
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#0F1B2D" }}>Confirm deletion</h2>
-          </div>
-          <div style={{ fontSize: 14, color: "#5A6B84", lineHeight: 1.55 }}>Are you sure you want to delete <b style={{ color: "#0F1B2D" }}>{state.confirmLabel}</b>? This action cannot be undone.</div>
-          {modalFooter(closeConfirm, confirmDelete, "Delete", "#C0455B")}
-        </>
+        state.confirmUserId != null ? (
+          /* Пользователя не удаляем, а деактивируем — формулировки об этом и говорят
+             (действие обратимо: разблокировать можно тут же на странице участников). */
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 14 }}>
+              <span style={{ width: 42, height: 42, flex: "none", borderRadius: "50%", background: "var(--st-danger-soft)", color: "var(--st-danger)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="lock" size={20} /></span>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{t("Deactivate user")}</h2>
+            </div>
+            <div style={{ fontSize: 14, color: "var(--st-text-2)", lineHeight: 1.55 }}>
+              <b style={{ color: "var(--st-text)" }}>{state.confirmLabel}</b> {t("will lose access, but their projects, findings and notes stay. You can reactivate them here later.")}
+            </div>
+            {modalFooter(closeConfirm, confirmDelete, t("Deactivate"), "var(--st-danger)")}
+          </>
+        ) : (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 14 }}>
+              <span style={{ width: 42, height: 42, flex: "none", borderRadius: "50%", background: "var(--st-danger-soft)", color: "var(--st-danger)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="trash" size={20} /></span>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{t("Confirm deletion")}</h2>
+            </div>
+            <div style={{ fontSize: 14, color: "var(--st-text-2)", lineHeight: 1.55 }}>{t("Are you sure you want to delete")} <b style={{ color: "var(--st-text)" }}>{state.confirmLabel}</b>{t("? This action cannot be undone.")}</div>
+            {modalFooter(closeConfirm, confirmDelete, t("Delete"), "var(--st-danger)")}
+          </>
+        )
       )}
 
       {/* endpoint detail */}
       <div className={`modalback ${state.epOpen ? "open" : ""}`} onClick={closeEndpoint} style={{ position: "absolute", inset: 0, zIndex: 66, background: "rgba(20,28,40,.42)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 24px", overflow: "auto" }}>
-        <div className="modalcard" onClick={stop} style={{ width: 820, maxWidth: "100%", background: "#fff", borderRadius: 20, boxShadow: "0 30px 80px rgba(15,27,45,.3)", padding: "24px 26px 22px" }}>
+        <div className="modalcard" onClick={stop} style={{ width: 820, maxWidth: "100%", background: "var(--st-surface)", borderRadius: 20, boxShadow: "0 30px 80px rgba(15,27,45,.3)", padding: "24px 26px 22px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
             <span className="mono" style={{ fontWeight: 700, borderRadius: 6, padding: "3px 10px", fontSize: 12, background: (METHOD[state.epData.method] ?? PORT.closed).bg, color: (METHOD[state.epData.method] ?? PORT.closed).color }}>{state.epData.method}</span>
-            <span className="mono" style={{ font: "700 15px 'JetBrains Mono',monospace", color: "#0F1B2D" }}>{state.epData.path}</span>
-            <span className="mono" style={{ fontSize: 12, color: "#8A97AB", background: "#f1f4f9", borderRadius: 6, padding: "3px 9px" }}>{state.epData.host}</span>
+            <span className="mono" style={{ font: "700 15px 'JetBrains Mono',monospace", color: "var(--st-text)" }}>{state.epData.path}</span>
+            <span className="mono" style={{ fontSize: 12, color: "var(--st-text-3)", background: "var(--st-hover)", borderRadius: 6, padding: "3px 9px" }}>{state.epData.host}</span>
             <div style={{ flex: 1 }} />
             <div className="clk actbtn" onClick={closeEndpoint}><Icon name="close" size={18} /></div>
           </div>
-          {/* Both boxes are editable. The request is stored on the endpoint; the
-              response is a local scratchpad — the backend has nowhere to keep it,
-              so the label says so rather than pretending it saves. */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <div className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700 }}>REQUEST</div>
-                <div style={{ flex: 1 }} />
-                <span className="clk" onClick={() => copyText(state.epRequest, "Запрос")} style={{ display: "inline-flex", alignItems: "center", gap: 5, font: "700 11.5px Inter,sans-serif", color: "#4C74C7", cursor: "pointer" }}>
-                  <Icon name="copy" size={13} />Copy request
-                </span>
-              </div>
-              <textarea className="finp mono" rows={9} style={{ fontSize: 12, lineHeight: 1.6, resize: "vertical" }} value={state.epRequest} onChange={(e) => setState({ epRequest: e.target.value })} placeholder={`${state.epData.method} ${state.epData.path} HTTP/1.1`} />
+          {/* Full-width request box (the response scratchpad was removed). The copy
+              control builds a ready cURL for this endpoint; the raw request below is
+              still editable and stored on the endpoint. */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <div className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("REQUEST")}</div>
+              <div style={{ flex: 1 }} />
+              <span className="clk" title={t("Copy cURL request")} onClick={() => copyCurl(state.epData)} style={{ display: "inline-flex", alignItems: "center", gap: 5, font: "700 11.5px Inter,sans-serif", color: "var(--st-accent-2)", cursor: "pointer" }}>
+                <Icon name="copy" size={13} />{t("Copy cURL")}
+              </span>
             </div>
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <div className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700 }}>RESPONSE</div>
-                <span className="mono" style={{ fontSize: 9.5, color: "#c3ccdb" }}>не сохраняется</span>
-                <div style={{ flex: 1 }} />
-                <span className="clk" onClick={() => copyText(state.epResponse, "Ответ")} style={{ display: "inline-flex", alignItems: "center", gap: 5, font: "700 11.5px Inter,sans-serif", color: "#4C74C7", cursor: "pointer" }}>
-                  <Icon name="copy" size={13} />Copy response
-                </span>
-              </div>
-              <textarea className="finp mono" rows={9} style={{ fontSize: 12, lineHeight: 1.6, resize: "vertical" }} value={state.epResponse} onChange={(e) => setState({ epResponse: e.target.value })} placeholder="HTTP/1.1 200 OK" />
-            </div>
+            <textarea className="finp mono" rows={9} style={{ fontSize: 12, lineHeight: 1.6, resize: "vertical" }} value={state.epRequest} onChange={(e) => setState({ epRequest: e.target.value })} placeholder={`${state.epData.method} ${state.epData.path} HTTP/1.1`} />
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
-            <button className="clk" onClick={saveEndpointRequest} disabled={state.epSaving} style={{ display: "flex", alignItems: "center", gap: 8, height: 40, padding: "0 18px", border: "none", borderRadius: 10, background: state.epSaving ? "#9db3de" : "#4C74C7", color: "#fff", font: "700 13px Inter,sans-serif", cursor: state.epSaving ? "default" : "pointer" }}>
-              <Icon name="save" size={15} color="#fff" />{state.epSaving ? "Сохраняется…" : "Save request"}
+            <button className="clk" onClick={saveEndpointRequest} disabled={state.epSaving} style={{ display: "flex", alignItems: "center", gap: 8, height: 40, padding: "0 18px", border: "none", borderRadius: 10, background: state.epSaving ? "var(--st-accent-muted)" : "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif", cursor: state.epSaving ? "default" : "pointer" }}>
+              <Icon name="save" size={15} color="var(--st-on-accent)" />{state.epSaving ? "Saving…" : "Save request"}
             </button>
           </div>
-          <div style={{ height: 1, background: "#eef1f7", margin: "22px 0 18px" }} />
-          <div className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "#a8b2c2", fontWeight: 700, marginBottom: 10 }}>DISCUSSION</div>
-          <div style={{ background: "#f6f8fc", border: "1px solid #eef1f7", borderRadius: 12, padding: 16, fontSize: 13, color: "#8A97AB", marginBottom: 12 }}>No comments yet — start the discussion.</div>
-          <textarea className="finp" rows={3} placeholder="Share progress, blockers, or review notes…" />
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
-            <span style={{ fontSize: 11.5, color: "#a0abbd" }}>Use comments to coordinate review, blockers, and follow-ups.</span>
-            <button className="clk" onClick={closeEndpoint} style={{ height: 40, padding: "0 18px", border: "none", borderRadius: 10, background: "#4C74C7", color: "#fff", font: "700 13px Inter,sans-serif" }}>Post comment</button>
+          <div style={{ height: 1, background: "var(--st-divider)", margin: "22px 0 18px" }} />
+          <div className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700, marginBottom: 10 }}>{t("DISCUSSION")}</div>
+          <div style={{ background: "var(--st-hover)", border: "1px solid var(--st-divider)", borderRadius: 12, padding: 16, fontSize: 13, color: "var(--st-text-3)", marginBottom: 12 }}>{t("No comments yet — start the discussion.")}</div>
+          <textarea className="finp" rows={3} placeholder={t("Share progress, blockers, or review notes…")} />
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginTop: 12 }}>
+            <button className="clk" onClick={closeEndpoint} style={{ height: 40, padding: "0 18px", border: "none", borderRadius: 10, background: "var(--st-accent-2)", color: "var(--st-on-accent)", font: "700 13px Inter,sans-serif" }}>{t("Post comment")}</button>
           </div>
         </div>
       </div>
 
       {/* notifications panel */}
       <div className={`notifback ${state.notifOpen ? "open" : ""}`} onClick={() => setState({ notifOpen: false })} style={{ position: "absolute", inset: 0, zIndex: 60, background: "rgba(20,28,40,.3)", display: "flex", justifyContent: "flex-end" }}>
-        <div className="notifpanel" onClick={stop} style={{ width: 390, maxWidth: "90%", height: "100%", background: "#fff", boxShadow: "-20px 0 60px rgba(15,27,45,.2)", display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "22px 24px 18px", borderBottom: "1px solid #eef1f7" }}>
-            <div style={{ fontWeight: 800, fontSize: 18, color: "#0F1B2D" }}>Notifications</div>
-            <span className="mono" style={{ padding: "3px 9px", borderRadius: 8, background: "#E9F0FC", color: "#2E5FBF", fontSize: 11, fontWeight: 700 }}>{newCount} new</span>
+        <div className="notifpanel" onClick={stop} style={{ width: 390, maxWidth: "90%", height: "100%", background: "var(--st-surface)", boxShadow: "-20px 0 60px rgba(15,27,45,.2)", display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "22px 24px 18px", borderBottom: "1px solid var(--st-divider)" }}>
+            <div style={{ fontWeight: 800, fontSize: 18, color: "var(--st-text)" }}>{t("Notifications")}</div>
+            <span className="mono" style={{ padding: "3px 9px", borderRadius: 8, background: "var(--st-accent-soft)", color: "var(--st-accent)", fontSize: 11, fontWeight: 700 }}>{newCount} {t("new")}</span>
             <div style={{ flex: 1 }} />
-            <div className="clk" onClick={markAllNotifsRead} style={{ font: "600 13px Inter,sans-serif", color: "#3d6fd6" }}>Mark all read</div>
+            <div className="clk" onClick={markAllNotifsRead} style={{ font: "600 13px Inter,sans-serif", color: "var(--st-accent-2)" }}>{t("Mark all read")}</div>
           </div>
           <div style={{ flex: 1, overflow: "auto", padding: 6 }}>
             {notifs.map((n) => (
               <div key={n.key} className="notifitem clk" onClick={n.onClick} style={{ display: "flex", gap: 13, padding: "14px 16px", borderRadius: 12, alignItems: "flex-start" }}>
-                <div style={{ width: 36, height: 36, flex: "none", borderRadius: "50%", background: n.avBg, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", font: "700 12px 'JetBrains Mono',monospace" }}>{n.initials}</div>
+                <div style={{ width: 36, height: 36, flex: "none", borderRadius: "50%", background: n.avBg, color: "var(--st-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", font: "700 12px 'JetBrains Mono',monospace" }}>{n.initials}</div>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 13.5, color: "#334", lineHeight: 1.45 }}>
-                    <span className="mono" style={{ color: "#2E5FBF", fontWeight: 600 }}>{n.user}</span> {n.action}{" "}
-                    <span style={{ fontWeight: 700, color: "#0F1B2D" }}>{n.where}</span>
+                  <div style={{ fontSize: 13.5, color: "var(--st-text)", lineHeight: 1.45 }}>
+                    <span className="mono" style={{ color: "var(--st-accent)", fontWeight: 600 }}>{n.user}</span> {n.action}{" "}
+                    <span style={{ fontWeight: 700, color: "var(--st-text)" }}>{n.where}</span>
                   </div>
-                  <div className="mono" style={{ fontSize: 11, color: "#a0abbd", marginTop: 5 }}>{n.meta}</div>
+                  <div className="mono" style={{ fontSize: 11, color: "var(--st-text-faint)", marginTop: 5 }}>{n.meta}</div>
                 </div>
-                {n.unread && <span style={{ width: 8, height: 8, flex: "none", borderRadius: "50%", background: "#3d6fd6", marginTop: 5 }} />}
+                {n.unread && <span style={{ width: 8, height: 8, flex: "none", borderRadius: "50%", background: "var(--st-accent-2)", marginTop: 5 }} />}
               </div>
             ))}
-            {notifs.length === 0 && <div style={{ padding: 48, textAlign: "center", color: "#9aa6b8", fontSize: 13.5 }}>No notifications.</div>}
+            {notifs.length === 0 && <div style={{ padding: 48, textAlign: "center", color: "var(--st-text-faint)", fontSize: 13.5 }}>{t("No notifications.")}</div>}
           </div>
         </div>
       </div>
@@ -4143,8 +6459,8 @@ export function StormApp() {
       {state.lightboxSrc && (
         <div onClick={() => setState({ lightboxSrc: null })} style={{ position: "fixed", inset: 0, zIndex: 90, background: "rgba(10,16,26,.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: 40, cursor: "zoom-out", animation: "storm-fade .18s ease both" }}>
           <img src={state.lightboxSrc} alt="Step screenshot" onClick={stop} style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: 12, boxShadow: "0 30px 80px rgba(0,0,0,.5)", display: "block", cursor: "default" }} />
-          <div className="clk" onClick={() => setState({ lightboxSrc: null })} style={{ position: "fixed", top: 22, right: 24, width: 40, height: 40, borderRadius: "50%", background: "rgba(255,255,255,.12)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-            <Icon name="close" size={20} color="#fff" />
+          <div className="clk" onClick={() => setState({ lightboxSrc: null })} style={{ position: "fixed", top: 22, right: 24, width: 40, height: 40, borderRadius: "50%", background: "rgba(255,255,255,.12)", color: "var(--st-on-accent)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            <Icon name="close" size={20} color="var(--st-on-accent)" />
           </div>
         </div>
       )}

@@ -13,6 +13,7 @@ from app.schemas import (
     HostCreate,
     HostOut,
     HostUpdate,
+    JsFileOut,
     PortCreate,
     PortOut,
     PortUpdate,
@@ -31,11 +32,17 @@ async def list_hosts(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
     status_filter: str | None = Query(None, alias="status"),
+    origin: str = Query("host", pattern="^(host|ip|all)$"),
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Возвращает список хостов проекта."""
-    items, total = await AssetService(db).list_hosts(project_id, page, size, status_filter)
+    """Возвращает список хостов проекта.
+
+    По умолчанию только origin=host: служебные родители адресов из фермы IP
+    в списке хостов не показываются. all — нужен фронту, чтобы одним запросом
+    наполнить и таблицу хостов, и таблицу IP.
+    """
+    items, total = await AssetService(db).list_hosts(project_id, page, size, status_filter, origin)
     return to_paginated_response([HostOut.model_validate(it) for it in items], total, PageParams(page=page, size=size)).model_dump()
 
 
@@ -232,6 +239,16 @@ async def delete_service(
 ) -> None:
     """Удаляет сервис."""
     await AssetService(db).delete_service(project_id, port_id, service_id, current_user.id)
+
+
+@router.get("/projects/{project_id}/js-files", response_model=list[JsFileOut])
+async def list_js_files(
+    project_id: int,
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> list[JsFileOut]:
+    """JS-файлы проекта с находками — читает раздел JS (группируется по хосту на фронте)."""
+    return await AssetService(db).list_js_files(project_id)
 
 
 @router.get("/projects/{project_id}/hosts/{host_id}/endpoints", response_model=list[EndpointOut])

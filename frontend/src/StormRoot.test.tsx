@@ -22,7 +22,7 @@ vi.mock("./api", async (importOriginal) => {
 
 const admin: User = {
   id: 1, username: "admin", email: "admin@sbertech.ru", full_name: null, avatar_url: null,
-  role: "admin", project_role: "lead", is_active: true, password_changed_at: null,
+  role: "admin", project_role: "lead", is_active: true, is_locked: false, totp_enabled: false, password_changed_at: null,
   created_at: "2026-01-01T00:00:00Z",
 };
 

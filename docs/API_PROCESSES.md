@@ -945,7 +945,7 @@ sequenceDiagram
 - [GOST_34_DOCUMENTATION.md](GOST_34_DOCUMENTATION.md) — документация по ГОСТ 34;
 - [openapi-v1.json](openapi-v1.json) — машинно-читаемая спецификация REST v1;
 - [openapi-v2.json](openapi-v2.json) — машинно-читаемая спецификация REST v2;
-- [ARCH.md](../ARCH.md) — архитектура backend/frontend;
-- [DB_SCHEMA.md](../DB_SCHEMA.md) — структура БД;
-- [USE_CASES.md](../USE_CASES.md) — пользовательские сценарии (для справки);
-- [TEST_CASES.md](../TEST_CASES.md) — тест-кейсы QA.
+- [ARCH.md](ARCH.md) — архитектура backend/frontend;
+- [DB_SCHEMA.md](DB_SCHEMA.md) — структура БД;
+- [USE_CASES.md](USE_CASES.md) — пользовательские сценарии (для справки);
+- [TEST_CASES.md](TEST_CASES.md) — тест-кейсы QA.

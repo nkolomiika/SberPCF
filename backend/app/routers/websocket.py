@@ -33,7 +33,7 @@ async def _authenticate_websocket_user(websocket: WebSocket) -> User | None:
 
     async with SessionLocal() as db:
         user = await db.scalar(select(User).where(User.id == user_id))
-        if not user or not user.is_active:
+        if not user or not user.is_active or user.is_locked:
             await websocket.close(code=4403)
             return None
     setattr(websocket.state, "user_id", user_id)

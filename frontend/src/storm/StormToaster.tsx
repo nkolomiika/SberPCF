@@ -9,10 +9,10 @@ import { useToastStore } from "../store";
 type Severity = "error" | "warning" | "info" | "success";
 
 const SEV: Record<Severity, { bar: string; bg: string; icon: IconName; color: string }> = {
-  error: { bar: "#C0455B", bg: "#FCEBEE", icon: "alert-triangle", color: "#C0455B" },
-  warning: { bar: "#B7862B", bg: "#FBF3E2", icon: "alert-triangle", color: "#B7862B" },
-  info: { bar: "#2E5FBF", bg: "#EAF0FC", icon: "info", color: "#2E5FBF" },
-  success: { bar: "#2E8B57", bg: "#E7F5EE", icon: "check-circle", color: "#2E8B57" },
+  error: { bar: "var(--st-danger)", bg: "var(--st-danger-soft)", icon: "alert-triangle", color: "var(--st-danger)" },
+  warning: { bar: "var(--st-warn)", bg: "var(--st-warn-soft)", icon: "alert-triangle", color: "var(--st-warn)" },
+  info: { bar: "var(--st-accent)", bg: "var(--st-accent-soft)", icon: "info", color: "var(--st-accent)" },
+  success: { bar: "var(--st-success)", bg: "var(--st-success-soft)", icon: "check-circle", color: "var(--st-success)" },
 };
 
 export function StormToaster() {
@@ -41,8 +41,8 @@ export function StormToaster() {
               display: "flex",
               alignItems: "flex-start",
               gap: 11,
-              background: "#fff",
-              border: "1px solid #e9edf4",
+              background: "var(--st-surface)",
+              border: "1px solid var(--st-border-light)",
               borderLeft: `4px solid ${s.bar}`,
               borderRadius: 12,
               boxShadow: "0 16px 44px rgba(15,27,45,.16)",
@@ -53,7 +53,7 @@ export function StormToaster() {
             <span style={{ width: 30, height: 30, flex: "none", borderRadius: 8, background: s.bg, color: s.color, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Icon name={s.icon} size={17} color={s.color} sw={2.2} />
             </span>
-            <div style={{ flex: 1, minWidth: 0, font: "600 13px Inter,sans-serif", color: "#0F1B2D", lineHeight: 1.45, paddingTop: 3 }}>{t.message}</div>
+            <div style={{ flex: 1, minWidth: 0, font: "600 13px Inter,sans-serif", color: "var(--st-text)", lineHeight: 1.45, paddingTop: 3 }}>{t.message}</div>
             <div className="clk actbtn" onClick={() => dismiss(t.id)} style={{ flex: "none" }}><Icon name="close" size={16} /></div>
           </div>
         );

@@ -44,6 +44,6 @@ export MINIO_BUCKET_NAME='x'
 
 ## Связанные документы
 
-- [ARCH.md](../ARCH.md) — общая архитектура и таблица endpoint'ов.
-- [ARCH_DIAGRAMS.md](../ARCH_DIAGRAMS.md) — подробные Mermaid-диаграммы по компонентам.
-- [USE_CASES.md](../USE_CASES.md) — сценарии использования по ролям.
+- [ARCH.md](ARCH.md) — общая архитектура и таблица endpoint'ов.
+- [ARCH_DIAGRAMS.md](ARCH_DIAGRAMS.md) — подробные Mermaid-диаграммы по компонентам.
+- [USE_CASES.md](USE_CASES.md) — сценарии использования по ролям.

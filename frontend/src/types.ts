@@ -13,20 +13,78 @@ export interface User {
    */
   project_role: "lead" | "pentester";
   is_active: boolean;
+  /** Административная блокировка (мягкое удаление): заблокированный не может войти. */
+  is_locked: boolean;
+  /** Включена ли двухфакторная аутентификация (TOTP). */
+  totp_enabled: boolean;
   password_changed_at: string | null;
   created_at: string;
 }
 
 export interface AuthLoginResponse {
-  id: number;
-  username: string;
-  role: UserRole;
+  /** true — пароль принят, но нужен второй шаг (POST /auth/2fa/verify). */
+  requires_2fa: boolean;
+  id?: number;
+  username?: string;
+  role?: UserRole;
+}
+
+export interface TwoFASetupResponse {
+  secret: string;
+  otpauth_uri: string;
+  /** QR-код в виде data:image/png;base64 — рендерит бэкенд. */
+  qr_png_data_url: string;
 }
 
 export interface PasswordResetResult {
   ok: boolean;
   email_sent_to: string;
   mail_preview_url: string | null;
+}
+
+export interface Invitation {
+  id: number;
+  email: string;
+  full_name: string | null;
+  role: UserRole;
+  project_role: "lead" | "pentester";
+  /** pending | accepted | revoked (в списке админа только pending). */
+  status: string;
+  is_expired: boolean;
+  expires_at: string;
+  invited_by: number | null;
+  created_at: string;
+}
+
+export interface InvitationSentResult {
+  invitation: Invitation;
+  email_sent_to: string;
+  mail_preview_url: string | null;
+}
+
+/** Проверка ссылки восстановления пароля. */
+export interface PasswordResetInfo {
+  valid: boolean;
+  username?: string | null;
+  /** Причина, когда valid=false: "expired" | "used" | "not_found". */
+  reason?: string | null;
+}
+
+/** Проверка ссылки возврата деактивированного пользователя (страница /reactivate). */
+export interface ReactivationInfo {
+  valid: boolean;
+  username?: string | null;
+  /** Причина, когда valid=false: "expired" | "used" | "not_found". */
+  reason?: string | null;
+}
+
+/** Публичные данные приглашения по токену (страница активации). */
+export interface InvitationInfo {
+  valid: boolean;
+  email?: string | null;
+  full_name?: string | null;
+  /** Причина, когда valid=false: "expired" | "used" | "not_found". */
+  reason?: string | null;
 }
 
 export interface PaginatedResponse<T> {
@@ -120,6 +178,21 @@ export interface ProjectNote {
   updated_at: string;
 }
 
+export interface ProjectCredential {
+  id: number;
+  project_id: number;
+  username: string | null;
+  /** Расшифрованный пароль — бэкенд шифрует его at rest. */
+  password: string;
+  /** К какому хосту относятся креды (IP/имя/кластер) — свободная строка. */
+  host: string | null;
+  created_by: number;
+  /** Имя автора — бэкенд резолвит его сам, т.к. /users доступен только админу. */
+  created_by_username: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ProjectNoteComment {
   id: number;
   project_id: number;
@@ -132,12 +205,25 @@ export interface ProjectNoteComment {
   updated_at: string;
 }
 
+/** Имя, в которое резолвится адрес: провенанс + подтверждение прямым резолвом. */
+export interface ResolvedHostname {
+  hostname: string;
+  /** ptr — PTR-запись адреса; project — имя известного хоста проекта. */
+  source: string;
+  /** Прямой резолв имени вернул этот же адрес. false — имя оставлено как подсказка. */
+  confirmed: boolean;
+}
+
 export interface HostIpAddress {
   id: number;
   host_id: number;
   ip_address: string;
   label: string | null;
   is_primary: boolean;
+  /** Обратный резолв адреса; у строк, заведённых до фермы IP, пустой. */
+  hostnames: ResolvedHostname[];
+  /** Адрес принадлежит сетям Cloudflare. */
+  is_cloudflare: boolean;
   ports: Port[];
   created_at: string;
   updated_at: string;
@@ -172,6 +258,8 @@ export interface Host {
   status: "up" | "down" | "unknown";
   os_type: OsType;
   notes: string | null;
+  /** host — обычный хост; ip — служебный родитель адреса из фермы IP. */
+  origin: "host" | "ip";
   created_at: string;
   updated_at: string;
 }
@@ -194,10 +282,147 @@ export interface Port {
   port_number: number;
   protocol: "tcp" | "udp";
   state: "open" | "closed" | "filtered";
+  /** HTTP-код корня `/` от пробива фермы (null — не пробивался/не ответил). */
+  http_status: number | null;
   /** Сервисы порта — бэкенд отдаёт их вместе с портом (PortOut.services). */
   services: Service[];
   created_at: string;
   updated_at: string;
+}
+
+/** Ответ пробива одного порта фермой (GET /host-farm/jobs/{id}.result.hosts[].ports[]). */
+export interface HostFarmPortResult {
+  port_number: number;
+  protocol: string;
+  scheme: string;
+  http_status: number | null;
+  state: string;
+  inferred: boolean;
+}
+
+export interface HostFarmHostResult {
+  hostname: string | null;
+  ip_address: string | null;
+  status: string;
+  created: boolean;
+  ports: HostFarmPortResult[];
+}
+
+export interface HostFarmResult {
+  targets_parsed: number;
+  targets_invalid: number;
+  hosts_created: number;
+  hosts_updated: number;
+  /** Целей пропущено как уже добавленных ранее — их не пробивали заново. */
+  hosts_skipped: number;
+  ports_created: number;
+  ports_updated: number;
+  hosts_online: number;
+  hosts_offline: number;
+  /** Адресов доменов, отдельно пробитых фермой IP (голым запросом к IP). */
+  ips_promoted: number;
+  hosts: HostFarmHostResult[];
+  errors: string[];
+}
+
+/** Фоновая задача фермы. status: pending | queued | running | done | failed. */
+export interface HostFarmJob {
+  id: number;
+  project_id: number;
+  kind: string;
+  status: string;
+  targets_total: number | null;
+  result: HostFarmResult | null;
+  error: string | null;
+  created_at: string;
+}
+
+/** Результат по одному адресу (GET /ip-farm/jobs/{id}.result.ips[]). */
+export interface IpFarmIpResult {
+  ip_address: string;
+  host_id: number | null;
+  hostnames: ResolvedHostname[];
+  is_cloudflare: boolean;
+  created: boolean;
+  /** Адрес подшит к уже существующему хосту, а не к новой строке origin='ip'. */
+  attached_to_existing_host: boolean;
+  ports: HostFarmPortResult[];
+}
+
+export interface IpFarmResult {
+  targets_parsed: number;
+  targets_invalid: number;
+  ips_created: number;
+  ips_updated: number;
+  /** Адресов пропущено как уже добавленных ранее — их не пробивали заново. */
+  ips_skipped: number;
+  ports_created: number;
+  ports_updated: number;
+  ips_online: number;
+  ips_offline: number;
+  hostnames_found: number;
+  /** Hosts created from confirmed PTR names (promoted through the host farm). */
+  hosts_promoted: number;
+  ips: IpFarmIpResult[];
+  errors: string[];
+}
+
+export interface JsSecret {
+  kind: string;
+  match_preview: string;
+  snippet: string | null;
+  severity: string;
+}
+
+/** JS-файл проекта с находками (GET /projects/{id}/js-files). */
+export interface JsFile {
+  id: number;
+  host_id: number;
+  hostname: string | null;
+  url: string;
+  status: string;
+  size_bytes: number | null;
+  content_type: string | null;
+  secret_count: number;
+  endpoint_count: number;
+  endpoints: string[];
+  secrets: JsSecret[];
+  fetched_at: string | null;
+}
+
+export interface JsFarmResult {
+  domains_scanned: number;
+  files_found: number;
+  files_scanned: number;
+  files_failed: number;
+  secrets_found: number;
+  endpoints_found: number;
+  files: { url: string; hostname: string | null; status: string; secret_count: number; endpoint_count: number }[];
+  errors: string[];
+}
+
+/** Та же таблица задач фермы, result формы JS (kind=js). */
+export interface JsFarmJob {
+  id: number;
+  project_id: number;
+  kind: string;
+  status: string;
+  targets_total: number | null;
+  result: JsFarmResult | null;
+  error: string | null;
+  created_at: string;
+}
+
+/** Та же таблица задач, что у HostFarmJob, но result другой формы (kind=ips). */
+export interface IpFarmJob {
+  id: number;
+  project_id: number;
+  kind: string;
+  status: string;
+  targets_total: number | null;
+  result: IpFarmResult | null;
+  error: string | null;
+  created_at: string;
 }
 
 export interface Service {
@@ -241,7 +466,7 @@ export interface Vulnerability {
   project_id: number;
   title: string;
   description: string | null;
-  severity: "critical" | "high" | "medium" | "low" | "info";
+  severity: "critical" | "high" | "medium" | "low" | "info" | "unknown";
   status: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
   cvss_version: "4.0" | null;
   cvss_score: number | null;
@@ -379,4 +604,41 @@ export interface AuditLog {
   details: Record<string, unknown> | null;
   ip_address: string | null;
   created_at: string;
+}
+
+/** Связь уязвимости с задачей в Jira (одна на уязвимость). */
+export interface JiraIssueLink {
+  id: number;
+  vulnerability_id: number;
+  /** Ключ задачи, напр. "SEC-123"; пусто, пока экспорт не завершён. */
+  jira_issue_key: string;
+  /** Ссылка на задачу в Jira; пусто, пока экспорт не завершён. */
+  jira_issue_url: string;
+  status: "pending" | "linked" | "error";
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Глобальная конфигурация Jira (одна на воркспейс), настраивает админ. api_token не возвращается. */
+export interface JiraConfig {
+  id: number;
+  name: string;
+  base_url: string;
+  email: string;
+  default_issue_type: string;
+  is_enabled: boolean;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Привязка проекта STORM к проекту Jira (ключ), настраивает админ. */
+export interface ProjectJiraLink {
+  id: number;
+  project_id: number;
+  jira_project_key: string;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
 }

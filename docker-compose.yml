@@ -10,8 +10,9 @@ services:
       - .env
     environment:
       COOKIE_SECURE: "true"
-      BACKEND_CORS_ORIGINS: "https://localhost:3000,https://127.0.0.1:3000,https://localhost,https://127.0.0.1"
-      CSRF_ALLOWED_ORIGINS: "https://localhost:3000,https://127.0.0.1:3000,https://localhost,https://127.0.0.1"
+      # BACKEND_CORS_ORIGINS / CSRF_ALLOWED_ORIGINS намеренно НЕ задаём здесь:
+      # значения из environment перекрывают env_file, и правки .env молча не
+      # применялись бы. Единственный источник истины — .env.
     depends_on:
       - db
       - minio
@@ -34,6 +35,23 @@ services:
         condition: service_healthy
       mailpit:
         condition: service_started
+    volumes:
+      - ./backend:/app
+      - ./:/workspace
+
+  # Рекон-ферма: пробив вставленных списков хостов и IP. Отдельный процесс —
+  # это минуты сетевого ожидания, которым нечего делать в воркерах uvicorn.
+  recon-worker:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    command: python -m app.worker.recon_worker
+    depends_on:
+      db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
     volumes:
       - ./backend:/app
       - ./:/workspace
