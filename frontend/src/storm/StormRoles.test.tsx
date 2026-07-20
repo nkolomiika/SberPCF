@@ -23,7 +23,7 @@ vi.mock("../api", async (importOriginal) => {
   // diana is not — mirrors the real seeded users.
   const mkUser = (id: number, username: string, role: string, isLead: boolean) => ({
     id, username, email: `${username}@example.com`, full_name: null, avatar_url: null,
-    role, project_role: isLead ? "lead" : "pentester", is_active: true, password_changed_at: null,
+    role, project_role: isLead ? "lead" : "pentester", is_active: true, totp_enabled: false, password_changed_at: null,
     created_at: "2026-01-01T00:00:00Z",
   });
   const users = [
@@ -49,6 +49,7 @@ vi.mock("../api", async (importOriginal) => {
       projects.map((p) => ({ project_id: p.id, status: p.status, hosts_count: 2, total_findings: 3, open_findings: 1 }))
     ),
     getUsers: vi.fn(async () => ({ items: users, total: users.length, page: 1, size: 200, pages: 1 })),
+    getInvitations: vi.fn(async () => []),
     getProjectMembers: vi.fn(async (projectId: number) => membersByProject[projectId] ?? []),
     getHosts: vi.fn(async () => ({ items: [], total: 0, page: 1, size: 100, pages: 1 })),
     getVulnerabilities: vi.fn(async () => ({ items: [], total: 0, page: 1, size: 100, pages: 1 })),
@@ -70,6 +71,8 @@ const asUser = (id: number, username: string, role: UserRole, projectRole: "lead
   role,
   project_role: projectRole,
   is_active: true,
+  is_locked: false,
+  totp_enabled: false,
   password_changed_at: null,
   created_at: "2026-01-01T00:00:00Z",
 });
@@ -82,14 +85,21 @@ describe("STORM role model", () => {
   // NB: rule 1.1 (a non-admin only sees projects they belong to) is enforced by
   // the backend (GET /projects), verified separately — not a client-side concern.
 
-  // 1.2 — a member who is not admin/creator/lead cannot see project members.
+  // 1.2 — a plain project member can VIEW the member list, but not manage it.
   // i.volkov (id 3) is a plain member of project 1, which admin (id 1) created.
-  it("hides the Members tab from a non-lead project member", async () => {
+  it("lets a non-lead project member view members but not manage them", async () => {
     useAuthStore.setState({ user: asUser(3, "i.volkov", "pentester"), isInitialized: true });
     render(<MemoryRouter><StormApp /></MemoryRouter>);
     fireEvent.click(await screen.findByText("Acme Corp — External Perimeter"));
-    // No project Members tab, no workspace Members nav, no Team card.
-    expect(screen.queryByText("Members")).not.toBeInTheDocument();
+    const main = document.querySelector("main") as HTMLElement;
+    // Team card offers a read-only "View all →", never the manager's "Manage →".
+    expect(await within(main).findByText("View all →")).toBeInTheDocument();
+    expect(within(main).queryByText("Manage →")).not.toBeInTheDocument();
+    // The Members tab is visible and lists members…
+    fireEvent.click(within(main).getByText("Members"));
+    expect(await within(main).findByText("i.volkov")).toBeInTheDocument();
+    // …but the add/remove controls are hidden for a non-manager.
+    expect(within(main).queryByText("Add member")).not.toBeInTheDocument();
   });
 
   // 1.3 — only admins see the workspace Members admin page (sidebar item).

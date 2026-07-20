@@ -25,6 +25,10 @@ class AgentTokenContext:
     scopes: set[str]
     all_projects: bool
     project_ids: set[int]
+    # Права создателя на момент запроса. Токен не может быть шире: даже с
+    # all_projects=True не-админ достаёт только свои проекты (пересечение ниже).
+    creator_is_admin: bool
+    creator_project_ids: set[int]
 
 
 def get_client_ip(request: Request) -> str | None:
@@ -53,7 +57,7 @@ async def get_current_user(
         raise UnauthorizedError("Требуется авторизация")
     user_id = decode_token(access_token, expected_type="access")
     user = await db.scalar(select(User).where(User.id == user_id))
-    if not user or not user.is_active:
+    if not user or not user.is_active or user.is_locked:
         raise UnauthorizedError("Пользователь не найден или деактивирован")
     return user
 
@@ -121,6 +125,17 @@ async def get_agent_token_context(
     )
     token.last_used_at = datetime.now(UTC)
     await db.commit()
+    # Права создателя на момент запроса — токен не может их превышать. Если
+    # создатель потерял доступ к проекту, токен тоже его теряет.
+    creator = await db.scalar(select(User).where(User.id == created_by))
+    creator_is_admin = creator is not None and creator.role == UserRole.ADMIN
+    creator_project_ids: set[int] = set()
+    if creator is not None and not creator_is_admin:
+        creator_project_ids = set(
+            (
+                await db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == created_by))
+            ).all()
+        )
     return AgentTokenContext(
         token_id=token_id,
         created_by=created_by,
@@ -128,6 +143,8 @@ async def get_agent_token_context(
         scopes=scopes,
         all_projects=all_projects,
         project_ids=project_ids,
+        creator_is_admin=creator_is_admin,
+        creator_project_ids=creator_project_ids,
     )
 
 
@@ -148,6 +165,11 @@ async def require_agent_project_access(
     project = await db.scalar(select(Project).where(Project.id == project_id))
     if not project:
         raise ForbiddenError("Проект не найден или недоступен")
+    # 1. Грант самого токена.
     if not context.all_projects and project_id not in context.project_ids:
+        raise ForbiddenError("Agent token не имеет доступа к проекту")
+    # 2. Не шире прав создателя: не-админ достаёт только свои проекты, даже
+    #    если у токена стоит all_projects.
+    if not context.creator_is_admin and project_id not in context.creator_project_ids:
         raise ForbiddenError("Agent token не имеет доступа к проекту")
     return project

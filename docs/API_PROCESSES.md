@@ -1,4 +1,4 @@
-# PCF — Описание API, функционала и диаграмм процессов
+# STORM — Описание API, функционала и диаграмм процессов
 
 Документ описывает:
 
@@ -67,7 +67,6 @@
 | `/api/v1/auth/login` | POST | Логин, выдача access + refresh cookies |
 | `/api/v1/auth/refresh` | POST | Ротация refresh-токена, выдача новых cookies |
 | `/api/v1/auth/logout` | POST | Logout, отзыв refresh, очистка cookies |
-| `/api/v1/auth/force-change-password` | POST | Принудительная смена временного пароля |
 | `/api/v1/users/me` | GET | Текущий пользователь (минимальная карточка) |
 | `/api/v1/users/me/profile` | GET | Полный профиль текущего пользователя |
 
@@ -102,7 +101,6 @@
 | POST | `/auth/login` | Логин по `username`+`password` | Любой |
 | POST | `/auth/refresh` | Ротация refresh-токена | Любой с refresh cookie |
 | POST | `/auth/logout` | Отзыв refresh, очистка cookies | Аутентифицированный |
-| POST | `/auth/force-change-password` | Смена временного пароля | Пользователь с `must_change_password=true` |
 
 ### 3.2. Пользователи (`/api/v1/users`)
 
@@ -268,7 +266,7 @@
 
 | Endpoint | Назначение | Аутентификация | Доступ |
 |----------|------------|-----------------|--------|
-| `/ws/notifications` | Push личных in-app уведомлений (mention) | Cookie `access_token` (JWT) | Любой авторизованный (кроме `must_change_password=true`) |
+| `/ws/notifications` | Push личных in-app уведомлений | Cookie `access_token` (JWT) | Любой авторизованный |
 | `/ws/projects/{project_id}` | События CRUD: hosts, ports, services, endpoints, vulnerabilities, comments, files, notes | Cookie `access_token` | participant проекта (или admin) |
 | `/ws/projects-index` | Изменения в списке проектов (для левого дерева) | Cookie `access_token` | Любой авторизованный |
 
@@ -358,33 +356,8 @@ sequenceDiagram
 **Альтернативы.**
 - Неверный пароль → `401`, запись `LOGIN_FAILED` в аудит.
 - `is_active = false` → `403`.
-- `must_change_password = true` → переход к Процессу 2.
 
-### Процесс 2. Принудительная смена пароля при первом входе
-
-**Назначение.** Не пустить пользователя дальше до смены временного пароля.
-
-**Используемые endpoints.** `POST /api/v1/auth/force-change-password`.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Пользователь
-    participant F as Frontend
-    participant B as Backend
-    participant DB as PostgreSQL
-
-    F->>F: must_change_password=true ->\nредирект /force-change-password
-    U->>F: Новый пароль (соответствует политике)
-    F->>B: POST /api/v1/auth/force-change-password\n{ new_password }
-    B->>B: Проверка политики
-    B->>DB: UPDATE users\npassword_hash, must_change_password=false,\npassword_changed_at=now()
-    B->>DB: INSERT audit_logs (PASSWORD_CHANGED)
-    B-->>F: 200
-    F->>F: Снять блокировку маршрутов
-```
-
-### Процесс 3. Сброс пароля администратором
+### Процесс 2. Сброс пароля администратором
 
 **Назначение.** Восстановить доступ пользователю, сгенерировав временный пароль и отправив его письмом.
 
@@ -402,12 +375,12 @@ sequenceDiagram
 
     A->>B: PATCH /api/v1/users/{id}/password
     B->>B: Сгенерировать temp_password
-    B->>DB: UPDATE users\npassword_hash, must_change_password=true
+    B->>DB: UPDATE users\npassword_hash, password_changed_at=NULL
     B->>DB: INSERT refresh_tokens revoke ALL\nдля user_id
     B->>DB: INSERT mail_jobs (template=password_reset, payload)
     B->>RMQ: publish mail_jobs.id
     B->>DB: INSERT audit_logs (UPDATE)
-    B-->>A: 200 PasswordResetOut (email, must_change_password, mail_preview_url?)
+    B-->>A: 200 PasswordResetOut (ok, email_sent_to, mail_preview_url?)
 
     RMQ->>W: deliver message
     W->>DB: SELECT mail_jobs WHERE id
@@ -421,7 +394,7 @@ sequenceDiagram
 - Если RabbitMQ недоступен, `mail_jobs.status='pending'` остаётся; `relay_pending_jobs` периодически перепубликует задания.
 - Mailpit (dev) показывает `mail_preview_url` в ответе.
 
-### Процесс 4. Управление проектами
+### Процесс 3. Управление проектами
 
 **Назначение.** Иерархическое управление проектами (папки + проекты) с drag&drop.
 
@@ -453,7 +426,7 @@ flowchart TD
 - Конфликт `(parent_id, name)` для папки → `409`.
 - Удаление непустой папки → `409`.
 
-### Процесс 5. Управление участниками проекта
+### Процесс 4. Управление участниками проекта
 
 **Используемые endpoints.**
 - `GET /api/v1/projects/{id}/members`
@@ -477,7 +450,7 @@ sequenceDiagram
     B-->>A: 201 ProjectMemberOut
 ```
 
-### Процесс 6. Инвентаризация активов
+### Процесс 5. Инвентаризация активов
 
 **Назначение.** Зафиксировать хосты, порты, сервисы и endpoints проекта.
 
@@ -504,7 +477,7 @@ flowchart TD
 - Один хост может иметь несколько IP-адресов (`host_ip_addresses`), один из которых `is_primary=true`.
 - Уникальность портов: `(host_id, port_number, protocol)`.
 
-### Процесс 7. Учёт уязвимостей
+### Процесс 6. Учёт уязвимостей
 
 **Назначение.** Зафиксировать выявленную уязвимость с CVSS-оценкой, привязать к активам, подкрепить доказательной базой.
 
@@ -558,7 +531,7 @@ sequenceDiagram
     B-->>F: 200
 ```
 
-### Процесс 8. Доказательная база (файлы)
+### Процесс 7. Доказательная база (файлы)
 
 **Назначение.** Хранение бинарных доказательств уязвимости (скриншоты, PDF, дампы).
 
@@ -599,7 +572,7 @@ flowchart TD
     H --> Z
 ```
 
-### Процесс 9. Комментирование уязвимости с упоминаниями
+### Процесс 8. Комментирование уязвимости с упоминаниями
 
 **Назначение.** Дискуссия по уязвимости с push-уведомлением упомянутых.
 
@@ -632,7 +605,7 @@ sequenceDiagram
     Note over WS,F: bob (если онлайн) видит toast и +1 в колокольчике
 ```
 
-### Процесс 10. Уведомления
+### Процесс 9. Уведомления
 
 **Назначение.** Управление списком in-app уведомлений с push'ом.
 
@@ -658,7 +631,7 @@ flowchart TD
     K --> L
 ```
 
-### Процесс 11. Заметки проекта
+### Процесс 10. Заметки проекта
 
 **Назначение.** Confluence-like иерархическое ведение знаний по проекту с комментариями.
 
@@ -689,7 +662,7 @@ flowchart TD
 - Уникальность `(project_id, parent_id, title)` — `409` при конфликте.
 - Удаление родителя удаляет дочерние страницы каскадно.
 
-### Процесс 12. Импорт PCF JSON-дампа
+### Процесс 11. Импорт PCF JSON-дампа
 
 **Назначение.** Залить массив активов и уязвимостей в проект из внешнего формата PCF.
 
@@ -730,7 +703,7 @@ sequenceDiagram
 - Идемпотентность: повторный импорт того же файла не создаёт дубликатов.
 - Битый JSON / схема → `422`.
 
-### Процесс 13. Импорт/экспорт OpenAPI для хоста
+### Процесс 12. Импорт/экспорт OpenAPI для хоста
 
 **Назначение.** Заведение HTTP-endpoints из OpenAPI 3.x и обратная выгрузка.
 
@@ -752,7 +725,7 @@ flowchart TD
     I --> Z([200 ImportResult])
 ```
 
-### Процесс 14. Экспорт уязвимости в Jira
+### Процесс 13. Экспорт уязвимости в Jira
 
 **Назначение.** Создать issue в Jira с описанием уязвимости и привязать его к записи.
 
@@ -799,7 +772,7 @@ flowchart TD
     D -- "да" --> E([Готово к экспорту])
 ```
 
-### Процесс 15. Генерация Word-отчётов
+### Процесс 14. Генерация Word-отчётов
 
 **Назначение.** Сформировать DOCX-отчёт «План пентеста» (ПП) или «Состояние защищённости» (СЗИ) по данным проекта.
 
@@ -822,7 +795,7 @@ sequenceDiagram
     B-->>U: 200 application/vnd.openxmlformats...\nContent-Disposition: attachment; filename*=UTF-8''Report.docx
 ```
 
-### Процесс 16. Управление профилем и аватаром
+### Процесс 15. Управление профилем и аватаром
 
 **Используемые endpoints.**
 - `GET /api/v1/users/me`, `GET /api/v1/users/me/profile`
@@ -848,7 +821,7 @@ flowchart TD
     G --> Y
 ```
 
-### Процесс 17. Выпуск Bearer-токена для AI-агента
+### Процесс 16. Выпуск Bearer-токена для AI-агента
 
 **Используемые endpoints.**
 - `POST /api/v1/agent-tokens` (создать)
@@ -877,7 +850,7 @@ sequenceDiagram
     Note over A,B: Значение token показывается ОДИН раз
 ```
 
-### Процесс 18. Работа AI-агента через `/api/v2`
+### Процесс 17. Работа AI-агента через `/api/v2`
 
 **Используемые endpoints.** все `/api/v2/...` (см. раздел 4).
 
@@ -904,7 +877,7 @@ sequenceDiagram
 - Скоупа не хватает → `403`;
 - Проект недоступен (нет `all_projects` и нет grant) → `403`.
 
-### Процесс 19. Просмотр журнала аудита
+### Процесс 18. Просмотр журнала аудита
 
 **Используемые endpoints.** `GET /api/v1/audit-logs`.
 
@@ -923,7 +896,7 @@ flowchart TD
 **Поля каждой записи.** `created_at`, `username`, `action`, `entity_type`,
 `entity_id`, `ip_address`, `user_agent`, `details (JSON)`.
 
-### Процесс 20. Real-time обновления через WebSocket
+### Процесс 19. Real-time обновления через WebSocket
 
 **Используемые каналы.** `/ws/notifications`, `/ws/projects/{id}`, `/ws/projects-index`.
 
@@ -972,7 +945,7 @@ sequenceDiagram
 - [GOST_34_DOCUMENTATION.md](GOST_34_DOCUMENTATION.md) — документация по ГОСТ 34;
 - [openapi-v1.json](openapi-v1.json) — машинно-читаемая спецификация REST v1;
 - [openapi-v2.json](openapi-v2.json) — машинно-читаемая спецификация REST v2;
-- [ARCH.md](../ARCH.md) — архитектура backend/frontend;
-- [DB_SCHEMA.md](../DB_SCHEMA.md) — структура БД;
-- [USE_CASES.md](../USE_CASES.md) — пользовательские сценарии (для справки);
-- [TEST_CASES.md](../TEST_CASES.md) — тест-кейсы QA.
+- [ARCH.md](ARCH.md) — архитектура backend/frontend;
+- [DB_SCHEMA.md](DB_SCHEMA.md) — структура БД;
+- [USE_CASES.md](USE_CASES.md) — пользовательские сценарии (для справки);
+- [TEST_CASES.md](TEST_CASES.md) — тест-кейсы QA.

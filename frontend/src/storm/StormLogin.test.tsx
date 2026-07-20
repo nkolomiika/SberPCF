@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 import { StormLogin } from "./StormLogin";
 import { useAuthStore } from "../store";
 
@@ -21,5 +22,17 @@ describe("StormLogin", () => {
     fireEvent.change(screen.getByLabelText("Username"), { target: { value: "m.antonov" } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret" } });
     expect(btn).not.toBeDisabled();
+  });
+
+  it("switches to the 2FA code step when the backend requires it", async () => {
+    const signIn = vi.fn().mockResolvedValue({ status: "2fa_required" });
+    useAuthStore.setState({ signIn });
+    render(<StormLogin />);
+    fireEvent.change(screen.getByLabelText("Username"), { target: { value: "admin" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "admin" } });
+    fireEvent.click(screen.getByRole("button", { name: /Sign in/i }));
+
+    expect(await screen.findByRole("heading", { name: "Two-factor code" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Authentication code")).toBeInTheDocument();
   });
 });

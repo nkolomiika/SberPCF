@@ -105,3 +105,42 @@ def test_jira_secret_roundtrip_does_not_store_plain_text() -> None:
 
     assert encrypted != "jira-secret"
     assert JiraIntegrationService._decrypt_secret(encrypted) == "jira-secret"
+
+
+def _compiled_where(query) -> str:
+    return str(query).replace("\n", " ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin", "filtered"),
+    [("host", True), ("ip", True), ("all", False)],
+)
+async def test_list_hosts_filters_by_origin(origin: str, filtered: bool) -> None:
+    """Список хостов по умолчанию прячет служебные строки фермы IP."""
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=0)
+    db.scalars = AsyncMock(return_value=MagicMock(all=lambda: []))
+
+    await AssetService(db).list_hosts(1, 1, 20, None, origin)
+
+    executed = _compiled_where(db.scalars.await_args.args[0])
+    assert ("hosts.origin =" in executed) is filtered
+
+
+@pytest.mark.asyncio
+async def test_list_hosts_defaults_to_host_origin() -> None:
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=0)
+    db.scalars = AsyncMock(return_value=MagicMock(all=lambda: []))
+
+    await AssetService(db).list_hosts(1, 1, 20, None)
+
+    assert "hosts.origin =" in _compiled_where(db.scalars.await_args.args[0])
+
+
+def test_normalize_host_ip_entries_keeps_cloudflare_out_of_user_input() -> None:
+    """is_cloudflare выводится из адреса при записи, а не приходит из формы."""
+    entries = AssetService._normalize_host_ip_entries("104.16.0.1", [])
+
+    assert entries == [{"ip_address": "104.16.0.1", "label": None, "is_primary": True}]

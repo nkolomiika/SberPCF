@@ -216,14 +216,32 @@ async def seed_demo_data() -> None:
         file_counter = 0
 
         for project_index, (project_name, folder_path, project_status, members) in enumerate(project_specs, start=1):
+            start_date = today - timedelta(days=14 + project_index)
+            end_date = today + timedelta(days=14 - project_index if project_status == ProjectStatus.ACTIVE else -project_index)
+            # Окно, в котором раскидываем created_at активов и находок, чтобы виджеты-
+            # графики росли: от старта проекта до «сегодня» (но не позже конца проекта).
+            p_start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=UTC)
+            p_end_dt = datetime.combine(end_date, datetime.min.time(), tzinfo=UTC)
+            data_hi = min(now, p_end_dt)
+            if data_hi <= p_start_dt:
+                data_hi = p_start_dt + timedelta(days=1)
+
+            def added_at(frac: float, _lo=p_start_dt, _hi=data_hi) -> datetime:
+                """created_at на доле `frac` окна проекта [start … min(now, end)]."""
+                return _lo + (_hi - _lo) * max(0.0, min(1.0, frac))
+
             project = Project(
                 name=project_name,
                 folder=folder_path,
                 description=f"Тестовый проект '{project_name}' с набором активов, уязвимостей и совместной работы.",
-                start_date=today - timedelta(days=14 + project_index),
-                end_date=today + timedelta(days=14 - project_index if project_status == ProjectStatus.ACTIVE else -project_index),
+                start_date=start_date,
+                end_date=end_date,
                 status=project_statuses[(project_index - 1) % len(project_statuses)] if project_status is None else project_status,
                 created_by=admin.id,
+                # Проект «заведён» в день своего старта — разносит точки на графиках
+                # количества проектов на главной странице.
+                created_at=p_start_dt,
+                updated_at=p_start_dt,
             )
             db.add(project)
             await db.flush()
@@ -357,12 +375,16 @@ async def seed_demo_data() -> None:
 
             for host_index in range(1, 4):
                 primary_ip = f"10.{project_index}.{host_index}.10"
+                # 3 хоста → 25% / 50% / 75% окна проекта: график хостов растёт ступеньками.
+                host_time = added_at(host_index / 4.0)
                 host = Host(
                     project_id=project.id,
                     ip_address=primary_ip,
                     hostname=f"{project_name.lower().replace(' ', '-')}-host-{host_index}.demo.local",
                     status=HostStatus.UP if host_index != 2 else HostStatus.UNKNOWN,
                     notes=f"Описание тестового хоста {host_index} для проекта {project_name}.",
+                    created_at=host_time,
+                    updated_at=host_time,
                 )
                 db.add(host)
                 await db.flush()
@@ -394,6 +416,8 @@ async def seed_demo_data() -> None:
                         ip_address=ip_suffix,
                         label=label,
                         is_primary=is_primary,
+                        created_at=host_time,
+                        updated_at=host_time,
                     )
                     db.add(ip_row)
                     host_ip_rows[label] = ip_row
@@ -426,6 +450,8 @@ async def seed_demo_data() -> None:
                         port_number=port_number,
                         protocol=protocol,
                         state=state,
+                        created_at=host_time,
+                        updated_at=host_time,
                     )
                     db.add(port)
                     await db.flush()
@@ -452,6 +478,8 @@ async def seed_demo_data() -> None:
                             name=service_name,
                             version=version,
                             banner=f"{service_name} banner for {project_name}",
+                            created_at=host_time,
+                            updated_at=host_time,
                         )
                     )
 
@@ -466,6 +494,8 @@ async def seed_demo_data() -> None:
                         path=path_suffix,
                         method=method,
                         description=f"{description} ({project_name})",
+                        created_at=host_time,
+                        updated_at=host_time,
                     )
                     db.add(endpoint)
                     await db.flush()
@@ -487,6 +517,9 @@ async def seed_demo_data() -> None:
                     )
 
                 for vuln_index in range(1, 3):
+                    # 6 находок на проект, разнесены по окну (0.11 … 0.89) — график
+                    # уязвимостей и «моих находок» на overview растёт плавной лесенкой.
+                    vuln_time = added_at((host_index - 1 + vuln_index / 3.0) / 3.0)
                     vuln = Vulnerability(
                         project_id=project.id,
                         title=f"{project_name} / Host {host_index} / Finding {vuln_index}",
@@ -515,6 +548,8 @@ async def seed_demo_data() -> None:
                         impact="Компрометация конфиденциальности и/или целостности данных.",
                         recommendations="Ограничить доступ, валидировать входные данные и усилить аутентификацию.",
                         created_by=members[0].id if members else admin.id,
+                        created_at=vuln_time,
+                        updated_at=vuln_time,
                     )
                     db.add(vuln)
                     await db.flush()

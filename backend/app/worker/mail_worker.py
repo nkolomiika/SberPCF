@@ -97,10 +97,13 @@ async def process_mail_job(job_id: int) -> None:
         job.attempts += 1
         await db.commit()
         try:
+            html_body = job.payload.get("html")
             await send_plain_text_email(
                 recipient_email=job.recipient_email,
                 subject=job.subject,
                 body=str(job.payload.get("body", "")),
+                # Старые задания в очереди html не содержат — уйдут как обычный текст.
+                html_body=str(html_body) if html_body else None,
             )
         except Exception as exc:
             job.last_error = str(exc)

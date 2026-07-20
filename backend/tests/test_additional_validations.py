@@ -1,6 +1,6 @@
 import pytest
 from pydantic import ValidationError as PydanticValidationError
-from app.enums import ProjectStatus
+from app.enums import ProjectStatus, Severity
 
 from app.config import Settings
 from app.pagination import PageParams
@@ -23,9 +23,10 @@ def test_user_create_accepts_admin_role_tc_usr_004() -> None:
     assert payload.role.value == "admin"
 
 
-def test_vulnerability_requires_severity_tc_vuln_003() -> None:
-    with pytest.raises(PydanticValidationError):
-        VulnerabilityCreate(title="No severity")
+def test_vulnerability_defaults_severity_to_unknown_tc_vuln_003() -> None:
+    # Критичность не обязательна: без неё находка создаётся со значением "unknown".
+    payload = VulnerabilityCreate(title="No severity", host_id=1)
+    assert payload.severity == Severity.UNKNOWN
 
 
 def test_vulnerability_rejects_invalid_severity_tc_vuln_004() -> None:

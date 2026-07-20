@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import (
     JSON,
@@ -63,6 +63,12 @@ class User(Base, TimestampMixin):
     avatar_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # TOTP-2FA (RFC 6238). Секрет хранится зашифрованным (Fernet), см. security.encrypt_secret.
+    # totp_secret может быть выставлен на этапе setup, но пока totp_enabled=false код при
+    # логине не спрашивается — это защищает от блокировки при незавершённой настройке.
+    totp_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    totp_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole, name="user_role"), nullable=False, default=UserRole.PENTESTER)
     # Проектная роль — глобальная, настраивается в /members. Лид = обычный юзер,
     # которому открыты доп. возможности в проектах, где он участник.
@@ -73,6 +79,11 @@ class User(Base, TimestampMixin):
         server_default=ProjectRole.PENTESTER.name,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Административная блокировка (мягкое удаление): «удаление» пользователя не
+    # стирает строку — она бы утащила за собой его проекты/находки/заметки (FK
+    # RESTRICT) — а лишь выставляет этот флаг. Заблокированный не может войти и не
+    # проходит get_current_user, но всё авторство и связи остаются целыми.
+    is_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     @property
     def avatar_url(self) -> str | None:
@@ -146,6 +157,87 @@ class MailJob(Base, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Invitation(Base, TimestampMixin):
+    """Приглашение нового пользователя по email.
+
+    Пока приглашение не принято, записи в ``users`` нет — поэтому вход по будущему
+    юзернейму/email до активации отдаёт обычную ошибку «неверный логин или пароль».
+    При активации приглашённый сам выбирает username и пароль, и создаётся User.
+    """
+
+    __tablename__ = "invitations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole, name="user_role"), nullable=False, default=UserRole.PENTESTER)
+    project_role: Mapped[ProjectRole] = mapped_column(
+        Enum(ProjectRole, name="project_role"),
+        nullable=False,
+        default=ProjectRole.PENTESTER,
+        server_default=ProjectRole.PENTESTER.name,
+    )
+    # SHA-256 от «сырого» токена из письма — сам токен в БД не храним (как refresh-токены).
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    # pending | accepted | revoked. Истёкшее приглашение остаётся pending — «протухло»
+    # вычисляется по expires_at, чтобы админ мог переотправить его тем же действием.
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default="pending", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    invited_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    @property
+    def is_expired(self) -> bool:
+        """Приглашение ещё в статусе pending, но срок жизни ссылки истёк."""
+        return self.status == "pending" and self.expires_at is not None and self.expires_at <= datetime.now(UTC)
+
+
+class PasswordResetToken(Base):
+    """Одноразовый токен восстановления пароля («забыли пароль»).
+
+    В БД лежит только SHA-256 от токена из письма. Токен одноразовый: после
+    успешной смены пароля проставляется ``used_at`` и ссылка перестаёт работать.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    @property
+    def is_usable(self) -> bool:
+        """Ссылку ещё не использовали и она не истекла."""
+        return self.used_at is None and self.expires_at > datetime.now(UTC)
+
+
+class AccountReactivationToken(Base):
+    """Одноразовый токен возврата деактивированного пользователя.
+
+    Админ «удаляет» пользователя = блокирует (is_locked). Возврат идёт по ссылке
+    из письма: пользователь переходит по ней, аккаунт разблокируется и сразу
+    выдаётся сессия. В БД, как и для сброса пароля, лежит только SHA-256 токена.
+    """
+
+    __tablename__ = "account_reactivation_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    @property
+    def is_usable(self) -> bool:
+        """Ссылку ещё не использовали и она не истекла."""
+        return self.used_at is None and self.expires_at > datetime.now(UTC)
 
 
 class Project(Base, TimestampMixin):
@@ -285,6 +377,38 @@ class ProjectNoteComment(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class ProjectCredential(Base, TimestampMixin):
+    """Учётные данные проекта — пара «username + password».
+
+    Общее хранилище аккаунтов для команды: доступ на чтение и правку есть у всех
+    участников проекта. Пароль шифруется at rest через
+    :func:`app.security.encrypt_secret` — в БД лежит только шифртекст.
+    """
+
+    __tablename__ = "project_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Пароль — только шифртекст (Fernet), см. security.encrypt_secret.
+    password_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # От какого хоста креды — свободная строка (IP/имя/кластер), не FK: креды
+    # могут указывать на цель, которой ещё нет в списке хостов проекта.
+    host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+
+    # Имя автора отдаём вместе с кредом: /users доступен только админу, а автора
+    # видят все участники проекта (тот же приём, что у заметок и находок).
+    creator: Mapped["User"] = relationship("User", foreign_keys=[created_by], lazy="selectin")
+
+    @property
+    def created_by_username(self) -> str | None:
+        """Имя автора креда для ProjectCredentialOut."""
+        return self.creator.username if self.creator else None
+
+
 class Host(Base, TimestampMixin):
     """Хост инфраструктуры проекта.
 
@@ -310,6 +434,15 @@ class Host(Base, TimestampMixin):
         server_default=OsType.UNKNOWN.name,
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 'host' — добавлен как хост (виден в списке хостов);
+    # 'ip'   — служебный родитель для импорта IP: порты ссылаются на
+    #          host_ip_addresses, а те на hosts, поэтому строка нужна, но в
+    #          списке хостов не показывается (см. AssetService.list_hosts).
+    #          Отличать по «hostname IS NULL» нельзя: ферма хостов тоже пишет
+    #          NULL, когда в список хостов вставили IP-литерал.
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="host", server_default="host", index=True
+    )
 
     ip_addresses: Mapped[list["HostIpAddress"]] = relationship(
         "HostIpAddress",
@@ -337,6 +470,18 @@ class HostIpAddress(Base, TimestampMixin):
     ip_address: Mapped[str] = mapped_column(String(45), nullable=False)
     label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Имена, в которые резолвится адрес: [{"hostname", "source", "confirmed"}].
+    # source: ptr — PTR-запись адреса, project — имя известного хоста проекта;
+    # confirmed — прямой резолв имени вернул этот же адрес. Неподтверждённые
+    # имена храним тоже: PTR контролирует владелец адреса, это подсказка.
+    # NB: обычная JSON-колонка не отслеживает мутацию на месте — присваивать
+    # список целиком, не .append().
+    hostnames: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # За адресом Cloudflare. Трёхзначно: True — виден CF (CIDR или заголовки/детект
+    # пробива), False — достоверно НЕ CF (хост ответил, сигнала нет), NULL — неизвестно
+    # (ещё пробится / не ответил). Пересчитывается при каждой записи, но True в NULL/False
+    # без достоверного отрицательного сигнала не понижается (см. farm._ensure_ips).
+    is_cloudflare: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
 
     host: Mapped[Host] = relationship("Host", back_populates="ip_addresses")
     ports: Mapped[list["Port"]] = relationship(
@@ -367,6 +512,9 @@ class Port(Base, TimestampMixin):
     port_number: Mapped[int] = mapped_column(nullable=False)
     protocol: Mapped[Protocol] = mapped_column(Enum(Protocol, name="port_protocol"), nullable=False, default=Protocol.TCP)
     state: Mapped[PortState] = mapped_column(Enum(PortState, name="port_state"), nullable=False, default=PortState.OPEN)
+    # HTTP-код ответа на корневой `/` (200/301/…), проставляется пробом «фермы».
+    # null — порт не пробивался по HTTP или не ответил.
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     ip_address: Mapped["HostIpAddress"] = relationship("HostIpAddress", back_populates="ports")
     # Сервисы порта — нужны, чтобы отдавать имя сервиса вместе с портом одним
@@ -376,6 +524,31 @@ class Port(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="Service.name",
     )
+
+
+class ProjectHiddenIp(Base):
+    """Адрес, скрытый пользователем из списка IP проекта.
+
+    «Удаление» IP из вкладки IP не должно рвать привязку адреса к домен-хостам
+    (origin='host'): их HostIpAddress остаётся, и в карточке хоста адрес виден.
+    Поэтому саму привязку не трогаем, а адрес заносим сюда — вкладка IP скрывает
+    строки из этого списка. Отдельную IP-запись (Host origin='ip') при этом
+    удаляем целиком. Явное повторное добавление через «Add IPs» убирает адрес
+    отсюда (см. IpFarmService), и он снова показывается.
+    """
+
+    __tablename__ = "project_hidden_ips"
+    __table_args__ = (
+        UniqueConstraint("project_id", "ip_address", name="uq_project_hidden_ip"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ip_address: Mapped[str] = mapped_column(String(45), nullable=False)
+    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Service(Base, TimestampMixin):
@@ -388,6 +561,47 @@ class Service(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     banner: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class HostFarmJob(Base, TimestampMixin):
+    """Фоновая задача рекон-фермы: пробив вставленного списка хостов или IP.
+
+    Парсинг делается синхронно в запросе (быстро), а resolve+probe+persist идут в
+    фоне; фронт опрашивает статус. ``result`` — сериализованный HostFarmResult
+    либо IpFarmResult, в зависимости от ``kind``.
+    """
+
+    __tablename__ = "host_farm_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    # hosts | ips — какой фермой создана задача; определяет форму result.
+    kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="hosts", server_default="hosts", index=True
+    )
+    # pending → queued → running → done | failed
+    # pending ставит роутер, queued — relay воркера после публикации в RabbitMQ.
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default="pending", index=True)
+    targets_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Сырой вставленный список — воркер живёт в другом процессе и получает
+    # только id задачи, поэтому цели должны лежать в самой задаче.
+    raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Ключи целей (hostname/IP), уже существовавших в проекте на момент постановки
+    # задачи. Считаются синхронно в create_job (до skeleton-заготовок, иначе
+    # заготовки этой же задачи выглядели бы как «уже добавленные»); воркер живёт в
+    # другом процессе и получает только id, поэтому список должен лежать в задаче.
+    # Воркер исключает эти цели из пробива — повторный импорт не пере-пробивает
+    # уже добавленное, а только сообщает, сколько пропущено.
+    skipped_targets: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class Endpoint(Base, TimestampMixin):
@@ -406,6 +620,68 @@ class Endpoint(Base, TimestampMixin):
     request_headers: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
 
 
+class JsFile(Base, TimestampMixin):
+    """JS-файл, найденный и просканированный фермой на домене проекта.
+
+    Ферма JS идёт на домен, находит `.js`, скачивает и грепает секреты + пути.
+    Сам файл не хранится (скан в памяти) — в БД только находки и метаданные.
+    Пути (`endpoints`) лежат JSON-списком: они навигационные и не подшиваются
+    в таблицу endpoints. Секреты — отдельной таблицей JsSecret.
+    """
+
+    __tablename__ = "js_files"
+    __table_args__ = (
+        UniqueConstraint("project_id", "url", name="uq_js_file_project_url"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    host_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(127), nullable=True)
+    # ok — скачан и просканирован; failed — не скачался; too_large — превысил лимит.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok", server_default="ok")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    endpoint_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Найденные в файле пути/URL: обычный JSON-список строк.
+    endpoints: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    secrets: Mapped[list["JsSecret"]] = relationship(
+        "JsSecret",
+        back_populates="js_file",
+        cascade="all, delete-orphan",
+        order_by="JsSecret.id",
+    )
+
+
+class JsSecret(Base, TimestampMixin):
+    """Секрет, найденный в JS-файле встроенным regex-набором."""
+
+    __tablename__ = "js_secrets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    js_file_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("js_files.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # aws_access_key | google_api | jwt | private_key | slack_token | github_pat | ...
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Усечённое/частично скрытое совпадение — полный секрет в БД не кладём.
+    match_preview: Mapped[str] = mapped_column(String(255), nullable=False)
+    snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # high | medium | low
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="medium", server_default="medium")
+
+    js_file: Mapped[JsFile] = relationship("JsFile", back_populates="secrets")
+
+
 class Vulnerability(Base, TimestampMixin):
     """Найденная уязвимость."""
 
@@ -415,7 +691,9 @@ class Vulnerability(Base, TimestampMixin):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    severity: Mapped[Severity] = mapped_column(Enum(Severity, name="vuln_severity"), nullable=False)
+    severity: Mapped[Severity] = mapped_column(
+        Enum(Severity, name="vuln_severity"), nullable=False, default=Severity.UNKNOWN, server_default="unknown"
+    )
     cvss_version: Mapped[CvssVersion | None] = mapped_column(Enum(CvssVersion, name="cvss_version"), nullable=True)
     cvss_score: Mapped[float | None] = mapped_column(Numeric(4, 1), nullable=True)
     cvss_vector: Mapped[str | None] = mapped_column(String(255), nullable=True)

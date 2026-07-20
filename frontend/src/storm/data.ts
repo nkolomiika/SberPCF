@@ -13,7 +13,7 @@ export type HostStatus = "up" | "down" | "unknown";
 export type Role = "lead" | "pentester";
 /** Workspace-level (account) role — separate from the project role. */
 export type WsRole = "admin" | "user";
-export type Severity = "critical" | "high" | "medium" | "low" | "info";
+export type Severity = "critical" | "high" | "medium" | "low" | "info" | "unknown";
 /** Mirrors the backend's VulnerabilityStatus verbatim — no lossy re-mapping. */
 export type VStatus = "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
 export type ProjectStatus = "active" | "archived";
@@ -23,6 +23,10 @@ export interface Port {
   proto: string;
   state: PortState;
   svc: string;
+  /** Технологии порта (whatweb): весь стек чипами. Пусто → в карточке «unknown». */
+  techs: { name: string; version: string | null }[];
+  /** HTTP-код корня `/` от пробива фермы (null — не пробивался/не ответил). */
+  http: number | null;
 }
 
 export interface Endpoint {
@@ -32,13 +36,46 @@ export interface Endpoint {
   p: string;
 }
 
+/** One address of a host, with what it reverse-resolves to. */
+/** Cloudflare tri-state: true — behind CF, false — confirmed not, null — unknown (still probing). */
+export type CfState = boolean | null;
+
+export interface IpEntry {
+  ip: string;
+  /** Names the address resolves to; `confirmed: false` = PTR without a forward match. */
+  hostnames: { hostname: string; source: string; confirmed: boolean }[];
+  cloudflare: CfState;
+}
+
+/** A JS file discovered on a project domain, with what the scan found in it. */
+export interface JsFileEntry {
+  id: number;
+  /** Domain the file was found on — the JS view groups rows by it. */
+  host: string;
+  url: string;
+  status: string;
+  size: number | null;
+  secrets: { kind: string; match: string; snippet: string | null; severity: string }[];
+  /** Endpoint paths pulled out of the file (stay in the JS view, not Endpoints). */
+  endpoints: string[];
+}
+
 export interface Host {
   id: number;
   host: string;
   ip: string;
   status: HostStatus;
+  /** ISO creation timestamp — drives the cumulative Overview sparkline. */
+  created?: string;
   /** Every IP of the host; `ip` above is the primary one. */
   ips: string[];
+  /** Same addresses as `ips`, with reverse-resolution and the Cloudflare flag. */
+  ipEntries: IpEntry[];
+  /** `ip` — imported through the IP farm; such rows are hidden from the hosts table. */
+  origin: "host" | "ip";
+  /** Host-level CF (tri-state): true if any address is CF, false if all confirmed not,
+   *  null if unknown (no addresses yet / still probing). */
+  cloudflare: CfState;
   ports: Port[];
   endpoints: Endpoint[];
 }
@@ -62,6 +99,8 @@ export interface Vuln {
   status: VStatus;
   author: string;
   updated: string;
+  /** ISO creation timestamp — drives the cumulative Overview sparkline. */
+  created?: string;
   steps?: string[];
   stepImages?: Record<number, string[]>;
   description?: string;
@@ -80,6 +119,19 @@ export interface Note {
   author: string;
 }
 
+/** A stored account for the project — the shared username/password vault. */
+export interface Cred {
+  /** Backend project-credential id. */
+  id: number;
+  username: string;
+  /** Decrypted password — masked in the table until revealed. */
+  password: string;
+  /** Which host these creds are for (IP / name / cluster) — free text. */
+  host: string;
+  author: string;
+  when: string;
+}
+
 /** The open project, assembled from the backend collections — a view, not a store. */
 export interface ProjectDetail {
   status: ProjectStatus;
@@ -93,6 +145,7 @@ export interface ProjectDetail {
   members: Member[];
   vulns: Vuln[];
   notes: Note[];
+  creds: Cred[];
 }
 
 export interface WorkspaceUser {
@@ -103,6 +156,8 @@ export interface WorkspaceUser {
   email: string;
   role: WsRole;
   projectRole: Role;
+  /** Деактивирован (мягкое удаление): показывается с бейджем, вход закрыт. */
+  locked: boolean;
 }
 
 export interface ApiKey {
@@ -111,4 +166,9 @@ export interface ApiKey {
   key: string;
   scopes: string[];
   created: string;
+  /** Дата истечения (уже отформатирована) или null для бессрочного. */
+  expires?: string | null;
+  /** Доступ ко всем проектам создателя или к явно выбранным. */
+  allProjects?: boolean;
+  projectCount?: number;
 }

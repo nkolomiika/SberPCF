@@ -10,44 +10,53 @@ export interface ColorPair {
 
 /** Host status dot colours. */
 export const STDOT: Record<HostStatus, string> = {
-  up: "#3FA26B",
-  down: "#C0455B",
-  unknown: "#c99a2b",
+  up: "var(--st-success)",
+  down: "var(--st-danger)",
+  unknown: "var(--st-warn)",
 };
 
 /** Port pill colours by TCP/UDP state. */
 export const PORT: Record<PortState, ColorPair> = {
-  open: { bg: "#E7F5EE", color: "#2E8B57" },
-  filtered: { bg: "#FBF1DF", color: "#B7862B" },
-  closed: { bg: "#EEF1F6", color: "#8A97AB" },
+  open: { bg: "var(--st-success-soft)", color: "var(--st-success)" },
+  filtered: { bg: "var(--st-warn-soft)", color: "var(--st-warn)" },
+  closed: { bg: "var(--st-elevated)", color: "var(--st-text-3)" },
 };
 
 /** HTTP method badge colours. */
 export const METHOD: Record<Method, ColorPair> = {
-  GET: { bg: "#E7F5EE", color: "#2E8B57" },
-  POST: { bg: "#EAF0FC", color: "#2E5FBF" },
-  PUT: { bg: "#F1ECFB", color: "#7A4DB8" },
-  PATCH: { bg: "#FBF1DF", color: "#B7862B" },
-  DELETE: { bg: "#FCEBED", color: "#C0455B" },
-  QUERY: { bg: "#E4F6FA", color: "#1E8BA8" },
+  GET: { bg: "var(--st-success-soft)", color: "var(--st-success)" },
+  POST: { bg: "var(--st-accent-soft)", color: "var(--st-accent)" },
+  PUT: { bg: "var(--st-purple-soft)", color: "var(--st-purple)" },
+  PATCH: { bg: "var(--st-warn-soft)", color: "var(--st-warn)" },
+  DELETE: { bg: "var(--st-danger-soft)", color: "var(--st-danger)" },
+  QUERY: { bg: "var(--st-cyan-soft)", color: "var(--st-cyan)" },
 };
 
 /** Severity badge colours. */
 export const SEV: Record<Severity, ColorPair> = {
-  critical: { bg: "#FCEBEE", color: "#C0455B" },
-  high: { bg: "#FCEEE6", color: "#D9683C" },
-  medium: { bg: "#FBF3E2", color: "#B7862B" },
-  low: { bg: "#EAF0FC", color: "#2E5FBF" },
-  info: { bg: "#EEF1F6", color: "#6b7a90" },
+  critical: { bg: "var(--st-danger-soft)", color: "var(--st-danger)" },
+  high: { bg: "var(--st-warn-soft)", color: "var(--st-orange)" },
+  medium: { bg: "var(--st-warn-soft)", color: "var(--st-warn)" },
+  low: { bg: "var(--st-accent-soft)", color: "var(--st-accent)" },
+  info: { bg: "var(--st-elevated)", color: "var(--st-text-3)" },
+  // Критичность ещё не оценена — приглушённый нейтральный бейдж.
+  unknown: { bg: "var(--st-elevated)", color: "var(--st-text-faint)" },
+};
+
+/** Badge colour for a secret found in JS, by its severity. */
+export const SECRET_SEV: Record<string, ColorPair> = {
+  high: { bg: "var(--st-danger-soft)", color: "var(--st-danger)" },
+  medium: { bg: "var(--st-warn-soft)", color: "var(--st-warn)" },
+  low: { bg: "var(--st-elevated)", color: "var(--st-text-3)" },
 };
 
 /** Vulnerability status dot/text colour. */
 export const VSTATUS: Record<VStatus, string> = {
-  open: "#C0455B",
-  in_progress: "#B7862B",
-  fixed: "#2E8B57",
-  wont_fix: "#8A97AB",
-  accepted_risk: "#7A4DB8",
+  open: "var(--st-danger)",
+  in_progress: "var(--st-warn)",
+  fixed: "var(--st-success)",
+  wont_fix: "var(--st-text-3)",
+  accepted_risk: "var(--st-purple)",
 };
 
 /** Human labels for the backend's vulnerability statuses. */
@@ -77,25 +86,25 @@ export const EPSTATUS: Record<Method, string> = {
 
 /** Project status chip: label + colours + dot. Mirrors the backend's ProjectStatus. */
 export const PROJ_STATUS: Record<string, { label: string; bg: string; color: string; dot: string }> = {
-  active: { label: "Active", bg: "#E7F5EE", color: "#2E8B57", dot: "#3FA26B" },
+  active: { label: "Active", bg: "var(--st-success-soft)", color: "var(--st-success)", dot: "var(--st-success)" },
   // Заморожен — голубой.
-  freeze: { label: "Freeze", bg: "#E4F6FA", color: "#1E8BA8", dot: "#35B3D2" },
-  handover_to_development: { label: "Handover to dev", bg: "#F1ECFB", color: "#7A4DB8", dot: "#9B72D8" },
-  vulnerability_recheck: { label: "Recheck", bg: "#EAF0FC", color: "#2E5FBF", dot: "#4C74C7" },
-  completed: { label: "Completed", bg: "#FBF3E2", color: "#B7862B", dot: "#E8A13C" },
-  archived: { label: "Archived", bg: "#EEF1F6", color: "#8A97AB", dot: "#b3bccd" },
+  freeze: { label: "Freeze", bg: "var(--st-cyan-soft)", color: "var(--st-cyan)", dot: "var(--st-cyan)" },
+  handover_to_development: { label: "Handover to dev", bg: "var(--st-purple-soft)", color: "var(--st-purple)", dot: "var(--st-purple)" },
+  vulnerability_recheck: { label: "Recheck", bg: "var(--st-accent-soft)", color: "var(--st-accent)", dot: "var(--st-accent-2)" },
+  completed: { label: "Completed", bg: "var(--st-warn-soft)", color: "var(--st-warn)", dot: "var(--st-warn)" },
+  archived: { label: "Archived", bg: "var(--st-elevated)", color: "var(--st-text-3)", dot: "var(--st-text-faint)" },
 };
 
 /** Project role badge colours. */
 export const ROLE: Record<Role, ColorPair> = {
-  lead: { bg: "#EAF0FC", color: "#2E5FBF" },
-  pentester: { bg: "#E7F5EE", color: "#2E8B57" },
+  lead: { bg: "var(--st-accent-soft)", color: "var(--st-accent)" },
+  pentester: { bg: "var(--st-success-soft)", color: "var(--st-success)" },
 };
 
 /** Workspace (account) role badge colours. */
 export const WS_ROLE: Record<WsRole, ColorPair> = {
-  admin: { bg: "#F1ECFB", color: "#7A4DB8" },
-  user: { bg: "#EEF1F6", color: "#6b7a90" },
+  admin: { bg: "var(--st-purple-soft)", color: "var(--st-purple)" },
+  user: { bg: "var(--st-elevated)", color: "var(--st-text-3)" },
 };
 
 export const WS_ROLE_LABEL: Record<WsRole, string> = {
@@ -103,43 +112,56 @@ export const WS_ROLE_LABEL: Record<WsRole, string> = {
   user: "User",
 };
 
-/** Activity log tag colours (dark chips). */
+/** Activity log tag colours (dark chips — dark in both themes by design). */
 export const ATAG: Record<string, ColorPair> = {
-  new: { bg: "#1c3a2a", color: "#5FD597" },
-  down: { bg: "#3a1f24", color: "#F1889A" },
-  changed: { bg: "#3a3320", color: "#E8C05A" },
-  dns: { bg: "#1f2c44", color: "#7FA8F0" },
+  new: { bg: "var(--st-tag-green-bg)", color: "var(--st-tag-green)" },
+  down: { bg: "var(--st-tag-red-bg)", color: "var(--st-tag-red)" },
+  changed: { bg: "var(--st-tag-amber-bg)", color: "var(--st-tag-amber)" },
+  dns: { bg: "var(--st-tag-blue-bg)", color: "var(--st-tag-blue)" },
 };
 
 /** Host-status summary tiles. */
 export const HSTAT: Record<HostStatus, { label: string; color: string; bg: string }> = {
-  up: { label: "Up", color: "#2E8B57", bg: "#E7F5EE" },
-  down: { label: "Down", color: "#C0455B", bg: "#FBEAEC" },
-  unknown: { label: "Unknown", color: "#B7862B", bg: "#FBF1DF" },
+  up: { label: "Up", color: "var(--st-success)", bg: "var(--st-success-soft)" },
+  down: { label: "Down", color: "var(--st-danger)", bg: "var(--st-danger-soft)" },
+  unknown: { label: "Unknown", color: "var(--st-warn)", bg: "var(--st-warn-soft)" },
 };
 
 /** Vulnerability-status summary tiles. */
 export const VSTAT: Record<VStatus, { label: string; color: string; bg: string }> = {
-  open: { label: "Open", color: "#C0455B", bg: "#FBEAEC" },
-  in_progress: { label: "In progress", color: "#B7862B", bg: "#FBF1DF" },
-  fixed: { label: "Fixed", color: "#2E8B57", bg: "#E7F5EE" },
-  wont_fix: { label: "Won't fix", color: "#8A97AB", bg: "#EEF1F6" },
-  accepted_risk: { label: "Accepted risk", color: "#7A4DB8", bg: "#F1ECFB" },
+  open: { label: "Open", color: "var(--st-danger)", bg: "var(--st-danger-soft)" },
+  in_progress: { label: "In progress", color: "var(--st-warn)", bg: "var(--st-warn-soft)" },
+  fixed: { label: "Fixed", color: "var(--st-success)", bg: "var(--st-success-soft)" },
+  wont_fix: { label: "Won't fix", color: "var(--st-text-3)", bg: "var(--st-elevated)" },
+  accepted_risk: { label: "Accepted risk", color: "var(--st-purple)", bg: "var(--st-purple-soft)" },
 };
 
 /** Project-list "findings" badge colours. */
 export const FINDING_SEV: Record<"none" | "med" | "high", { fBg: string; fColor: string; fDot: string }> = {
-  none: { fBg: "#EEF1F6", fColor: "#8A97AB", fDot: "#c3ccda" },
-  med: { fBg: "#FDF3E7", fColor: "#B26A16", fDot: "#E8A13C" },
-  high: { fBg: "#FCEBED", fColor: "#C0455B", fDot: "#E0748A" },
+  none: { fBg: "var(--st-elevated)", fColor: "var(--st-text-3)", fDot: "var(--st-text-faint)" },
+  med: { fBg: "var(--st-warn-soft)", fColor: "var(--st-warn)", fDot: "var(--st-warn)" },
+  high: { fBg: "var(--st-danger-soft)", fColor: "var(--st-danger)", fDot: "var(--st-danger)" },
 };
 
-export const API_SCOPES = ["read:hosts", "read:vulns", "write:notes", "write:vulns", "admin"];
+/* Scopes агент-токенов /api/v2. ЕДИНСТВЕННЫЙ источник истины — бэкенд
+   (AgentTokenService.ALLOWED_SCOPES / require_agent_scope). Здесь только те права,
+   что реально существуют в БД и проверяются на запросе — никаких выдуманных. */
+export const API_SCOPES = ["projects:read", "assets:read", "vulns:read", "vulns:write", "notes:read", "notes:write"];
+
+/** Человекочитаемые подписи scopes для UI выпуска ключа. */
+export const API_SCOPE_LABELS: Record<string, string> = {
+  "projects:read": "Projects — read",
+  "assets:read": "Assets (hosts/ports/endpoints) — read",
+  "vulns:read": "Vulnerabilities — read",
+  "vulns:write": "Vulnerabilities — write",
+  "notes:read": "Notes — read",
+  "notes:write": "Notes — write",
+};
 
 /** Avatar colour rotation used when adding new project members. */
-export const MEMBER_COLORS = ["#2E5FBF", "#2E8B57", "#7A4DB8", "#C06A2E"];
+export const MEMBER_COLORS = ["var(--st-accent)", "var(--st-success)", "var(--st-purple)", "var(--st-orange)"];
 
-export type EditorType = "host" | "ip" | "endpoint" | "vuln" | "note" | "member";
+export type EditorType = "host" | "ip" | "endpoint" | "vuln" | "note" | "member" | "cred";
 
 export interface EditorField {
   k: string;
@@ -155,30 +177,29 @@ export interface EditorField {
    backend counterpart silently loses whatever the user typed on the next reload.
    `opts: []` is filled in at runtime from live data (hosts, workspace users). */
 export const EDITOR_FIELDS: Record<EditorType, EditorField[]> = {
-  host: [
-    { k: "host", label: "Hostname", type: "text", ph: "e.g. app.acme-corp.com" },
+  // Only used for EDITing an existing host now — new hosts come from the "Add hosts"
+  // import (server-side probe). Just the hostname: status is set automatically by
+  // the probe, and ports hang off an IP the probe materialises.
+  host: [{ k: "host", label: "Hostname", type: "text", ph: "e.g. app.acme-corp.com" }],
+  // An IP always belongs to a host; `opts` is filled from the project's hosts.
+  // There is no per-IP status in the backend — the IPs view shows the parent
+  // host's, so this field writes through to the host (see saveIpEditor).
+  ip: [
+    { k: "hostName", label: "Host", type: "combo", ph: "Start typing a hostname…", opts: [] },
     { k: "ip", label: "IP address", type: "text", ph: "e.g. 10.0.0.7" },
-    // Ports hang off the host's IP, so they need one — see saveHostEditor.
-    { k: "ports", label: "Ports", type: "tags", ph: "e.g. 443/tcp — press Enter" },
     { k: "status", label: "Status", type: "select", opts: ["up", "down", "unknown"] },
   ],
-  // An IP always belongs to a host; `opts` is filled from the project's hosts.
-  ip: [
-    { k: "hostName", label: "Host", type: "combo", ph: "Начните вводить имя хоста…", opts: [] },
-    { k: "ip", label: "IP address", type: "text", ph: "e.g. 10.0.0.7" },
-    { k: "label", label: "Label", type: "text", ph: "external / internal / mgmt" },
-  ],
   endpoint: [
-    { k: "hostName", label: "Host", type: "combo", ph: "Начните вводить имя хоста…", opts: [] },
+    { k: "hostName", label: "Host", type: "combo", ph: "Start typing a hostname…", opts: [] },
     { k: "method", label: "Method", type: "select", opts: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
     { k: "path", label: "Path", type: "text", ph: "e.g. /api/users" },
   ],
   vuln: [
     { k: "title", label: "Title", type: "text", ph: "e.g. Stored XSS in comments" },
     // Searchable: a project can have many hosts, and a plain select is unusable then.
-    { k: "host", label: "Affected host", type: "combo", ph: "Начните вводить имя хоста…", opts: [] },
+    { k: "host", label: "Affected host", type: "combo", ph: "Start typing a hostname…", opts: [] },
     // Only on "add" — see saveVulnEditor: severity follows the CVSS vector afterwards.
-    { k: "sev", label: "Severity", type: "select", opts: ["critical", "high", "medium", "low", "info"] },
+    { k: "sev", label: "Severity", type: "select", opts: ["unknown", "critical", "high", "medium", "low", "info"] },
     { k: "status", label: "Status", type: "select", opts: ["open", "in progress", "resolved"] },
   ],
   note: [
@@ -188,7 +209,16 @@ export const EDITOR_FIELDS: Record<EditorType, EditorField[]> = {
   // The lead/pentester role is global and is set on the workspace Members page —
   // adding someone here only links an existing user to the project. Searchable:
   // a workspace can hold far more people than a dropdown is usable for.
-  member: [{ k: "userKey", label: "User", type: "combo", ph: "Начните вводить username…", opts: [] }],
+  member: [{ k: "userKey", label: "User", type: "combo", ph: "Start typing a username…", opts: [] }],
+  // Cred vault: a shared username/password for the project. On edit the password
+  // is left blank = keep the stored one.
+  cred: [
+    { k: "username", label: "Username", type: "text", ph: "account username" },
+    { k: "password", label: "Password", type: "text", ph: "account password" },
+    // Binds to a project host — same validated picker as members (the save
+    // resolves the value against the project's hosts). `opts` filled at runtime.
+    { k: "host", label: "Host", type: "combo", ph: "Start typing a hostname…", opts: [] },
+  ],
 };
 
 export const TYPELABEL: Record<EditorType, string> = {
@@ -198,4 +228,5 @@ export const TYPELABEL: Record<EditorType, string> = {
   vuln: "vulnerability",
   note: "note",
   member: "member",
+  cred: "credential",
 };

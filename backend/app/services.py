@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from typing import Literal
@@ -27,11 +28,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
+from app.cloudflare import is_cloudflare_ip
 from app.config import get_settings
-from app.enums import AssetType, NotificationType, ProjectRole, ProjectStatus, Severity, UserRole, VulnerabilityStatus
+from app.enums import (
+    AssetType,
+    NotificationType,
+    ProjectRole,
+    ProjectStatus,
+    Severity,
+    UserRole,
+    VulnerabilityStatus,
+)
 from app.reports import ReportKind, build_pp, build_szi
 from app.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError
 from app.models import (
+    AccountReactivationToken,
     AgentApiToken,
     AgentApiTokenProjectGrant,
     AuditLog,
@@ -41,13 +52,18 @@ from app.models import (
     File,
     Host,
     HostIpAddress,
+    Invitation,
     JiraInstance,
     JiraIssueLink,
+    JsFile,
     MailJob,
     Notification,
+    PasswordResetToken,
     Port,
     Project,
+    ProjectCredential,
     ProjectFolder,
+    ProjectHiddenIp,
     ProjectJiraLink,
     ProjectMember,
     ProjectNote,
@@ -58,8 +74,14 @@ from app.models import (
     Vulnerability,
     VulnerabilityAsset,
 )
-from app.mail import build_temporary_password_email
+from app.mail import (
+    build_invitation_email,
+    build_password_reset_email,
+    build_reactivation_email,
+    build_temporary_password_email,
+)
 from app.messaging import publish_mail_job
+from app.netguard import is_disallowed_ip
 from app.schemas import (
     CommentOut,
     ImportResult,
@@ -71,13 +93,27 @@ from app.schemas import (
     ProjectNoteCommentOut,
 )
 from app.security import (
+    TWO_FA_PENDING_TYPE,
+    create_2fa_pending_token,
     create_access_token,
     create_refresh_token,
     decode_token,
+    decrypt_secret,
+    encrypt_secret,
+    generate_invitation_token,
+    generate_password_reset_token,
+    generate_reactivation_token,
+    generate_totp_secret,
     hash_agent_token,
+    hash_invitation_token,
     hash_password,
+    hash_password_reset_token,
+    hash_reactivation_token,
     hash_refresh_token,
+    totp_provisioning_uri,
+    totp_qr_png_data_url,
     verify_password,
+    verify_totp,
 )
 from app.storage.minio_client import MinioStorage
 from app.ws_manager import ws_manager
@@ -150,10 +186,19 @@ class AgentTokenService:
     """Управляет bearer-токенами для AI agent API."""
 
     DEFAULT_SCOPES = ["projects:read", "assets:read", "vulns:read", "notes:read"]
+    # Полный набор прав, которые распознаёт /api/v2 (см. require_agent_scope).
+    # Токен не может нести право вне этого набора — это единственный источник
+    # истины по scopes и для бэкенда, и для фронта.
+    ALLOWED_SCOPES = ["projects:read", "assets:read", "vulns:read", "vulns:write", "notes:read", "notes:write"]
 
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.audit = AuditService(db)
+
+    async def _member_project_ids(self, user_id: int) -> set[int]:
+        """Проекты, где пользователь состоит участником (для не-админа = его доступ)."""
+        rows = await self.db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == user_id))
+        return set(rows.all())
 
     async def _project_ids_for_token(self, token_id: int) -> list[int]:
         rows = await self.db.scalars(
@@ -179,43 +224,96 @@ class AgentTokenService:
             "project_ids": project_ids,
         }
 
-    async def list_tokens(self) -> list[dict]:
-        tokens = (await self.db.scalars(select(AgentApiToken).order_by(AgentApiToken.created_at.desc()))).all()
+    async def list_tokens(self, actor_id: int) -> list[dict]:
+        """Токены, выпущенные этим пользователем (каждый видит только свои)."""
+        tokens = (
+            await self.db.scalars(
+                select(AgentApiToken)
+                .where(AgentApiToken.created_by == actor_id)
+                .order_by(AgentApiToken.created_at.desc())
+            )
+        ).all()
         result: list[dict] = []
         for token in tokens:
             result.append(self._serialize_token(token, await self._project_ids_for_token(token.id)))
         return result
 
-    async def create_token(self, payload: dict, actor_id: int) -> tuple[dict, str]:
-        raw_token = f"pcf_v2_{secrets.token_urlsafe(32)}"
+    async def create_token(self, payload: dict, actor: User) -> tuple[dict, str]:
+        # 1. Scopes: только валидные и только те, что выбрал пользователь — токен
+        #    не получает прав, которых не запрашивали.
+        requested_scopes = list(dict.fromkeys(payload.get("scopes") or []))
+        unknown = [s for s in requested_scopes if s not in self.ALLOWED_SCOPES]
+        if unknown:
+            raise ValidationError(f"Неизвестные scope: {', '.join(unknown)}")
+        scopes = requested_scopes or list(self.DEFAULT_SCOPES)
+
+        # 2. Срок действия — не в прошлом (пусто = бессрочный токен).
+        expires_at = payload.get("expires_at")
+        if expires_at is not None and expires_at <= datetime.now(UTC):
+            raise ValidationError("Срок действия токена уже истёк")
+
+        # 3. Проекты: токен не может дать доступ шире, чем у самого создателя.
+        #    Админ видит все проекты, поэтому может выдать на любые / all_projects.
+        #    Не-админу all_projects означает «все МОИ проекты» и дополнительно
+        #    ограничивается на запросе (require_agent_project_access) его текущим
+        #    членством; явный список проверяется здесь по членству.
+        is_admin = actor.role == UserRole.ADMIN
+        all_projects = bool(payload.get("all_projects"))
+        project_ids = list(dict.fromkeys(payload.get("project_ids") or []))
+        if not all_projects and not is_admin:
+            allowed = await self._member_project_ids(actor.id)
+            forbidden = [pid for pid in project_ids if pid not in allowed]
+            if forbidden:
+                raise ForbiddenError(
+                    f"Нет доступа к проектам: {', '.join(map(str, forbidden))} — токен не может превышать ваши права"
+                )
+
+        raw_token = f"storm_{secrets.token_urlsafe(32)}"
         token = AgentApiToken(
             name=payload["name"],
             token_hash=hash_agent_token(raw_token),
             token_prefix=raw_token[:14],
-            scopes=payload.get("scopes") or self.DEFAULT_SCOPES,
-            all_projects=bool(payload.get("all_projects")),
-            created_by=actor_id,
-            expires_at=payload.get("expires_at"),
+            scopes=scopes,
+            all_projects=all_projects,
+            created_by=actor.id,
+            expires_at=expires_at,
         )
         self.db.add(token)
         await self.db.flush()
-        if not token.all_projects:
-            for project_id in payload.get("project_ids") or []:
+        if not all_projects:
+            for project_id in project_ids:
                 self.db.add(AgentApiTokenProjectGrant(token_id=token.id, project_id=project_id))
         await self.db.commit()
         await self.db.refresh(token)
-        await self.audit.log("CREATE", user_id=actor_id, entity_type="agent_api_token", entity_id=token.id)
+        await self.audit.log("CREATE", user_id=actor.id, entity_type="agent_api_token", entity_id=token.id)
         return self._serialize_token(token, await self._project_ids_for_token(token.id)), raw_token
 
-    async def revoke_token(self, token_id: int, actor_id: int) -> None:
+    async def revoke_token(self, token_id: int, actor: User) -> None:
         token = await self.db.scalar(select(AgentApiToken).where(AgentApiToken.id == token_id))
         if not token:
             raise NotFoundError("Agent API token не найден")
+        # Владелец удаляет только свои токены; админ — любые.
+        if actor.role != UserRole.ADMIN and token.created_by != actor.id:
+            raise ForbiddenError("Можно удалять только свои токены")
         # Физически удаляем токен: пользователь нажимает «удалить» и ожидает,
         # что запись исчезнет из списка. Grants подчищаются по ON DELETE CASCADE.
         await self.db.delete(token)
         await self.db.commit()
-        await self.audit.log("DELETE", user_id=actor_id, entity_type="agent_api_token", entity_id=token_id)
+        await self.audit.log("DELETE", user_id=actor.id, entity_type="agent_api_token", entity_id=token_id)
+
+
+@dataclass
+class JiraCredentials:
+    """Разрешённые параметры подключения к Jira (из env или БД)."""
+
+    base_url: str
+    email: str
+    token: str
+    issue_type: str
+    enabled: bool
+    default_project_key: str = ""
+    start_date_field: str = ""
+    due_in_days: int = 14
 
 
 class _SafeJiraTransport(httpx.AsyncHTTPTransport):
@@ -254,21 +352,9 @@ class JiraIntegrationService:
         self.db = db
         self.audit = AuditService(db)
 
-    @staticmethod
-    def _is_disallowed_ip(addr: str) -> bool:
-        """True, если IP-адрес внутренний/приватный/системный — для SSRF-защиты."""
-        try:
-            ip_obj = ipaddress.ip_address(addr)
-        except ValueError:
-            return True
-        return (
-            ip_obj.is_loopback
-            or ip_obj.is_private
-            or ip_obj.is_link_local
-            or ip_obj.is_reserved
-            or ip_obj.is_multicast
-            or ip_obj.is_unspecified
-        )
+    # Сам предикат живёт в app.netguard — им пользуется и рекон-ферма, которой
+    # нельзя тянуть за собой весь app.services.
+    _is_disallowed_ip = staticmethod(is_disallowed_ip)
 
     @classmethod
     def _validate_external_url(cls, raw_url: str) -> str:
@@ -312,6 +398,38 @@ class JiraIntegrationService:
 
     async def get_config(self) -> JiraInstance | None:
         return await self.db.scalar(select(JiraInstance).order_by(JiraInstance.created_at.desc()))
+
+    async def resolve_credentials(self) -> "JiraCredentials | None":
+        """Возвращает рабочие креды Jira: сперва из env (деплой-конфиг), иначе из БД.
+
+        Интеграция задаётся один раз на уровне деплоя (JIRA_* в окружении) и не
+        настраивается через веб. Ветка с БД оставлена для обратной совместимости.
+        """
+        s = get_settings()
+        if s.jira_configured:
+            return JiraCredentials(
+                base_url=s.jira_base_url,
+                email=s.jira_email,
+                token=s.jira_api_token,
+                issue_type=s.jira_default_issue_type or "Task",
+                enabled=s.jira_enabled,
+                default_project_key=(s.jira_default_project_key or "").upper(),
+                start_date_field=s.jira_start_date_field,
+                due_in_days=s.jira_due_in_days,
+            )
+        cfg = await self.get_config()
+        if cfg:
+            return JiraCredentials(
+                base_url=cfg.base_url,
+                email=cfg.email,
+                token=self._decrypt_secret(cfg.api_token_encrypted),
+                issue_type=cfg.default_issue_type,
+                enabled=cfg.is_enabled,
+                default_project_key=(s.jira_default_project_key or "").upper(),
+                start_date_field=s.jira_start_date_field,
+                due_in_days=s.jira_due_in_days,
+            )
+        return None
 
     async def upsert_config(self, payload: dict, actor_id: int) -> JiraInstance:
         config = await self.get_config()
@@ -361,13 +479,49 @@ class JiraIntegrationService:
     async def get_project_link(self, project_id: int) -> ProjectJiraLink | None:
         return await self.db.scalar(select(ProjectJiraLink).where(ProjectJiraLink.project_id == project_id))
 
+    # Критичность в задаче показываем по-русски — интерфейс Jira русский.
+    SEVERITY_RU = {
+        "critical": "Критическая",
+        "high": "Высокая",
+        "medium": "Средняя",
+        "low": "Низкая",
+        "info": "Информационная",
+        "unknown": "Не определена",
+    }
+
     @staticmethod
-    def _jira_description(text: str) -> dict:
-        return {
-            "type": "doc",
-            "version": 1,
-            "content": [{"type": "paragraph", "content": [{"type": "text", "text": text[:30000]}]}],
-        }
+    def _jira_doc(sections: list[tuple[str, str | None, str]]) -> dict:
+        """Собирает ADF-описание с заголовками: на каждую секцию — h3 и тело.
+
+        sections — тройки (заголовок, текст, стиль), где стиль:
+        "text" — каждая строка становится абзацем,
+        "ordered" — нумерованный список, каждая строка = пункт (собственная
+        нумерация в исходном тексте снимается, чтобы не задваивалась).
+        Пустые секции пропускаются.
+        """
+        content: list[dict] = []
+        for title, body, style in sections:
+            text = (body or "").strip()
+            if not text:
+                continue
+            content.append({"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": title}]})
+            lines = [line.strip() for line in text[:8000].split("\n") if line.strip()]
+            if style == "ordered":
+                items = []
+                for line in lines:
+                    clean = re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", line)
+                    if clean:
+                        items.append(
+                            {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": clean}]}]}
+                        )
+                if items:
+                    content.append({"type": "orderedList", "attrs": {"order": 1}, "content": items})
+            else:
+                for line in lines:
+                    content.append({"type": "paragraph", "content": [{"type": "text", "text": line}]})
+        if not content:
+            content = [{"type": "paragraph", "content": [{"type": "text", "text": "—"}]}]
+        return {"type": "doc", "version": 1, "content": content}
 
     async def get_issue_link(self, vulnerability_id: int) -> JiraIssueLink | None:
         return await self.db.scalar(select(JiraIssueLink).where(JiraIssueLink.vulnerability_id == vulnerability_id))
@@ -407,12 +561,15 @@ class JiraIntegrationService:
         await self.db.commit()
 
     async def export_vulnerability(self, project_id: int, vuln_id: int, actor_id: int) -> JiraIssueLink:
-        config = await self.get_config()
-        if not config or not config.is_enabled:
+        config = await self.resolve_credentials()
+        if not config or not config.enabled:
             raise ValidationError("Jira не настроена или отключена")
-        project_link = await self.get_project_link(project_id)
-        if not project_link:
-            raise ValidationError("Проект не привязан к Jira project key")
+        # Ключ Jira-проекта: единый на уровне деплоя (JIRA_DEFAULT_PROJECT_KEY),
+        # либо явная привязка проекта (если задана), если дефолта нет.
+        link_row = await self.get_project_link(project_id)
+        project_key = config.default_project_key or (link_row.jira_project_key if link_row else "")
+        if not project_key:
+            raise ValidationError("Не задан Jira project key (JIRA_DEFAULT_PROJECT_KEY)")
 
         # 1) Проверяем готовый линк — если он уже «linked», возвращаем как есть.
         existing = await self.get_issue_link(vuln_id)
@@ -435,25 +592,33 @@ class JiraIntegrationService:
 
         vuln_data = await VulnerabilityService(self.db).get(project_id, vuln_id)
         vulnerability = vuln_data["vulnerability"]
-        description = "\n\n".join(
-            part
-            for part in [
-                vulnerability.description,
-                f"Severity: {vulnerability.severity.value}",
-                f"CVSS: {vulnerability.cvss_score or '-'} {vulnerability.cvss_vector or ''}".strip(),
-                vulnerability.impact,
-                vulnerability.recommendations,
-            ]
-            if part
-        )
-        payload = {
-            "fields": {
-                "project": {"key": project_link.jira_project_key},
-                "summary": vulnerability.title,
-                "issuetype": {"name": config.default_issue_type},
-                "description": self._jira_description(description or vulnerability.title),
-            }
+        today = datetime.now(UTC).date()
+        due = today + timedelta(days=config.due_in_days)
+        # Описание — структурированное: каждый блок со своим заголовком (даты
+        # вынесены в поля Jira, поэтому в тексте их не дублируем).
+        cvss = f"{vulnerability.cvss_score or ''} {vulnerability.cvss_vector or ''}".strip()
+        sections: list[tuple[str, str | None, str]] = [
+            ("Описание", vulnerability.description, "text"),
+            ("Критичность", self.SEVERITY_RU.get(vulnerability.severity.value, vulnerability.severity.value), "text"),
+            ("CVSS", cvss, "text"),
+            ("Шаги воспроизведения", vulnerability.steps_to_reproduce, "ordered"),
+            ("Влияние на систему", vulnerability.impact, "text"),
+            ("Рекомендации к устранению", vulnerability.recommendations, "text"),
+        ]
+        # Summary формата "STORM-{id уязвимости} — {название}"; задача создаётся
+        # в статусе To Do (первый статус workflow Jira по умолчанию).
+        summary = f"STORM-{vuln_id} — {vulnerability.title}"
+        fields = {
+            "project": {"key": project_key},
+            "summary": summary[:250],
+            "issuetype": {"name": config.issue_type},
+            "description": self._jira_doc(sections),
+            # Дата начала = сегодня, срок выполнения = сегодня + N дней (Jira ждёт YYYY-MM-DD).
+            "duedate": due.isoformat(),
         }
+        if config.start_date_field:
+            fields[config.start_date_field] = today.isoformat()
+        payload = {"fields": fields}
         safe_base_url = self._validate_external_url(config.base_url)
 
         # 3) Сетевой вызов с обёрткой ошибок и DNS-rebind защитой.
@@ -466,7 +631,7 @@ class JiraIntegrationService:
                 response = await client.post(
                     f"{safe_base_url}/rest/api/3/issue",
                     json=payload,
-                    auth=(config.email, self._decrypt_secret(config.api_token_encrypted)),
+                    auth=(config.email, config.token),
                 )
         except httpx.HTTPError as exc:
             await self._mark_link_error(link, f"Jira недоступна: {exc.__class__.__name__}: {exc}")
@@ -498,6 +663,21 @@ class JiraIntegrationService:
         return link
 
 
+@dataclass
+class LoginOutcome:
+    """Результат первого шага логина.
+
+    requires_2fa=True — пароль верный, но у пользователя включён TOTP: полноценная
+    сессия не выдаётся, вместо этого — короткоживущий pending_token до ввода кода.
+    """
+
+    user: User
+    requires_2fa: bool
+    access_token: str | None = None
+    refresh_token: str | None = None
+    pending_token: str | None = None
+
+
 class AuthService:
     """Сервис аутентификации и управления JWT-cookie."""
 
@@ -505,22 +685,52 @@ class AuthService:
         self.db = db
         self.audit = AuditService(db)
 
-    async def login(self, username: str, password: str, ip_address: str | None = None) -> tuple[str, str, User]:
-        """Проверяет учётные данные и создаёт пару токенов."""
+    async def _issue_session(self, user_id: int) -> tuple[str, str]:
+        """Создаёт пару access/refresh токенов и сохраняет refresh в БД."""
+        access_token = create_access_token(user_id)
+        refresh_token = create_refresh_token(user_id)
+        refresh_hash = hash_refresh_token(refresh_token)
+        expires_at = datetime.now(UTC) + timedelta(days=settings.jwt_refresh_token_expire_days)
+        self.db.add(RefreshToken(user_id=user_id, token_hash=refresh_hash, expires_at=expires_at))
+        await self.db.commit()
+        return access_token, refresh_token
+
+    async def issue_session_for_user(self, user_id: int) -> tuple[str, str]:
+        """Выдаёт сессию без проверки пароля — для активации приглашения (пароль только что задан)."""
+        return await self._issue_session(user_id)
+
+    async def login(self, username: str, password: str, ip_address: str | None = None) -> LoginOutcome:
+        """Проверяет учётные данные. При включённом 2FA возвращает challenge вместо сессии."""
         user = await self.db.scalar(select(User).where(User.username == username))
         if not user or not verify_password(password, user.password_hash):
             raise UnauthorizedError("Неверный логин или пароль")
-        if not user.is_active:
+        if not user.is_active or user.is_locked:
             raise UnauthorizedError("Пользователь деактивирован")
 
-        access_token = create_access_token(user.id)
-        refresh_token = create_refresh_token(user.id)
-        refresh_hash = hash_refresh_token(refresh_token)
-        expires_at = datetime.now(UTC) + timedelta(days=settings.jwt_refresh_token_expire_days)
-        self.db.add(RefreshToken(user_id=user.id, token_hash=refresh_hash, expires_at=expires_at))
-        await self.db.commit()
+        if user.totp_enabled:
+            pending_token = create_2fa_pending_token(user.id)
+            await self.audit.log("LOGIN_2FA_CHALLENGE", user_id=user.id, ip_address=ip_address)
+            return LoginOutcome(user=user, requires_2fa=True, pending_token=pending_token)
 
+        access_token, refresh_token = await self._issue_session(user.id)
         await self.audit.log("LOGIN", user_id=user.id, ip_address=ip_address)
+        return LoginOutcome(user=user, requires_2fa=False, access_token=access_token, refresh_token=refresh_token)
+
+    async def verify_2fa(self, pending_token: str | None, code: str, ip_address: str | None = None) -> tuple[str, str, User]:
+        """Завершает вход: сверяет TOTP-код по pending-токену и выдаёт сессию."""
+        if not pending_token:
+            raise UnauthorizedError("Сессия подтверждения истекла — войдите заново")
+        user_id = decode_token(pending_token, expected_type=TWO_FA_PENDING_TYPE)
+        user = await self.db.scalar(select(User).where(User.id == user_id))
+        if not user or not user.is_active or user.is_locked:
+            raise UnauthorizedError("Пользователь не найден или деактивирован")
+        if not user.totp_enabled or not user.totp_secret:
+            raise UnauthorizedError("Двухфакторная аутентификация не настроена")
+        if not verify_totp(decrypt_secret(user.totp_secret), code):
+            raise UnauthorizedError("Неверный код подтверждения")
+
+        access_token, refresh_token = await self._issue_session(user.id)
+        await self.audit.log("LOGIN", user_id=user.id, ip_address=ip_address, details={"twofa": True})
         return access_token, refresh_token, user
 
     async def refresh(self, refresh_token: str | None, ip_address: str | None = None) -> tuple[str, str]:
@@ -556,7 +766,7 @@ class AuthService:
         if not existing or existing.expires_at <= now:
             raise UnauthorizedError("Refresh token недействителен")
         user = await self.db.scalar(select(User).where(User.id == user_id))
-        if not user or not user.is_active:
+        if not user or not user.is_active or user.is_locked:
             raise UnauthorizedError("Пользователь деактивирован")
         existing.revoked_at = now
         new_access = create_access_token(user_id)
@@ -635,14 +845,16 @@ class UserService:
         temporary_password: str,
         actor_id: int | None,
     ) -> MailJob:
-        subject, body = build_temporary_password_email(username=user.full_name or user.username, temporary_password=temporary_password)
+        subject, body, html = build_temporary_password_email(
+            username=user.full_name or user.username, temporary_password=temporary_password
+        )
         job = MailJob(
             user_id=user.id,
             created_by=actor_id,
             recipient_email=user.email,
             subject=subject,
             template="temporary_password",
-            payload={"username": user.username, "temporary_password": temporary_password, "body": body},
+            payload={"username": user.username, "temporary_password": temporary_password, "body": body, "html": html},
             status="pending",
         )
         self.db.add(job)
@@ -748,14 +960,418 @@ class UserService:
             await self._publish_mail_job(mail_job)
         return user
 
+    # ------------------------------------------------------------------
+    # Приглашения (invite-flow): админ зовёт по email, пользователь сам
+    # задаёт username+пароль по ссылке из письма. До активации записи в
+    # users нет, поэтому вход невозможен — обычная ошибка логина.
+    # ------------------------------------------------------------------
+    async def _enqueue_invitation_mail(self, *, invitation: Invitation, raw_token: str, actor_id: int | None) -> MailJob:
+        activation_url = f"{settings.app_base_url.rstrip('/')}/activate?token={raw_token}"
+        subject, body, html = build_invitation_email(
+            recipient_email=invitation.email,
+            full_name=invitation.full_name,
+            activation_url=activation_url,
+        )
+        job = MailJob(
+            user_id=None,
+            created_by=actor_id,
+            recipient_email=invitation.email,
+            subject=subject,
+            template="invitation",
+            payload={"invitation_id": invitation.id, "activation_url": activation_url, "body": body, "html": html},
+            status="pending",
+        )
+        self.db.add(job)
+        await self.db.flush()
+        return job
+
+    async def create_invitation(self, payload: dict, actor_id: int, ip_address: str | None = None) -> tuple[Invitation, MailJob]:
+        """Создаёт приглашение и ставит письмо со ссылкой активации в очередь."""
+        self._ensure_mail_delivery_enabled()
+        email = payload["email"]
+        existing_user = await self.db.scalar(select(User).where(User.email == email))
+        if existing_user:
+            raise ConflictError("Пользователь с таким email уже существует")
+        now = datetime.now(UTC)
+        active_invite = await self.db.scalar(
+            select(Invitation).where(
+                and_(Invitation.email == email, Invitation.status == "pending", Invitation.expires_at > now)
+            )
+        )
+        if active_invite:
+            raise ConflictError("Приглашение для этого email уже отправлено — используйте повторную отправку")
+        raw_token = generate_invitation_token()
+        invitation = Invitation(
+            email=email,
+            full_name=payload.get("full_name"),
+            role=payload.get("role", UserRole.PENTESTER),
+            project_role=payload.get("project_role", ProjectRole.PENTESTER),
+            token_hash=hash_invitation_token(raw_token),
+            status="pending",
+            expires_at=now + timedelta(hours=settings.invite_token_expire_hours),
+            invited_by=actor_id,
+        )
+        self.db.add(invitation)
+        await self.db.flush()
+        mail_job = await self._enqueue_invitation_mail(invitation=invitation, raw_token=raw_token, actor_id=actor_id)
+        await self.db.commit()
+        await self.db.refresh(invitation)
+        await self.audit.log(
+            "CREATE",
+            user_id=actor_id,
+            entity_type="invitation",
+            entity_id=invitation.id,
+            details={"email": email},
+            ip_address=ip_address,
+        )
+        await self._publish_mail_job(mail_job)
+        return invitation, mail_job
+
+    async def list_invitations(self) -> list[Invitation]:
+        """Незавершённые приглашения (pending, в т.ч. истёкшие) для админ-панели."""
+        items = (
+            await self.db.scalars(
+                select(Invitation).where(Invitation.status == "pending").order_by(Invitation.created_at.desc())
+            )
+        ).all()
+        return list(items)
+
+    async def _get_invitation(self, invitation_id: int) -> Invitation:
+        invitation = await self.db.scalar(select(Invitation).where(Invitation.id == invitation_id))
+        if not invitation:
+            raise NotFoundError("Приглашение не найдено")
+        return invitation
+
+    async def resend_invitation(self, invitation_id: int, actor_id: int, ip_address: str | None = None) -> tuple[Invitation, MailJob]:
+        """Перевыпускает токен приглашения, продлевает срок и снова шлёт письмо."""
+        self._ensure_mail_delivery_enabled()
+        invitation = await self._get_invitation(invitation_id)
+        if invitation.status == "accepted":
+            raise ConflictError("Приглашение уже принято")
+        raw_token = generate_invitation_token()
+        invitation.token_hash = hash_invitation_token(raw_token)
+        invitation.status = "pending"
+        invitation.expires_at = datetime.now(UTC) + timedelta(hours=settings.invite_token_expire_hours)
+        mail_job = await self._enqueue_invitation_mail(invitation=invitation, raw_token=raw_token, actor_id=actor_id)
+        await self.db.commit()
+        await self.db.refresh(invitation)
+        await self.audit.log(
+            "UPDATE",
+            user_id=actor_id,
+            entity_type="invitation_resend",
+            entity_id=invitation.id,
+            details={"email": invitation.email},
+            ip_address=ip_address,
+        )
+        await self._publish_mail_job(mail_job)
+        return invitation, mail_job
+
+    async def revoke_invitation(self, invitation_id: int, actor_id: int, ip_address: str | None = None) -> None:
+        """Отзывает приглашение — ссылка перестаёт работать."""
+        invitation = await self._get_invitation(invitation_id)
+        if invitation.status == "accepted":
+            raise ConflictError("Приглашение уже принято — отозвать нельзя")
+        invitation.status = "revoked"
+        await self.db.commit()
+        await self.audit.log(
+            "DELETE",
+            user_id=actor_id,
+            entity_type="invitation",
+            entity_id=invitation_id,
+            details={"email": invitation.email},
+            ip_address=ip_address,
+        )
+
+    async def _load_invitation_by_token(self, raw_token: str) -> Invitation | None:
+        return await self.db.scalar(select(Invitation).where(Invitation.token_hash == hash_invitation_token(raw_token)))
+
+    async def get_invitation_info(self, raw_token: str) -> dict:
+        """Публичные данные для страницы активации (email/имя) или причина отказа."""
+        invitation = await self._load_invitation_by_token(raw_token)
+        # revoked/несуществующий токен намеренно неразличимы — не раскрываем факт отзыва.
+        if not invitation or invitation.status == "revoked":
+            return {"valid": False, "reason": "not_found"}
+        if invitation.status == "accepted":
+            return {"valid": False, "reason": "used"}
+        if invitation.is_expired:
+            return {"valid": False, "reason": "expired"}
+        return {"valid": True, "email": invitation.email, "full_name": invitation.full_name}
+
+    async def check_invitation_username_available(self, raw_token: str, username: str) -> bool:
+        """Проверяет свободен ли username. Требует валидного токена (без открытой энумерации)."""
+        invitation = await self._load_invitation_by_token(raw_token)
+        if not invitation or invitation.status != "pending" or invitation.is_expired:
+            raise UnauthorizedError("Приглашение недействительно или истекло")
+        existing = await self.db.scalar(select(User).where(User.username == username))
+        return existing is None
+
+    async def accept_invitation(self, raw_token: str, username: str, password: str, ip_address: str | None = None) -> User:
+        """Активация: приглашённый задаёт username+пароль, создаётся пользователь."""
+        invitation = await self._load_invitation_by_token(raw_token)
+        if not invitation or invitation.status != "pending" or invitation.is_expired:
+            raise UnauthorizedError("Приглашение недействительно или истекло")
+        # Гонка: username/email могли занять между проверкой доступности и отправкой.
+        await self._ensure_unique_identity(username=username, email=invitation.email)
+        user = User(
+            username=username,
+            email=invitation.email,
+            full_name=invitation.full_name,
+            password_hash=hash_password(password),
+            password_changed_at=datetime.now(UTC),
+            role=invitation.role,
+            project_role=invitation.project_role,
+            is_active=True,
+        )
+        self.db.add(user)
+        await self.db.flush()
+        invitation.status = "accepted"
+        invitation.accepted_at = datetime.now(UTC)
+        invitation.accepted_user_id = user.id
+        await self.db.commit()
+        await self.db.refresh(user)
+        await self.audit.log(
+            "CREATE",
+            user_id=user.id,
+            entity_type="user",
+            entity_id=user.id,
+            details={"via": "invitation", "invitation_id": invitation.id},
+            ip_address=ip_address,
+        )
+        return user
+
+    # ------------------------------------------------------------------
+    # Восстановление пароля («забыли пароль»)
+    # ------------------------------------------------------------------
+    async def _enqueue_password_reset_mail(self, *, user: User, raw_token: str) -> MailJob:
+        reset_url = f"{settings.app_base_url.rstrip('/')}/reset-password?token={raw_token}"
+        subject, body, html = build_password_reset_email(
+            username=user.full_name or user.username,
+            reset_url=reset_url,
+            expire_hours=settings.password_reset_expire_hours,
+        )
+        job = MailJob(
+            user_id=user.id,
+            created_by=None,
+            recipient_email=user.email,
+            subject=subject,
+            template="password_reset",
+            payload={"reset_url": reset_url, "body": body, "html": html},
+            status="pending",
+        )
+        self.db.add(job)
+        await self.db.flush()
+        return job
+
+    async def request_password_reset(self, email: str, ip_address: str | None = None) -> None:
+        """Отправляет ссылку восстановления, если такой пользователь есть.
+
+        Ничего не возвращает и не бросает при отсутствии пользователя: иначе
+        форма «забыли пароль» стала бы оракулом для перебора существующих email.
+        """
+        self._ensure_mail_delivery_enabled()
+        user = await self.db.scalar(select(User).where(User.email == email))
+        if not user or not user.is_active or user.is_locked:
+            await self.audit.log(
+                "UPDATE",
+                user_id=None,
+                entity_type="password_reset_requested_unknown",
+                details={"email": email},
+                ip_address=ip_address,
+            )
+            return
+
+        # Прежние неиспользованные ссылки гасим: активной остаётся только последняя.
+        await self.db.execute(
+            update(PasswordResetToken)
+            .where(and_(PasswordResetToken.user_id == user.id, PasswordResetToken.used_at.is_(None)))
+            .values(used_at=datetime.now(UTC))
+        )
+        raw_token = generate_password_reset_token()
+        self.db.add(
+            PasswordResetToken(
+                user_id=user.id,
+                token_hash=hash_password_reset_token(raw_token),
+                expires_at=datetime.now(UTC) + timedelta(hours=settings.password_reset_expire_hours),
+            )
+        )
+        mail_job = await self._enqueue_password_reset_mail(user=user, raw_token=raw_token)
+        await self.db.commit()
+        await self.audit.log(
+            "UPDATE",
+            user_id=user.id,
+            entity_type="password_reset_requested",
+            entity_id=user.id,
+            ip_address=ip_address,
+        )
+        await self._publish_mail_job(mail_job)
+
+    async def _load_reset_token(self, raw_token: str) -> PasswordResetToken | None:
+        return await self.db.scalar(
+            select(PasswordResetToken).where(PasswordResetToken.token_hash == hash_password_reset_token(raw_token))
+        )
+
+    async def get_password_reset_info(self, raw_token: str) -> dict:
+        """Проверяет ссылку до показа формы нового пароля."""
+        token = await self._load_reset_token(raw_token)
+        if not token:
+            return {"valid": False, "reason": "not_found"}
+        if token.used_at is not None:
+            return {"valid": False, "reason": "used"}
+        if not token.is_usable:
+            return {"valid": False, "reason": "expired"}
+        user = await self.db.scalar(select(User).where(User.id == token.user_id))
+        if not user or not user.is_active or user.is_locked:
+            return {"valid": False, "reason": "not_found"}
+        return {"valid": True, "username": user.username}
+
+    async def confirm_password_reset(self, raw_token: str, new_password: str, ip_address: str | None = None) -> User:
+        """Ставит новый пароль по одноразовой ссылке и гасит все сессии."""
+        token = await self._load_reset_token(raw_token)
+        if not token or not token.is_usable:
+            raise UnauthorizedError("Ссылка недействительна или истекла")
+        user = await self.db.scalar(select(User).where(User.id == token.user_id))
+        if not user or not user.is_active or user.is_locked:
+            raise UnauthorizedError("Ссылка недействительна или истекла")
+
+        user.password_hash = hash_password(new_password)
+        user.password_changed_at = datetime.now(UTC)
+        token.used_at = datetime.now(UTC)
+        # В отличие от отключения 2FA, здесь сессии сбрасываем намеренно: пароль
+        # меняют в том числе когда доступ мог быть скомпрометирован.
+        await self.db.execute(
+            update(RefreshToken)
+            .where(and_(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)))
+            .values(revoked_at=datetime.now(UTC))
+        )
+        await self.db.commit()
+        await self.db.refresh(user)
+        await self.audit.log(
+            "UPDATE",
+            user_id=user.id,
+            entity_type="password_reset_completed",
+            entity_id=user.id,
+            ip_address=ip_address,
+        )
+        return user
+
+    # ------------------------------------------------------------------
+    # Возврат деактивированного пользователя (мягкое удаление -> is_locked).
+    # Админ жмёт «вернуть» -> письмо со ссылкой; пользователь переходит по ней
+    # -> аккаунт разблокируется и сразу выдаётся сессия (см. auth-роутер).
+    # ------------------------------------------------------------------
+    async def _enqueue_reactivation_mail(self, *, user: User, raw_token: str) -> MailJob:
+        reactivate_url = f"{settings.app_base_url.rstrip('/')}/reactivate?token={raw_token}"
+        subject, body, html = build_reactivation_email(
+            username=user.full_name or user.username,
+            reactivate_url=reactivate_url,
+            expire_hours=settings.reactivation_expire_hours,
+        )
+        job = MailJob(
+            user_id=user.id,
+            created_by=None,
+            recipient_email=user.email,
+            subject=subject,
+            template="reactivation",
+            payload={"reactivate_url": reactivate_url, "body": body, "html": html},
+            status="pending",
+        )
+        self.db.add(job)
+        await self.db.flush()
+        return job
+
+    async def request_reactivation(self, user_id: int, actor_id: int, ip_address: str | None = None) -> MailJob:
+        """Админ возвращает деактивированного пользователя: шлём ссылку-возврат.
+
+        Аккаунт остаётся заблокированным — доступ вернётся, только когда пользователь
+        сам перейдёт по ссылке из письма (там же сразу выдаётся сессия).
+        """
+        self._ensure_mail_delivery_enabled()
+        user = await self.get_user(user_id)
+        if not user.is_locked:
+            raise ValidationError("Пользователь не деактивирован")
+        # Прежние неиспользованные ссылки гасим: активной остаётся только последняя.
+        await self.db.execute(
+            update(AccountReactivationToken)
+            .where(and_(AccountReactivationToken.user_id == user.id, AccountReactivationToken.used_at.is_(None)))
+            .values(used_at=datetime.now(UTC))
+        )
+        raw_token = generate_reactivation_token()
+        self.db.add(
+            AccountReactivationToken(
+                user_id=user.id,
+                token_hash=hash_reactivation_token(raw_token),
+                expires_at=datetime.now(UTC) + timedelta(hours=settings.reactivation_expire_hours),
+            )
+        )
+        mail_job = await self._enqueue_reactivation_mail(user=user, raw_token=raw_token)
+        await self.db.commit()
+        await self.audit.log(
+            "UPDATE",
+            user_id=actor_id,
+            entity_type="user_reactivation_requested",
+            entity_id=user.id,
+            details={"email": user.email},
+            ip_address=ip_address,
+        )
+        await self._publish_mail_job(mail_job)
+        return mail_job
+
+    async def _load_reactivation_token(self, raw_token: str) -> AccountReactivationToken | None:
+        return await self.db.scalar(
+            select(AccountReactivationToken).where(
+                AccountReactivationToken.token_hash == hash_reactivation_token(raw_token)
+            )
+        )
+
+    async def get_reactivation_info(self, raw_token: str) -> dict:
+        """Публичная проверка ссылки-возврата до показа кнопки входа."""
+        token = await self._load_reactivation_token(raw_token)
+        if not token:
+            return {"valid": False, "reason": "not_found"}
+        if token.used_at is not None:
+            return {"valid": False, "reason": "used"}
+        if not token.is_usable:
+            return {"valid": False, "reason": "expired"}
+        user = await self.db.scalar(select(User).where(User.id == token.user_id))
+        # Аккаунт мог уже разблокировать другой способ — тогда ссылка не нужна.
+        if not user or not user.is_active or not user.is_locked:
+            return {"valid": False, "reason": "not_found"}
+        return {"valid": True, "username": user.username}
+
+    async def complete_reactivation(self, raw_token: str, ip_address: str | None = None) -> User:
+        """Разблокирует аккаунт по одноразовой ссылке и возвращает пользователя
+        (сессию выдаёт auth-роутер поверх этого)."""
+        token = await self._load_reactivation_token(raw_token)
+        if not token or not token.is_usable:
+            raise UnauthorizedError("Ссылка недействительна или истекла")
+        user = await self.db.scalar(select(User).where(User.id == token.user_id))
+        if not user or not user.is_active:
+            raise UnauthorizedError("Ссылка недействительна или истекла")
+        user.is_locked = False
+        token.used_at = datetime.now(UTC)
+        await self.db.commit()
+        await self.db.refresh(user)
+        await self.audit.log(
+            "UPDATE",
+            user_id=user.id,
+            entity_type="user_reactivated",
+            entity_id=user.id,
+            ip_address=ip_address,
+        )
+        return user
+
     async def update_user(self, user_id: int, payload: dict, actor_id: int, ip_address: str | None = None) -> User:
         """Обновляет данные пользователя."""
         user = await self.get_user(user_id)
         submitted_email = payload.pop("email", None)
         if submitted_email is not None and submitted_email != user.email:
             raise ValidationError("Администратор не может менять email пользователя. Пользователь должен изменить его сам.")
-        username = payload.get("username", user.username)
-        await self._ensure_unique_identity(username=username, email=user.email, exclude_user_id=user.id)
+        # Юзернейм неизменяем — даже админом: на него завязаны логин, упоминания и
+        # история действий, поэтому его правку не принимаем (как и email).
+        submitted_username = payload.pop("username", None)
+        if submitted_username is not None and submitted_username != user.username:
+            raise ValidationError("Юзернейм менять нельзя — он закреплён за пользователем.")
+        await self._ensure_unique_identity(username=user.username, email=user.email, exclude_user_id=user.id)
         for key, value in payload.items():
             if value is not None:
                 setattr(user, key, value)
@@ -778,11 +1394,23 @@ class UserService:
         return user
 
     async def delete_user(self, user_id: int, actor_id: int, ip_address: str | None = None) -> None:
-        """Удаляет пользователя."""
+        """«Удаляет» пользователя — на деле деактивирует (мягкое удаление).
+
+        Строку не стираем: за пользователем тянутся его проекты, находки, заметки и
+        т.п. с FK RESTRICT — реальный DELETE упирался бы в них и падал 500. Вместо
+        этого выставляем is_locked, чтобы вход был закрыт (см. get_current_user и
+        login), и отзываем активные refresh-токены, чтобы блокировка сработала сразу.
+        Всё авторство и связи при этом сохраняются.
+        """
         if user_id == actor_id:
             raise ValidationError("Нельзя удалить самого себя")
         user = await self.get_user(user_id)
-        await self.db.delete(user)
+        user.is_locked = True
+        await self.db.execute(
+            update(RefreshToken)
+            .where(and_(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)))
+            .values(revoked_at=datetime.now(UTC))
+        )
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="user", entity_id=user_id, ip_address=ip_address)
 
@@ -831,6 +1459,65 @@ class UserService:
         )
         await self.db.commit()
         await self.audit.log("UPDATE", user_id=user.id, entity_type="user_password", entity_id=user.id, ip_address=ip_address)
+        await self.db.refresh(user)
+        return user
+
+    async def setup_2fa(self, user_id: int, ip_address: str | None = None) -> tuple[str, str, str]:
+        """Готовит привязку TOTP: генерирует секрет (хранит зашифрованным, но пока не
+        включает) и возвращает (secret, otpauth_uri, qr_png_data_url)."""
+        user = await self.get_user(user_id)
+        if user.totp_enabled:
+            raise ValidationError("Двухфакторная аутентификация уже включена")
+        secret = generate_totp_secret()
+        user.totp_secret = encrypt_secret(secret)
+        user.totp_confirmed_at = None
+        await self.db.commit()
+        otpauth_uri = totp_provisioning_uri(secret, user.username)
+        return secret, otpauth_uri, totp_qr_png_data_url(otpauth_uri)
+
+    async def confirm_2fa(self, user_id: int, code: str, ip_address: str | None = None) -> User:
+        """Включает 2FA после проверки первого кода из приложения-аутентификатора."""
+        user = await self.get_user(user_id)
+        if user.totp_enabled:
+            raise ValidationError("Двухфакторная аутентификация уже включена")
+        if not user.totp_secret:
+            raise ValidationError("Сначала запросите настройку 2FA")
+        if not verify_totp(decrypt_secret(user.totp_secret), code):
+            raise ValidationError("Неверный код из приложения-аутентификатора")
+        user.totp_enabled = True
+        user.totp_confirmed_at = datetime.now(UTC)
+        await self.db.commit()
+        await self.audit.log("UPDATE", user_id=user.id, entity_type="user_2fa_enabled", entity_id=user.id, ip_address=ip_address)
+        await self.db.refresh(user)
+        return user
+
+    async def disable_2fa(self, user_id: int, password: str, ip_address: str | None = None) -> User:
+        """Отключает 2FA (требует пароль аккаунта). Активные сессии не сбрасываем —
+        отключение второго фактора не должно разлогинивать пользователя."""
+        user = await self.get_user(user_id)
+        if not verify_password(password, user.password_hash):
+            raise UnauthorizedError("Пароль указан неверно")
+        user.totp_enabled = False
+        user.totp_secret = None
+        user.totp_confirmed_at = None
+        await self.db.commit()
+        await self.audit.log("UPDATE", user_id=user.id, entity_type="user_2fa_disabled", entity_id=user.id, ip_address=ip_address)
+        await self.db.refresh(user)
+        return user
+
+    async def admin_reset_2fa(self, user_id: int, actor_id: int, ip_address: str | None = None) -> User:
+        """Сбрасывает 2FA пользователю от имени администратора (потеря телефона)."""
+        user = await self.get_user(user_id)
+        user.totp_enabled = False
+        user.totp_secret = None
+        user.totp_confirmed_at = None
+        await self.db.execute(
+            update(RefreshToken)
+            .where(and_(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)))
+            .values(revoked_at=datetime.now(UTC))
+        )
+        await self.db.commit()
+        await self.audit.log("UPDATE", user_id=actor_id, entity_type="user_2fa_reset", entity_id=user_id, ip_address=ip_address)
         await self.db.refresh(user)
         return user
 
@@ -1695,11 +2382,18 @@ class AssetService:
                     ip_address=value,
                     label=entry.get("label"),
                     is_primary=bool(entry.get("is_primary")),
+                    # Ручное добавление не пробивает — CF знаем только по CIDR:
+                    # True если в диапазонах CF, иначе None (неизвестно), не False.
+                    is_cloudflare=is_cloudflare_ip(value) or None,
                 )
                 self.db.add(row)
             else:
                 row.label = entry.get("label")
                 row.is_primary = bool(entry.get("is_primary"))
+                # Переиспользуемая строка сохраняет hostnames. CF по CIDR: True если
+                # в диапазонах; иначе НЕ понижаем (пробив мог достоверно определить CF/не-CF).
+                if is_cloudflare_ip(value):
+                    row.is_cloudflare = True
             result_rows.append(row)
 
         host.ip_address = next(
@@ -1714,8 +2408,15 @@ class AssetService:
             raise NotFoundError("Порт не найден")
         return port
 
-    async def list_hosts(self, project_id: int, page: int, size: int, status: str | None) -> tuple[list[Host], int]:
+    async def list_hosts(
+        self, project_id: int, page: int, size: int, status: str | None, origin: str = "host"
+    ) -> tuple[list[Host], int]:
+        """origin: host — обычные хосты (по умолчанию), ip — служебные родители
+        адресов из фермы IP, all — и те и другие (нужно фронту: один запрос
+        кормит и таблицу хостов, и таблицу IP)."""
         base_query = select(Host).where(Host.project_id == project_id)
+        if origin != "all":
+            base_query = base_query.where(Host.origin == origin)
         if status:
             base_query = base_query.where(Host.status == status)
         total = await self.db.scalar(select(func.count()).select_from(base_query.subquery())) or 0
@@ -1757,6 +2458,8 @@ class AssetService:
                     "ip_address": ip.ip_address,
                     "label": ip.label,
                     "is_primary": ip.is_primary,
+                    "hostnames": ip.hostnames or [],
+                    "is_cloudflare": ip.is_cloudflare,
                     "ports": [
                         {
                             "id": port.id,
@@ -1765,6 +2468,7 @@ class AssetService:
                             "port_number": port.port_number,
                             "protocol": port.protocol,
                             "state": port.state,
+                            "http_status": port.http_status,
                             "services": [
                                 {
                                     "id": svc.id,
@@ -1791,6 +2495,7 @@ class AssetService:
             "status": host.status,
             "os_type": host.os_type,
             "notes": host.notes,
+            "origin": host.origin,
             "created_at": host.created_at,
             "updated_at": host.updated_at,
             "endpoints": [
@@ -1837,6 +2542,62 @@ class AssetService:
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="host", entity_id=host.id, details=details)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
+
+    # ------------------------------------------------------------------
+    # Скрытие IP из списка IP (мягкое «удаление» адреса из вкладки IP).
+    # Привязку адреса к домен-хостам (origin='host') НЕ трогаем — она остаётся
+    # в карточке хоста; удаляем лишь отдельную IP-запись (Host origin='ip') и
+    # заносим адрес в project_hidden_ips, чтобы вкладка IP его не показывала.
+    # ------------------------------------------------------------------
+    async def list_hidden_ips(self, project_id: int) -> list[str]:
+        rows = await self.db.scalars(
+            select(ProjectHiddenIp.ip_address).where(ProjectHiddenIp.project_id == project_id)
+        )
+        return list(rows.all())
+
+    async def hide_ip(self, project_id: int, ip_address: str, actor_id: int) -> None:
+        """«Удаляет» адрес из списка IP: сносит отдельные IP-хосты (origin='ip') с
+        этим адресом и запоминает адрес как скрытый. Домен-хосты не трогаются."""
+        ip = (ip_address or "").strip()
+        if not ip:
+            raise ValidationError("Не указан IP-адрес")
+        # Отдельные IP-записи (ферма IP) с этим адресом — удаляем целиком, каскад
+        # уносит их HostIpAddress и порты. Домен-хостов (origin='host') не касаемся.
+        standalone = await self.db.scalars(
+            select(Host)
+            .join(HostIpAddress, HostIpAddress.host_id == Host.id)
+            .where(and_(Host.project_id == project_id, Host.origin == "ip", HostIpAddress.ip_address == ip))
+        )
+        for host in list(dict.fromkeys(standalone.all())):
+            await self.db.delete(host)
+        # Идемпотентно заносим адрес в скрытые (уникальный ключ project_id+ip).
+        existing = await self.db.scalar(
+            select(ProjectHiddenIp).where(
+                and_(ProjectHiddenIp.project_id == project_id, ProjectHiddenIp.ip_address == ip)
+            )
+        )
+        if existing is None:
+            self.db.add(ProjectHiddenIp(project_id=project_id, ip_address=ip, created_by=actor_id))
+        await self.db.commit()
+        await self.audit.log(
+            "DELETE", user_id=actor_id, entity_type="ip_address", entity_id=None, details={"project_id": str(project_id), "ip_address": ip}
+        )
+        await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "host", "project_id": str(project_id), "data": {"ip_address": ip}})
+
+    async def unhide_ip(self, project_id: int, ip_address: str, actor_id: int) -> None:
+        """Снимает адрес со скрытия — он снова показывается в списке IP (если хоть
+        один хост его несёт). Тем же пользуется явное «Add IPs» (см. фермy IP)."""
+        ip = (ip_address or "").strip()
+        await self.db.execute(
+            delete(ProjectHiddenIp).where(
+                and_(ProjectHiddenIp.project_id == project_id, ProjectHiddenIp.ip_address == ip)
+            )
+        )
+        await self.db.commit()
+        await self.audit.log(
+            "UPDATE", user_id=actor_id, entity_type="ip_address", entity_id=None, details={"project_id": str(project_id), "ip_address": ip, "unhidden": True}
+        )
+        await ws_manager.broadcast(project_id, {"event": "updated", "entity": "host", "project_id": str(project_id), "data": {"ip_address": ip}})
 
     async def list_ports(self, host_id: int, ip_address_id: int | None = None) -> list[Port]:
         query = select(Port).where(Port.host_id == host_id).order_by(Port.port_number)
@@ -1957,6 +2718,49 @@ class AssetService:
 
     async def list_endpoints(self, host_id: int) -> list[Endpoint]:
         return list((await self.db.scalars(select(Endpoint).where(Endpoint.host_id == host_id).order_by(Endpoint.created_at.desc()))).all())
+
+    async def list_js_files(self, project_id: int) -> list[dict]:
+        """JS-файлы проекта с секретами и именем хоста — для раздела JS.
+
+        Отдаём готовые dict (а не ORM), чтобы подставить hostname хоста рядом с
+        host_id: JsFileOut его ждёт, а связи Host→JsFile нет.
+        """
+        files = (
+            await self.db.scalars(
+                select(JsFile)
+                .options(selectinload(JsFile.secrets))
+                .where(JsFile.project_id == project_id)
+                .order_by(JsFile.secret_count.desc(), JsFile.url)
+            )
+        ).all()
+        host_names = dict(
+            (await self.db.execute(select(Host.id, Host.hostname).where(Host.project_id == project_id))).all()
+        )
+        return [
+            {
+                "id": f.id,
+                "host_id": f.host_id,
+                "hostname": host_names.get(f.host_id),
+                "url": f.url,
+                "status": f.status,
+                "size_bytes": f.size_bytes,
+                "content_type": f.content_type,
+                "secret_count": f.secret_count,
+                "endpoint_count": f.endpoint_count,
+                "endpoints": f.endpoints or [],
+                "secrets": [
+                    {
+                        "kind": s.kind,
+                        "match_preview": s.match_preview,
+                        "snippet": s.snippet,
+                        "severity": s.severity,
+                    }
+                    for s in f.secrets
+                ],
+                "fetched_at": f.fetched_at,
+            }
+            for f in files
+        ]
 
     async def create_endpoint(self, project_id: int, host_id: int, payload: dict, actor_id: int) -> Endpoint:
         await self._get_host(project_id, host_id)
@@ -3221,6 +4025,117 @@ class ProjectNoteService:
                 "project_id": str(project_id),
                 "data": {"id": str(comment.id), "note_id": str(note_id)},
             },
+        )
+
+
+class ProjectCredentialService:
+    """Хранилище учётных данных проекта (аккаунты и токены).
+
+    Секрет (пароль/токен) шифруется перед записью и расшифровывается при выдаче
+    участникам проекта — доступ к чтению совпадает с доступом к проекту
+    (`require_project_access`), как у заметок.
+    """
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+        self.audit = AuditService(db)
+
+    async def _ensure_project(self, project_id: int) -> Project:
+        project = await self.db.scalar(select(Project).where(Project.id == project_id))
+        if not project:
+            raise NotFoundError("Проект не найден")
+        return project
+
+    async def _get_credential(self, project_id: int, credential_id: int) -> ProjectCredential:
+        credential = await self.db.scalar(
+            select(ProjectCredential).where(
+                and_(ProjectCredential.id == credential_id, ProjectCredential.project_id == project_id)
+            )
+        )
+        if not credential:
+            raise NotFoundError("Учётные данные не найдены")
+        return credential
+
+    @staticmethod
+    def _serialize(credential: ProjectCredential) -> dict:
+        """Отдаёт креды с расшифрованным паролем (для ProjectCredentialOut)."""
+        return {
+            "id": credential.id,
+            "project_id": credential.project_id,
+            "username": credential.username,
+            "password": decrypt_secret(credential.password_encrypted),
+            "host": credential.host,
+            "created_by": credential.created_by,
+            "created_by_username": credential.created_by_username,
+            "created_at": credential.created_at,
+            "updated_at": credential.updated_at,
+        }
+
+    async def list_credentials(self, project_id: int) -> list[dict]:
+        await self._ensure_project(project_id)
+        rows = await self.db.scalars(
+            select(ProjectCredential)
+            .where(ProjectCredential.project_id == project_id)
+            .order_by(ProjectCredential.created_at.asc(), ProjectCredential.id.asc())
+        )
+        return [self._serialize(row) for row in rows.all()]
+
+    async def create_credential(self, project_id: int, payload: dict, actor_id: int) -> dict:
+        await self._ensure_project(project_id)
+        credential = ProjectCredential(
+            project_id=project_id,
+            username=payload.get("username"),
+            password_encrypted=encrypt_secret(str(payload["password"])),
+            host=payload.get("host"),
+            created_by=actor_id,
+        )
+        self.db.add(credential)
+        await self.db.commit()
+        await self.db.refresh(credential)
+        # В журнал пишем только метаданные (username/host для строки ленты) —
+        # пароль в аудит не попадает.
+        await self.audit.log(
+            "CREATE",
+            user_id=actor_id,
+            entity_type="project_credential",
+            entity_id=credential.id,
+            details={"project_id": str(project_id), "username": credential.username, "host": credential.host},
+        )
+        return self._serialize(credential)
+
+    async def update_credential(self, project_id: int, credential_id: int, payload: dict, actor_id: int) -> dict:
+        credential = await self._get_credential(project_id, credential_id)
+        if "username" in payload:
+            credential.username = payload.get("username")
+        if "host" in payload:
+            credential.host = payload.get("host")
+        # Пустой/отсутствующий password означает «не менять» — форма редактирования
+        # не присылает существующий пароль обратно, чтобы его не логировать/светить.
+        if payload.get("password"):
+            credential.password_encrypted = encrypt_secret(str(payload["password"]))
+        await self.db.commit()
+        await self.db.refresh(credential)
+        await self.audit.log(
+            "UPDATE",
+            user_id=actor_id,
+            entity_type="project_credential",
+            entity_id=credential.id,
+            details={"project_id": str(project_id), "username": credential.username, "host": credential.host},
+        )
+        return self._serialize(credential)
+
+    async def delete_credential(self, project_id: int, credential_id: int, actor_id: int) -> None:
+        credential = await self._get_credential(project_id, credential_id)
+        username = credential.username
+        host = credential.host
+        await self.db.delete(credential)
+        await self.db.commit()
+        await self.audit.log(
+            "DELETE",
+            user_id=actor_id,
+            entity_type="project_credential",
+            entity_id=credential_id,
+            details={"project_id": str(project_id), "username": username, "host": host},
         )
 
 

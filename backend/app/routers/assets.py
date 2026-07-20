@@ -10,9 +10,11 @@ from app.schemas import (
     EndpointCreate,
     EndpointOut,
     EndpointUpdate,
+    HiddenIpCreate,
     HostCreate,
     HostOut,
     HostUpdate,
+    JsFileOut,
     PortCreate,
     PortOut,
     PortUpdate,
@@ -31,11 +33,17 @@ async def list_hosts(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
     status_filter: str | None = Query(None, alias="status"),
+    origin: str = Query("host", pattern="^(host|ip|all)$"),
     _project=Depends(require_project_access),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Возвращает список хостов проекта."""
-    items, total = await AssetService(db).list_hosts(project_id, page, size, status_filter)
+    """Возвращает список хостов проекта.
+
+    По умолчанию только origin=host: служебные родители адресов из фермы IP
+    в списке хостов не показываются. all — нужен фронту, чтобы одним запросом
+    наполнить и таблицу хостов, и таблицу IP.
+    """
+    items, total = await AssetService(db).list_hosts(project_id, page, size, status_filter, origin)
     return to_paginated_response([HostOut.model_validate(it) for it in items], total, PageParams(page=page, size=size)).model_dump()
 
 
@@ -90,6 +98,44 @@ async def delete_host(
 ) -> None:
     """Удаляет хост."""
     await AssetService(db).delete_host(project_id, host_id, current_user.id)
+
+
+# ── Скрытые IP: «удаление» адреса из вкладки IP без разрыва привязки к хостам ──
+@router.get("/projects/{project_id}/hidden-ips", response_model=list[str])
+async def list_hidden_ips(
+    project_id: int,
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> list[str]:
+    """Адреса, скрытые из списка IP этого проекта (фронт фильтрует по ним)."""
+    return await AssetService(db).list_hidden_ips(project_id)
+
+
+@router.post("/projects/{project_id}/hidden-ips", status_code=status.HTTP_204_NO_CONTENT)
+async def hide_ip(
+    project_id: int,
+    payload: HiddenIpCreate,
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Скрывает адрес из списка IP: сносит отдельную IP-запись (origin='ip') с этим
+    адресом, но привязку к домен-хостам сохраняет."""
+    await AssetService(db).hide_ip(project_id, payload.ip_address, current_user.id)
+
+
+@router.delete("/projects/{project_id}/hidden-ips/{ip_address}", status_code=status.HTTP_204_NO_CONTENT)
+async def unhide_ip(
+    project_id: int,
+    ip_address: str,
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Снимает адрес со скрытия — снова показывается в списке IP."""
+    await AssetService(db).unhide_ip(project_id, ip_address, current_user.id)
 
 
 @router.get("/projects/{project_id}/hosts/{host_id}/ports", response_model=list[PortOut])
@@ -232,6 +278,16 @@ async def delete_service(
 ) -> None:
     """Удаляет сервис."""
     await AssetService(db).delete_service(project_id, port_id, service_id, current_user.id)
+
+
+@router.get("/projects/{project_id}/js-files", response_model=list[JsFileOut])
+async def list_js_files(
+    project_id: int,
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> list[JsFileOut]:
+    """JS-файлы проекта с находками — читает раздел JS (группируется по хосту на фронте)."""
+    return await AssetService(db).list_js_files(project_id)
 
 
 @router.get("/projects/{project_id}/hosts/{host_id}/endpoints", response_model=list[EndpointOut])
