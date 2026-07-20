@@ -123,6 +123,10 @@ class ReconJobKind(str, enum.Enum):
     HOSTS = "hosts"
     IPS = "ips"
     JS = "js"
+    # Scanner-раздел: раскрытие поддоменов корня (crt.sh + subfinder).
+    SUBS = "subs"
+    # Scanner-раздел: скан произвольных открытых TCP-портов (nmap).
+    PORTS = "ports"
 
 
 class ReconJobStatus(str, enum.Enum):

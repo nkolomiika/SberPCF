@@ -219,8 +219,9 @@ async def test_ensure_ips_stores_every_resolved_address() -> None:
     assert [row.is_primary for row in added] == [True, False, False]
     assert host.ip_address == "1.1.1.1"
     assert primary is added[0]
-    # 2606:4700::/32 — сеть Cloudflare, 1.1.1.1 — нет
-    assert [row.is_cloudflare for row in added] == [False, False, True]
+    # 2606:4700::/32 — сеть Cloudflare → True; для остальных сигнала CF нет и
+    # cf_responded не передан → None (unknown), а не «нет CF».
+    assert [row.is_cloudflare for row in added] == [None, None, True]
 
 
 @pytest.mark.asyncio
@@ -237,6 +238,26 @@ async def test_ensure_ips_reuses_existing_rows() -> None:
     db.add.assert_not_called()
     # признак пересчитывается даже на переиспользованной строке
     assert existing.is_cloudflare is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_ips_cloudflare_tri_state() -> None:
+    """is_cloudflare трёхзначен: None — сигнала нет (хост ещё пробится),
+    False — ответил без CF, True — CF (по заголовкам/детекту или CIDR)."""
+
+    async def cf_of(ip: str, *, hint: bool, responded: bool):
+        db = _mock_db()
+        svc = HostFarmService(db)
+        added: list = []
+        db.add = MagicMock(side_effect=lambda row: added.append(row))
+        host = MagicMock(id=1, ip_addresses=[], ip_address=None)
+        await svc._ensure_ips(host, [ip], cloudflare_hint=hint, cf_responded=responded)
+        return added[0].is_cloudflare
+
+    assert await cf_of("8.8.8.8", hint=False, responded=False) is None   # unknown (пробится)
+    assert await cf_of("8.8.8.8", hint=False, responded=True) is False   # ответил, CF нет
+    assert await cf_of("8.8.8.8", hint=True, responded=True) is True     # CF по сигналу пробива
+    assert await cf_of("104.16.0.1", hint=False, responded=False) is True  # CF по CIDR
 
 
 # --------------------------------------------------------- service detection
@@ -404,3 +425,41 @@ async def test_skip_targets_are_not_probed(monkeypatch: pytest.MonkeyPatch) -> N
     # только не-пропущенная цель резолвится и передаётся в _persist
     assert svc._resolve_dns.await_args.args[0] == ["b.com"]
     assert set(svc._persist.await_args.args[1]) == {"b.com"}
+
+
+# ------------------------------------------------ create_job: nothing-to-probe
+
+
+@pytest.mark.asyncio
+async def test_create_job_all_existing_finishes_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Все хосты уже добавлены → задача сразу done (воркер не будим, пробинг не идёт)."""
+    from app.enums import ReconJobStatus
+
+    db = _mock_db()
+    db.refresh = AsyncMock()
+    db.scalars = AsyncMock(return_value=MagicMock(all=lambda: ["a.com", "b.com"]))  # обе существуют
+    svc = HostFarmService(db)
+
+    job = await svc.create_job(101, "a.com\nb.com", actor_id=7)
+
+    assert job.status == ReconJobStatus.DONE
+    assert job.targets_total == 0
+    assert job.result["hosts_skipped"] == 2
+    # заготовок не заводим — обе цели существуют
+    assert not [c for c in db.add.call_args_list if getattr(c.args[0], "hostname", "x") in ("a.com", "b.com")]
+
+
+@pytest.mark.asyncio
+async def test_create_job_with_new_targets_stays_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.enums import ReconJobStatus
+
+    db = _mock_db()
+    db.refresh = AsyncMock()
+    db.scalars = AsyncMock(return_value=MagicMock(all=lambda: ["a.com"]))  # только a.com существует
+    svc = HostFarmService(db)
+
+    job = await svc.create_job(101, "a.com\nb.com", actor_id=7)
+
+    assert job.status == ReconJobStatus.PENDING
+    assert job.targets_total == 1
+    assert job.result is None

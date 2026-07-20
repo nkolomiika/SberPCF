@@ -477,11 +477,11 @@ class HostIpAddress(Base, TimestampMixin):
     # NB: обычная JSON-колонка не отслеживает мутацию на месте — присваивать
     # список целиком, не .append().
     hostnames: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    # Адрес принадлежит сетям Cloudflare. Пересчитывается при каждой записи —
-    # это чистая функция от адреса, устареть в БД не может.
-    is_cloudflare: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false"
-    )
+    # За адресом Cloudflare. Трёхзначно: True — виден CF (CIDR или заголовки/детект
+    # пробива), False — достоверно НЕ CF (хост ответил, сигнала нет), NULL — неизвестно
+    # (ещё пробится / не ответил). Пересчитывается при каждой записи, но True в NULL/False
+    # без достоверного отрицательного сигнала не понижается (см. farm._ensure_ips).
+    is_cloudflare: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
 
     host: Mapped[Host] = relationship("Host", back_populates="ip_addresses")
     ports: Mapped[list["Port"]] = relationship(
@@ -524,6 +524,31 @@ class Port(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="Service.name",
     )
+
+
+class ProjectHiddenIp(Base):
+    """Адрес, скрытый пользователем из списка IP проекта.
+
+    «Удаление» IP из вкладки IP не должно рвать привязку адреса к домен-хостам
+    (origin='host'): их HostIpAddress остаётся, и в карточке хоста адрес виден.
+    Поэтому саму привязку не трогаем, а адрес заносим сюда — вкладка IP скрывает
+    строки из этого списка. Отдельную IP-запись (Host origin='ip') при этом
+    удаляем целиком. Явное повторное добавление через «Add IPs» убирает адрес
+    отсюда (см. IpFarmService), и он снова показывается.
+    """
+
+    __tablename__ = "project_hidden_ips"
+    __table_args__ = (
+        UniqueConstraint("project_id", "ip_address", name="uq_project_hidden_ip"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ip_address: Mapped[str] = mapped_column(String(45), nullable=False)
+    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Service(Base, TimestampMixin):

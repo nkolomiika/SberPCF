@@ -37,11 +37,14 @@ export interface Endpoint {
 }
 
 /** One address of a host, with what it reverse-resolves to. */
+/** Cloudflare tri-state: true — behind CF, false — confirmed not, null — unknown (still probing). */
+export type CfState = boolean | null;
+
 export interface IpEntry {
   ip: string;
   /** Names the address resolves to; `confirmed: false` = PTR without a forward match. */
   hostnames: { hostname: string; source: string; confirmed: boolean }[];
-  cloudflare: boolean;
+  cloudflare: CfState;
 }
 
 /** A JS file discovered on a project domain, with what the scan found in it. */
@@ -70,8 +73,9 @@ export interface Host {
   ipEntries: IpEntry[];
   /** `ip` — imported through the IP farm; such rows are hidden from the hosts table. */
   origin: "host" | "ip";
-  /** True when any address of the host sits in a Cloudflare range. */
-  cloudflare: boolean;
+  /** Host-level CF (tri-state): true if any address is CF, false if all confirmed not,
+   *  null if unknown (no addresses yet / still probing). */
+  cloudflare: CfState;
   ports: Port[];
   endpoints: Endpoint[];
 }

@@ -194,6 +194,8 @@ def _mock_db() -> MagicMock:
     db.flush = AsyncMock()
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
+    # create_job снимает адреса со скрытия через db.execute(delete(ProjectHiddenIp)).
+    db.execute = AsyncMock(return_value=MagicMock())
     return db
 
 
@@ -380,3 +382,20 @@ async def test_skip_targets_are_not_probed(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert result.ips_skipped == 1
     assert svc._resolve_dns.await_args.args[0] == ["5.6.7.8"]
+
+
+@pytest.mark.asyncio
+async def test_create_job_all_existing_finishes_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Все адреса уже добавлены → задача сразу done, пробинг не запускается."""
+    from app.enums import ReconJobStatus
+
+    db = _mock_db()
+    db.refresh = AsyncMock()
+    db.scalars = AsyncMock(return_value=MagicMock(all=lambda: ["1.2.3.4", "5.6.7.8"]))
+    svc = IpFarmService(db)
+
+    job = await svc.create_job(101, "1.2.3.4\n5.6.7.8", actor_id=7)
+
+    assert job.status == ReconJobStatus.DONE
+    assert job.targets_total == 0
+    assert job.result["ips_skipped"] == 2

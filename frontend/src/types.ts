@@ -222,8 +222,8 @@ export interface HostIpAddress {
   is_primary: boolean;
   /** Обратный резолв адреса; у строк, заведённых до фермы IP, пустой. */
   hostnames: ResolvedHostname[];
-  /** Адрес принадлежит сетям Cloudflare. */
-  is_cloudflare: boolean;
+  /** Трёхзначно: true — за CF, false — достоверно нет, null — ещё неизвестно (пробится). */
+  is_cloudflare: boolean | null;
   ports: Port[];
   created_at: string;
   updated_at: string;
@@ -342,7 +342,8 @@ export interface IpFarmIpResult {
   ip_address: string;
   host_id: number | null;
   hostnames: ResolvedHostname[];
-  is_cloudflare: boolean;
+  /** Трёхзначно: true — за CF, false — достоверно нет, null — ещё неизвестно (пробится). */
+  is_cloudflare: boolean | null;
   created: boolean;
   /** Адрес подшит к уже существующему хосту, а не к новой строке origin='ip'. */
   attached_to_existing_host: boolean;

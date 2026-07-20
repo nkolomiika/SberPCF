@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -102,7 +104,7 @@ class HostFarmService:
         return host, True
 
     async def _ensure_ips(
-        self, host: Host, ips: list[str], cloudflare_hint: bool = False
+        self, host: Host, ips: list[str], cloudflare_hint: bool = False, cf_responded: bool = False
     ) -> HostIpAddress | None:
         """Заводит ВСЕ разрешённые адреса хоста; первый становится primary.
 
@@ -110,14 +112,26 @@ class HostFarmService:
         только первый, и остальные адреса терялись. Возвращает строку primary:
         на неё вешаются порты пробива (пробивали мы именно её).
 
-        cloudflare_hint — детект технологий увидел Cloudflare на портах хоста. У
-        claude.com и подобных статический список CIDR даёт ложный минус, поэтому
-        CF = (адрес в диапазонах CF) ИЛИ (инструмент нашёл Cloudflare). Хост за CF —
-        значит и его адреса это CF-edge, помечаем все.
+        cloudflare_hint — на портах хоста увиден Cloudflare (по заголовкам пробива
+        или детектом технологий). У claude.com и подобных статический список CIDR
+        даёт ложный минус (BYOIP не в опубликованных диапазонах), поэтому
+        CF = (адрес в диапазонах CF) ИЛИ (сигнал CF на пробиве). Хост за CF — значит
+        и его адреса это CF-edge, помечаем все.
+
+        cf_responded — на этом скане хост реально ответил, значит отсутствие CF-сигнала
+        достоверно. Если False (хост не отозвался / детект не запускался), уже
+        проставленный is_cloudflare НЕ понижаем: флейк движка не должен затирать факт.
+
+        is_cloudflare — трёхзначный: True — виден CF; False — достоверно НЕ CF (хост
+        ответил, сигнала CF нет); None — неизвестно (ещё пробивается / не ответил /
+        детект не запускался). Пока хост «пробится», адреса ещё не заведены, а у нового
+        адреса без сигнала CF = None (unknown), а не «нет CF».
         """
         primary_row: HostIpAddress | None = None
         for idx, ip in enumerate(ips):
             cf = is_cloudflare_ip(ip) or cloudflare_hint
+            # cf_state: True/False/None по силе сигнала (см. docstring).
+            cf_state = True if cf else (False if cf_responded else None)
             row = next((r for r in host.ip_addresses if r.ip_address == ip), None)
             if row is None:
                 is_primary = idx == 0 and not any(a.is_primary for a in host.ip_addresses)
@@ -125,7 +139,7 @@ class HostFarmService:
                     host_id=host.id,
                     ip_address=ip,
                     is_primary=is_primary,
-                    is_cloudflare=cf,
+                    is_cloudflare=cf_state,
                 )
                 self.db.add(row)
                 await self.db.flush()
@@ -133,10 +147,12 @@ class HostFarmService:
                 host.ip_addresses.append(row)
                 if is_primary:
                     host.ip_address = ip
-            else:
-                # Признак пересчитываем всегда: адрес мог не меняться, а список сетей
-                # CF или результат детекта — да.
-                row.is_cloudflare = cf
+            elif cf:
+                row.is_cloudflare = True
+            elif cf_responded:
+                # Достоверный отрицательный сигнал (хост ответил, CF нет) — снимаем флаг.
+                row.is_cloudflare = False
+            # else: сигнала нет — оставляем прежнее значение (не понижаем в unknown).
             if idx == 0:
                 primary_row = row
         return primary_row
@@ -261,12 +277,15 @@ class HostFarmService:
                 port_results: list[HostFarmPortResult] = []
                 ports_created = ports_updated = 0
                 if r is not None and r.ip is not None:
-                    # CF по детекту: если инструмент увидел Cloudflare на любом порту
-                    # хоста — помечаем адреса CF даже когда CIDR-список промахнулся.
-                    cf_hint = has_cloudflare(
+                    # CF на пробиве: заголовки ответа (server=cloudflare / cf-ray) ИЛИ
+                    # детект технологий увидел Cloudflare — помечаем адреса CF даже
+                    # когда статический CIDR-список промахнулся (BYOIP вроде claude.com).
+                    cf_hint = any(p.cloudflare for p in host_probes) or has_cloudflare(
                         [t for hp in host_probes for t in techs_by_port.get((hp.hostname, hp.port), [])]
                     )
-                    ip_row = await self._ensure_ips(host, r.ips or [r.ip], cloudflare_hint=cf_hint)
+                    ip_row = await self._ensure_ips(
+                        host, r.ips or [r.ip], cloudflare_hint=cf_hint, cf_responded=responded
+                    )
                     if ip_row is not None and not r.blocked:
                         port_results, ports_created, ports_updated = await self._write_ports(
                             host, ip_row, host_probes, techs_by_port
@@ -426,6 +445,7 @@ class HostFarmService:
         # Существующие цели фиксируем ДО заготовок: иначе заготовка этой же задачи
         # выглядела бы как «уже добавленная». Воркер исключит их из пробива.
         existing = await self._existing_target_keys(project_id, targets)
+        new_count = len(targets) - len(existing)
         # Заготовки создаём синхронно в запросе — фронт после ответа сразу видит хосты.
         await self._ensure_skeletons(project_id, targets, existing)
         job = HostFarmJob(
@@ -433,10 +453,16 @@ class HostFarmService:
             created_by=actor_id,
             kind=self.kind,
             status=ReconJobStatus.PENDING,
-            targets_total=len(targets) - len(existing),
+            targets_total=new_count,
             raw=raw,
             skipped_targets=sorted(existing),
         )
+        # Пробивать нечего (все цели уже добавлены) — закрываем задачу сразу и не
+        # будим воркер: иначе фронт показал бы «Probing 0 hosts…» и зря поллил.
+        if new_count == 0:
+            job.status = ReconJobStatus.DONE
+            job.result = HostFarmResult(hosts_skipped=len(existing)).model_dump()
+            job.finished_at = datetime.now(UTC)
         self.db.add(job)
         await self.db.commit()
         await self.db.refresh(job)

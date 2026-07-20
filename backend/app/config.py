@@ -145,6 +145,27 @@ class Settings(BaseSettings):
     services_detect_timeout_seconds: float = 20.0
     services_max_concurrency: int = 6
 
+    # --- Scanner: раскрытие поддоменов корневого домена ---
+    # Источник Certificate Transparency (crt.sh) — HTTP JSON, ключ не нужен.
+    subs_crtsh_enabled: bool = True
+    subs_crtsh_timeout_seconds: float = 30.0
+    # subfinder (ProjectDiscovery) — если бинарь установлен; иначе тихо пропускаем.
+    subs_subfinder_enabled: bool = True
+    subs_subfinder_bin: str = "subfinder"
+    subs_subfinder_timeout_seconds: float = 120.0
+    # Кап на число найденных поддоменов, прогоняемых дальше фермой хостов.
+    subs_max_results: int = 2000
+
+    # --- Scanner: скан открытых TCP-портов (nmap) ---
+    portscan_enabled: bool = True
+    portscan_nmap_bin: str = "nmap"
+    # Сколько верхних портов сканировать (nmap --top-ports). 0 = все 65535 (медленно).
+    portscan_top_ports: int = 1000
+    # Таймаут одного запуска nmap (на всю пачку целей), секунд.
+    portscan_timeout_seconds: float = 300.0
+    # Максимум целей на один скан (nmap запускается одной командой на пачку).
+    portscan_max_targets: int = 64
+
     @property
     def jira_configured(self) -> bool:
         """Заданы ли все обязательные параметры подключения к Jira."""

@@ -215,6 +215,10 @@ const RU: Record<string, string> = {
   "Deactivate user": "Деактивировать пользователя",
   "Reactivate user": "Вернуть пользователя (письмо со ссылкой)",
   Deactivate: "Деактивировать",
+  // Диалог блокировки участника: заголовок и кнопка на «block»-терминологии
+  // (таб «Blocked»). Сторона возврата остаётся reactivate/return-потоком выше.
+  "Block user": "Заблокировать пользователя",
+  Block: "Заблокировать",
   "will lose access, but their projects, findings and notes stay. You can reactivate them here later.":
     "потеряет доступ, но его проекты, находки и заметки останутся. Вернуть его можно здесь же позже.",
   "Couldn't deactivate user": "Не удалось деактивировать пользователя",

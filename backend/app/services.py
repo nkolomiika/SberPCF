@@ -63,6 +63,7 @@ from app.models import (
     Project,
     ProjectCredential,
     ProjectFolder,
+    ProjectHiddenIp,
     ProjectJiraLink,
     ProjectMember,
     ProjectNote,
@@ -2381,15 +2382,18 @@ class AssetService:
                     ip_address=value,
                     label=entry.get("label"),
                     is_primary=bool(entry.get("is_primary")),
-                    is_cloudflare=is_cloudflare_ip(value),
+                    # Ручное добавление не пробивает — CF знаем только по CIDR:
+                    # True если в диапазонах CF, иначе None (неизвестно), не False.
+                    is_cloudflare=is_cloudflare_ip(value) or None,
                 )
                 self.db.add(row)
             else:
                 row.label = entry.get("label")
                 row.is_primary = bool(entry.get("is_primary"))
-                # Переиспользуемая строка сохраняет hostnames, но признак CF
-                # пересчитываем: адрес мог не меняться, а список сетей — да.
-                row.is_cloudflare = is_cloudflare_ip(value)
+                # Переиспользуемая строка сохраняет hostnames. CF по CIDR: True если
+                # в диапазонах; иначе НЕ понижаем (пробив мог достоверно определить CF/не-CF).
+                if is_cloudflare_ip(value):
+                    row.is_cloudflare = True
             result_rows.append(row)
 
         host.ip_address = next(
@@ -2538,6 +2542,62 @@ class AssetService:
         await self.db.commit()
         await self.audit.log("DELETE", user_id=actor_id, entity_type="host", entity_id=host.id, details=details)
         await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "host", "project_id": str(project_id), "data": {"id": str(host.id)}})
+
+    # ------------------------------------------------------------------
+    # Скрытие IP из списка IP (мягкое «удаление» адреса из вкладки IP).
+    # Привязку адреса к домен-хостам (origin='host') НЕ трогаем — она остаётся
+    # в карточке хоста; удаляем лишь отдельную IP-запись (Host origin='ip') и
+    # заносим адрес в project_hidden_ips, чтобы вкладка IP его не показывала.
+    # ------------------------------------------------------------------
+    async def list_hidden_ips(self, project_id: int) -> list[str]:
+        rows = await self.db.scalars(
+            select(ProjectHiddenIp.ip_address).where(ProjectHiddenIp.project_id == project_id)
+        )
+        return list(rows.all())
+
+    async def hide_ip(self, project_id: int, ip_address: str, actor_id: int) -> None:
+        """«Удаляет» адрес из списка IP: сносит отдельные IP-хосты (origin='ip') с
+        этим адресом и запоминает адрес как скрытый. Домен-хосты не трогаются."""
+        ip = (ip_address or "").strip()
+        if not ip:
+            raise ValidationError("Не указан IP-адрес")
+        # Отдельные IP-записи (ферма IP) с этим адресом — удаляем целиком, каскад
+        # уносит их HostIpAddress и порты. Домен-хостов (origin='host') не касаемся.
+        standalone = await self.db.scalars(
+            select(Host)
+            .join(HostIpAddress, HostIpAddress.host_id == Host.id)
+            .where(and_(Host.project_id == project_id, Host.origin == "ip", HostIpAddress.ip_address == ip))
+        )
+        for host in list(dict.fromkeys(standalone.all())):
+            await self.db.delete(host)
+        # Идемпотентно заносим адрес в скрытые (уникальный ключ project_id+ip).
+        existing = await self.db.scalar(
+            select(ProjectHiddenIp).where(
+                and_(ProjectHiddenIp.project_id == project_id, ProjectHiddenIp.ip_address == ip)
+            )
+        )
+        if existing is None:
+            self.db.add(ProjectHiddenIp(project_id=project_id, ip_address=ip, created_by=actor_id))
+        await self.db.commit()
+        await self.audit.log(
+            "DELETE", user_id=actor_id, entity_type="ip_address", entity_id=None, details={"project_id": str(project_id), "ip_address": ip}
+        )
+        await ws_manager.broadcast(project_id, {"event": "deleted", "entity": "host", "project_id": str(project_id), "data": {"ip_address": ip}})
+
+    async def unhide_ip(self, project_id: int, ip_address: str, actor_id: int) -> None:
+        """Снимает адрес со скрытия — он снова показывается в списке IP (если хоть
+        один хост его несёт). Тем же пользуется явное «Add IPs» (см. фермy IP)."""
+        ip = (ip_address or "").strip()
+        await self.db.execute(
+            delete(ProjectHiddenIp).where(
+                and_(ProjectHiddenIp.project_id == project_id, ProjectHiddenIp.ip_address == ip)
+            )
+        )
+        await self.db.commit()
+        await self.audit.log(
+            "UPDATE", user_id=actor_id, entity_type="ip_address", entity_id=None, details={"project_id": str(project_id), "ip_address": ip, "unhidden": True}
+        )
+        await ws_manager.broadcast(project_id, {"event": "updated", "entity": "host", "project_id": str(project_id), "data": {"ip_address": ip}})
 
     async def list_ports(self, host_id: int, ip_address_id: int | None = None) -> list[Port]:
         query = select(Port).where(Port.host_id == host_id).order_by(Port.port_number)

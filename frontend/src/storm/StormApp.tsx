@@ -15,6 +15,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import "./storm.css";
 import { Icon, SberMark } from "./icons";
@@ -46,6 +47,8 @@ import {
   deleteUser as apiDeleteUser,
   reactivateUser as apiReactivateUser,
   getHosts as apiGetHosts,
+  getHiddenIps as apiGetHiddenIps,
+  hideIp as apiHideIp,
   getHost as apiGetHost,
   updateHost as apiUpdateHost,
   deleteHost as apiDeleteHost,
@@ -118,6 +121,7 @@ import type {
 } from "../types";
 import {
   type ApiKey,
+  type CfState,
   type Cred,
   type Endpoint,
   type Host,
@@ -224,6 +228,8 @@ interface StormState {
   apiHosts: Host[] | null;
   hostsLoading: boolean;
   hostsTick: number;
+  /** Адреса, скрытые из вкладки IP («удалённые» из списка) — грузятся вместе с хостами. */
+  hiddenIps: string[];
   // ---- "Add hosts" import (server-side probe farm) ----
   hostImportOpen: boolean;
   hostImportRaw: string;
@@ -437,6 +443,7 @@ const initialState: StormState = {
   apiHosts: null,
   hostsLoading: false,
   hostsTick: 0,
+  hiddenIps: [],
   hostImportOpen: false,
   ipCfFilter: "",
   hostCfFilter: "",
@@ -941,6 +948,19 @@ function toStormPorts(h: ApiHost): Host["ports"] {
     }));
 }
 
+/** Host-level CF from its addresses (tri-state): any CF → true; all confirmed-not → false;
+ *  otherwise (no addresses / any still unknown) → null. A still-probing host has no
+ *  addresses yet, so it reads as unknown rather than "not CF". */
+function hostCf(addrs: { is_cloudflare: boolean | null }[]): CfState {
+  if (addrs.some((a) => a.is_cloudflare === true)) return true;
+  if (addrs.length > 0 && addrs.every((a) => a.is_cloudflare === false)) return false;
+  return null;
+}
+
+/** Merge two CF tri-states: any true → true; else any false → false; else unknown. */
+const mergeCf = (a: CfState, b: CfState): CfState =>
+  a === true || b === true ? true : a === false || b === false ? false : null;
+
 function toStormHost(h: ApiHost, endpoints: Endpoint[] = []): Host {
   return {
     id: h.id,
@@ -950,12 +970,12 @@ function toStormHost(h: ApiHost, endpoints: Endpoint[] = []): Host {
     ipEntries: h.ip_addresses.map((a) => ({
       ip: a.ip_address,
       hostnames: a.hostnames ?? [],
-      cloudflare: Boolean(a.is_cloudflare),
+      cloudflare: a.is_cloudflare ?? null,
     })),
     origin: h.origin === "ip" ? "ip" : "host",
     // Derived, not stored: a host-level column in the DB would need invalidating
     // on every address add/remove, and every address already carries the flag.
-    cloudflare: h.ip_addresses.some((a) => a.is_cloudflare),
+    cloudflare: hostCf(h.ip_addresses),
     status: h.status,
     ports: toStormPorts(h),
     endpoints,
@@ -1456,10 +1476,19 @@ export function StormApp() {
   useEffect(() => {
     const pid = state.openProjectId;
     if (pid == null) {
-      setStateRaw((s) => (s.apiHosts === null && !s.hostsLoading ? s : { ...s, apiHosts: null, hostsLoading: false }));
+      setStateRaw((s) => (s.apiHosts === null && !s.hostsLoading ? s : { ...s, apiHosts: null, hostsLoading: false, hiddenIps: [] }));
       return;
     }
     let cancelled = false;
+    // Скрытые IP грузим параллельно списку хостов — вкладка IP фильтрует по ним.
+    void (async () => {
+      try {
+        const hidden = await apiGetHiddenIps(pid);
+        if (!cancelled) setStateRaw((s) => ({ ...s, hiddenIps: hidden }));
+      } catch {
+        if (!cancelled) setStateRaw((s) => (s.hiddenIps.length === 0 ? s : { ...s, hiddenIps: [] }));
+      }
+    })();
     void (async () => {
       setStateRaw((s) => ({ ...s, hostsLoading: true }));
       try {
@@ -1511,6 +1540,27 @@ export function StormApp() {
     };
   }, [state.openProjectId, state.jsTick]);
 
+  /* Completion toast for a finished host/IP probe. Reused by the poll effect and
+     by the submit handlers when the server closes the job immediately (nothing new
+     to probe — every target was already added). Added = new targets probed this
+     run; skipped = already-present targets left untouched. */
+  const hostFarmDoneToast = (r: NonNullable<ApiHostFarmJob["result"]>) => {
+    const added = r.hosts_created + r.hosts_updated;
+    const skipped = r.hosts_skipped ? `, ${r.hosts_skipped} ${t("skipped")}` : "";
+    pushToast(
+      `${t("Probe done")} — ${added} ${t("added")}${skipped}, ${r.hosts_online} ${t("up")}, ${r.hosts_offline} ${t("down")}`,
+      "success",
+    );
+  };
+  const ipFarmDoneToast = (r: NonNullable<ApiIpFarmJob["result"]>) => {
+    const promoted = r.hosts_promoted ? `, ${r.hosts_promoted} ${t("hosts")}` : "";
+    const skipped = r.ips_skipped ? `, ${r.ips_skipped} ${t("skipped")}` : "";
+    pushToast(
+      `${t("Probe done")} — ${r.ips_created} ${t("IPs")}${skipped}, ${r.hostnames_found} ${t("hostnames")}${promoted}`,
+      "success",
+    );
+  };
+
   // ================= host farm: poll the running probe job =================
   useEffect(() => {
     const job = state.hostFarmJob;
@@ -1528,15 +1578,7 @@ export function StormApp() {
         } else {
           setStateRaw((s) => (s.hostFarmJob && s.hostFarmJob.id === next.id ? { ...s, hostFarmJob: null } : s));
           if (next.status === "done" && next.result) {
-            // Added = number of new targets probed this run; skipped = already-present
-            // hosts we left untouched (no re-probe). Statuses are reported alongside.
-            const r = next.result;
-            const added = r.hosts_created + r.hosts_updated;
-            const skipped = r.hosts_skipped ? `, ${r.hosts_skipped} ${t("skipped")}` : "";
-            pushToast(
-              `${t("Probe done")} — ${added} ${t("added")}${skipped}, ${r.hosts_online} ${t("up")}, ${r.hosts_offline} ${t("down")}`,
-              "success",
-            );
+            hostFarmDoneToast(next.result);
           } else if (next.status === "failed") {
             pushToast(next.error || t("Probe failed"), "error");
           }
@@ -1570,15 +1612,7 @@ export function StormApp() {
         } else {
           setStateRaw((s) => (s.ipFarmJob && s.ipFarmJob.id === next.id ? { ...s, ipFarmJob: null } : s));
           if (next.status === "done" && next.result) {
-            {
-              const r = next.result;
-              const promoted = r.hosts_promoted ? `, ${r.hosts_promoted} ${t("hosts")}` : "";
-              const skipped = r.ips_skipped ? `, ${r.ips_skipped} ${t("skipped")}` : "";
-              pushToast(
-                `${t("Probe done")} — ${r.ips_created} ${t("IPs")}${skipped}, ${r.hostnames_found} ${t("hostnames")}${promoted}`,
-                "success",
-              );
-            }
+            ipFarmDoneToast(next.result);
           } else if (next.status === "failed") {
             pushToast(next.error || t("Probe failed"), "error");
           }
@@ -2487,11 +2521,19 @@ export function StormApp() {
     setState({ ipImportBusy: true });
     try {
       const job = await apiStartIpFarm(pid, raw);
+      setState({ ipImportOpen: false, ipImportRaw: "", ipImportPreview: "", ipImportBusy: false });
+      reloadHosts();
+      // Nothing new to probe — every address was already added. The server closed
+      // the job on the spot; report the skip instead of a "Probing 0 IPs…" banner.
+      if (!isFarmJobInFlight(job.status)) {
+        setState({ ipFarmJob: null });
+        if (job.result) ipFarmDoneToast(job.result);
+        return;
+      }
       // Unlike the host farm there are no skeleton rows: until an address is
       // reverse-resolved we cannot tell whether it belongs to an existing host.
       // Rows still stream in — the farm commits per address.
-      setState({ ipImportOpen: false, ipImportRaw: "", ipImportPreview: "", ipImportBusy: false, ipFarmJob: job });
-      reloadHosts();
+      setState({ ipFarmJob: job });
       pushToast(`${t("Probing")} ${job.targets_total ?? ""} ${t("IPs")}…`.replace("  ", " "), "success");
     } catch (e) {
       setState({ ipImportBusy: false });
@@ -2511,8 +2553,16 @@ export function StormApp() {
       const job = await apiStartHostFarm(pid, raw);
       // The server creates the hosts up front, so close the page and show them now;
       // statuses/ports fill in as the background probe commits per host (poll effect).
-      setState({ hostImportOpen: false, hostImportRaw: "", hostImportPreview: "", hostImportBusy: false, hostFarmJob: job });
+      setState({ hostImportOpen: false, hostImportRaw: "", hostImportPreview: "", hostImportBusy: false });
       reloadHosts();
+      // Nothing new to probe — every host was already added. The server closed the
+      // job on the spot; report the skip instead of a "Probing 0 hosts…" banner.
+      if (!isFarmJobInFlight(job.status)) {
+        setState({ hostFarmJob: null });
+        if (job.result) hostFarmDoneToast(job.result);
+        return;
+      }
+      setState({ hostFarmJob: job });
       pushToast(`${t("Probing")} ${job.targets_total ?? ""} ${t("hosts")}…`.replace("  ", " "), "success");
     } catch (e) {
       setState({ hostImportBusy: false });
@@ -2875,7 +2925,9 @@ export function StormApp() {
     const targets: Record<EditorType, { id: number | undefined; call: (id: number) => Promise<void>; reload: () => void; err: string }> = {
       host: { id: hosts[i]?.id, call: (id) => apiDeleteHost(pid, id), reload: reloadHosts, err: "Couldn't delete host" },
       // Rows in the IPs view address one address of a host, not the host itself.
-      ip: { id: ipsRows[i] ? i : undefined, call: () => removeHostIp(pid, ipsRows[i].hostIds, ipsRows[i].ip), reload: reloadHosts, err: "Couldn't delete IP address" },
+      // «Удаление» IP скрывает адрес из списка, но не рвёт его привязку к домен-
+      // хостам (та остаётся в карточке хоста). Бэк сносит только отдельную IP-запись.
+      ip: { id: ipsRows[i] ? i : undefined, call: () => apiHideIp(pid, ipsRows[i].ip), reload: reloadHosts, err: "Couldn't delete IP address" },
       endpoint: { id: endpointRows[i]?.endpointId, call: (id) => apiDeleteEndpoint(pid, endpointRows[i].hostId, id), reload: reloadHosts, err: "Couldn't delete endpoint" },
       vuln: { id: d.vulns[i]?.id, call: (id) => apiDeleteVulnerability(pid, id), reload: reloadVulns, err: "Couldn't delete vulnerability" },
       note: { id: d.notes[i]?.id, call: (id) => apiDeleteProjectNote(pid, id), reload: reloadNotes, err: "Couldn't delete note" },
@@ -2907,20 +2959,6 @@ export function StormApp() {
       target.reload();
     } catch (e) {
       pushToast(getApiErrorMessage(e, target.err), "error");
-    }
-  };
-
-  /** Drops one address by writing back the host's remaining ip_addresses. */
-  /** Drops an address from every host that carries it — the IPs table groups by
-   *  address, so clearing only one host would leave the row on screen. */
-  const removeHostIp = async (pid: number, hostIds: number[], ip: string) => {
-    for (const hostId of hostIds) {
-      const current = await apiGetHost(pid, hostId);
-      const rest = current.ip_addresses.filter((a) => a.ip_address !== ip);
-      if (rest.length === current.ip_addresses.length) continue;
-      await apiUpdateHost(pid, hostId, {
-        ip_addresses: rest.map((a) => ({ ip_address: a.ip_address, label: a.label, is_primary: a.is_primary })),
-      });
     }
   };
 
@@ -3445,8 +3483,8 @@ export function StormApp() {
   };
   /** Признак Cloudflare — отдельный вопрос («что за прокси»), а не разновидность
    *  статуса, поэтому свой переключатель, а не ещё одна пилюля в общем ряду. */
-  const matchesCfFilter = (cloudflare: boolean, filter: "" | "yes" | "no"): boolean =>
-    filter === "" || cloudflare === (filter === "yes");
+  const matchesCfFilter = (cloudflare: CfState, filter: "" | "yes" | "no"): boolean =>
+    filter === "" || cloudflare === (filter === "yes");  // unknown (null) — только под "all"
   /* Единственное место, где решается судьба строки в таблице хостов, — через него
      же идёт экспорт (exportLinesFor → hostsList/visibleSubdomainsOf), поэтому
      фильтры не могут разъехаться между тем, что видно, и тем, что выгружается. */
@@ -3557,7 +3595,7 @@ export function StormApp() {
   };
   const ipRowsByAddr = new Map<
     string,
-    { ip: string; hostIdx: number; hostIds: number[]; names: IpRowNames; cloudflare: boolean; ipMeas: IpBucket | null; domainMeas: IpBucket | null }
+    { ip: string; hostIdx: number; names: IpRowNames; cloudflare: CfState; ipMeas: IpBucket | null; domainMeas: IpBucket | null }
   >();
   hosts.forEach((h, idx) => {
     h.ipEntries.forEach((entry) => {
@@ -3569,15 +3607,12 @@ export function StormApp() {
       const acc =
         ipRowsByAddr.get(entry.ip) ??
         (() => {
-          const fresh = { ip: entry.ip, hostIdx: idx, hostIds: [] as number[], names: [] as IpRowNames, cloudflare: false, ipMeas: null as IpBucket | null, domainMeas: null as IpBucket | null };
+          const fresh = { ip: entry.ip, hostIdx: idx, names: [] as IpRowNames, cloudflare: null as CfState, ipMeas: null as IpBucket | null, domainMeas: null as IpBucket | null };
           ipRowsByAddr.set(entry.ip, fresh);
           return fresh;
         })();
       acc.names.push(...entry.hostnames, ...own);
-      // Every host carrying this address — deleting the row must clear it from all
-      // of them, otherwise the row would come straight back.
-      acc.hostIds.push(h.id);
-      acc.cloudflare = acc.cloudflare || entry.cloudflare;
+      acc.cloudflare = mergeCf(acc.cloudflare, entry.cloudflare);
       // Prefer a real host as the row's edit/delete target over the IP farm's
       // nameless parent — that is the row a user means when they click edit.
       if (h.origin === "host" && hosts[acc.hostIdx]?.origin === "ip") acc.hostIdx = idx;
@@ -3586,6 +3621,9 @@ export function StormApp() {
     });
   });
   const ipsRows = [...ipRowsByAddr.values()]
+    // Скрытые («удалённые» из списка) адреса не показываем — привязка к хостам при
+    // этом сохранена на бэке, адрес просто не значится во вкладке IP.
+    .filter((row0) => !state.hiddenIps.includes(row0.ip))
     .map((row0) => {
       // Bare-IP measurement wins; domain probe is the fallback for addresses only
       // ever resolved from a domain.
@@ -3698,7 +3736,7 @@ export function StormApp() {
 
   const sectionLabel =
     sec === "hosts"
-      ? ({ hosts: "Hosts", ips: "IPs", endpoints: "Endpoints" } as Record<string, string>)[rv] || "Hosts"
+      ? ({ hosts: "Hosts", ips: "IPs", endpoints: "Endpoints", js: "JS scan" } as Record<string, string>)[rv] || "Hosts"
       : ({ overview: "Overview", vulns: "Vulnerabilities", notes: "Notes", creds: "Creds", members: "Members", activity: "Activity" } as Record<string, string>)[sec] || "Overview";
   /** The item open inside the section, if any — the last crumb (e.g. the note's title). */
   const crumbLeaf =
@@ -3925,7 +3963,7 @@ export function StormApp() {
           </svg>
           <input placeholder={t("Filter projects…")} value={state.query} onChange={(e) => setState({ query: e.target.value })} />
         </label>
-        <div className="clk iconbtn" onClick={() => setState((s) => ({ projSort: s.projSort === "first" ? "last" : "first" }))} style={{ display: "flex", alignItems: "center", gap: 9, height: 40, padding: "0 15px", border: "1px solid var(--st-border)", borderRadius: 11, background: "var(--st-surface)", font: "600 13px Inter,sans-serif", color: "var(--st-text-2)" }}>
+        <div className="clk iconbtn" onClick={() => setState((s) => ({ projSort: s.projSort === "first" ? "last" : "first" }))} style={{ display: "flex", alignItems: "center", gap: 9, height: 40, padding: "0 16px", border: "1px solid var(--st-border)", borderRadius: 20, background: "var(--st-surface)", font: "500 13.5px Inter,sans-serif", color: "var(--st-text-2)" }}>
           <Icon name="sort" size={16} />
           {state.projSort === "first" ? t("First updated") : t("Last updated")}
         </div>
@@ -4010,26 +4048,25 @@ export function StormApp() {
           {t("Invite member")}
         </button>
       </div>
-      {/* Активные / архивные (деактивированные) участники — вкладки как у проектов. */}
-      <div style={{ display: "flex", gap: 8, marginTop: 22 }}>
+      {/* Одна строка управления: вкладки активные/заблокированные — слева (там,
+          где раньше был поиск по пользователям), поиск и фильтры — справа. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 22, flexWrap: "wrap" }}>
         <div className="tab" onClick={() => setState({ wsUserTab: "active" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: state.wsUserTab === "active" ? "var(--st-surface)" : "transparent", border: `1px solid ${state.wsUserTab === "active" ? "var(--st-border)" : "transparent"}`, color: state.wsUserTab === "active" ? "var(--st-text)" : "var(--st-text-3)" }}>
-          <Icon name="trend-up" size={15} sw={2.2} />
-          {t("Active")}
+          <Icon name="unlock" size={15} sw={2.2} />
+          {lang === "ru" ? "Активные" : "Active"}
           <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: state.wsUserTab === "active" ? "var(--st-accent-2)" : "var(--st-accent-soft)", color: state.wsUserTab === "active" ? "var(--st-on-accent)" : "var(--st-accent-2)", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{state.workspaceUsers.filter((u) => !u.locked).length}</span>
         </div>
         <div className="tab" onClick={() => setState({ wsUserTab: "archived" })} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 15px", borderRadius: 11, font: "700 13.5px Inter,sans-serif", background: state.wsUserTab === "archived" ? "var(--st-surface)" : "transparent", border: `1px solid ${state.wsUserTab === "archived" ? "var(--st-border)" : "transparent"}`, color: state.wsUserTab === "archived" ? "var(--st-text)" : "var(--st-text-3)" }}>
-          <Icon name="archive" size={15} />
-          {t("Archived")}
+          <Icon name="lock" size={15} sw={2.2} />
+          {lang === "ru" ? "Заблокированные" : "Blocked"}
           <span className="mono" style={{ minWidth: 20, height: 20, padding: "0 5px", borderRadius: 6, background: state.wsUserTab === "archived" ? "var(--st-accent-2)" : "var(--st-accent-soft)", color: state.wsUserTab === "archived" ? "var(--st-on-accent)" : "var(--st-accent-2)", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{state.workspaceUsers.filter((u) => u.locked).length}</span>
         </div>
-      </div>
-      {/* search + role filter */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-        <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 280 }}>
+        <div style={{ flex: 1 }} />
+        {/* Поиск переехал сюда — в правую часть строки, вплотную к фильтрам. */}
+        <label className="fq" style={{ position: "relative", display: "flex", alignItems: "center", width: 240 }}>
           <svg style={{ position: "absolute", left: 13 }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--st-text-faint)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
           <input placeholder={t("Search by username…")} value={state.wsMemberQuery} onChange={(e) => setState({ wsMemberQuery: e.target.value })} />
         </label>
-        <div style={{ flex: 1 }} />
         {/* Every pill toggles; filters combine (AND across groups, OR inside one).
             An empty group means "All", so unpicking the last pill re-selects it. */}
         <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("ROLE")}</span>
@@ -4116,7 +4153,7 @@ export function StormApp() {
                 {u.locked ? (
                   <div className="actbtn" title={t("Reactivate user")} onClick={() => reactivateUser(idx)}><Icon name="unlock" size={15} /></div>
                 ) : (
-                  <div className="actbtn del" title={t("Deactivate user")} onClick={() => askDeleteWSUser(idx)}><Icon name="trash" size={15} /></div>
+                  <div className="actbtn del" title={t("Block user")} onClick={() => askDeleteWSUser(idx)}><Icon name="trash" size={15} /></div>
                 )}
               </div>
             </div>
@@ -4227,6 +4264,10 @@ export function StormApp() {
                   search on the left and filters on the right. */}
               {sec === "hosts" && !_hd && !_ipd && (
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "600 12.5px Inter,sans-serif", color: "var(--st-text-2)", background: "var(--st-surface)", border: "1px solid var(--st-border-strong)", borderRadius: 20, padding: "5px 13px" }}>{reconTotalLabel} <b className="mono" style={{ color: "var(--st-text)" }}>{reconTotal}</b></span>
+              )}
+              {/* Счётчик уязвимостей рядом с заголовком — как счётчики-бейджи в «Мемберах». */}
+              {sec === "vulns" && state.openVulnId == null && (
+                <span className="mono" style={{ minWidth: 24, height: 24, padding: "0 8px", borderRadius: 7, background: "var(--st-accent-soft)", color: "var(--st-accent-2)", fontSize: 13, fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{d.vulns.length}</span>
               )}
             </div>
             <div style={{ display: "flex", gap: 10, flex: "none" }}>
@@ -4463,8 +4504,9 @@ export function StormApp() {
     </div>
   );
 
-  /** Признак Cloudflare чипом: true подсвечен, false приглушён и не отвлекает. */
-  const cloudflarePill = (on: boolean) => (
+  /** Признак Cloudflare чипом (трёхзначно): true подсвечен, false приглушён,
+   *  null («unknown») — самый бледный: хост ещё пробится, признак не определён. */
+  const cloudflarePill = (state: CfState) => (
     <span
       className="mono"
       style={{
@@ -4473,11 +4515,12 @@ export function StormApp() {
         fontWeight: 700,
         borderRadius: 6,
         padding: "2px 8px",
-        background: on ? "var(--st-warn-soft)" : "var(--st-elevated)",
-        color: on ? "var(--st-warn)" : "var(--st-text-3)",
+        background: state === true ? "var(--st-warn-soft)" : "var(--st-elevated)",
+        color:
+          state === true ? "var(--st-warn)" : state === null ? "var(--st-text-faint)" : "var(--st-text-3)",
       }}
     >
-      {String(on)}
+      {state === null ? "unknown" : String(state)}
     </span>
   );
 
@@ -5139,29 +5182,26 @@ export function StormApp() {
     if (state.openVulnId != null) return renderVulnDetail();
     return (
       <div className="route">
-        {/* Flat wrapping toolbar: a flex spacer keeps the filters right-aligned when
-            they fit and lets them wrap cleanly to the next line otherwise, so a
-            longer (e.g. Russian) label never pushes the layout out of place. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap", rowGap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, font: "600 12.5px Inter,sans-serif", color: "var(--st-text-3)" }}>
-            <Icon name="info" size={15} /><b className="mono" style={{ color: "var(--st-text)" }}>{vulns.length}</b> {t("findings on this page")}
-          </div>
+        {/* Панель фильтров: поиск по хосту и автору — слева (как в разделе
+            «Эндпоинты»), пилюли статуса и критичности — справа, отодвинуты
+            flex-распоркой. Счётчик уязвимостей переехал к заголовку секции. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16, flexWrap: "wrap", rowGap: 10 }}>
+          {searchBox(t("Filter by host…"), state.vulnFilterHost, (v) => setState({ vulnFilterHost: v }), 190)}
+          {searchBox(t("Filter by author…"), state.vulnFilterAuthor, (v) => setState({ vulnFilterAuthor: v }), 190)}
           <div style={{ flex: "1 1 auto" }} />
-            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("HOST")}</span>
-            <input placeholder={t("Filter by host…")} value={state.vulnFilterHost} onChange={(e) => setState({ vulnFilterHost: e.target.value })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 10px", borderRadius: 20, background: "var(--st-surface)", color: "var(--st-text-2)", border: "1px solid var(--st-border)", width: 150 }} />
-            {/* Status / severity are multi-select: pills toggle, several can be held at
-                once, and clearing the last one falls back to "All". Driven by the token
-                lists so they cannot drift from the backend's vocabularies. */}
-            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700, marginLeft: 6 }}>{t("STATUS")}</span>
-            <div className="clk" onClick={() => setState({ vulnFilterStatuses: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfS.length === 0) }}>{t("All")}</div>
-            {VSTATUS_ORDER.map((s) => (
-              <div key={s} className="clk" onClick={() => setState((st) => ({ vulnFilterStatuses: toggleIn(st.vulnFilterStatuses, s) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfS.includes(s)) }}>{t(VSTATUS_LABEL[s])}</div>
-            ))}
-            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700, marginLeft: 6 }}>{t("SEVERITY")}</span>
-            <div className="clk" onClick={() => setState({ vulnFilterSeverities: [] })} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfSev.length === 0) }}>{t("All")}</div>
-            {(["unknown", "critical", "high", "medium", "low", "info"] as Severity[]).map((s) => (
-              <div key={s} className="clk" onClick={() => setState((st) => ({ vulnFilterSeverities: toggleIn(st.vulnFilterSeverities, s) }))} style={{ font: "600 12px Inter,sans-serif", padding: "6px 12px", borderRadius: 20, cursor: "pointer", ...vfPill(vfSev.includes(s)) }}>{cap(s)}</div>
-            ))}
+          {/* Status / severity are multi-select: pills toggle, several can be held at
+              once, and clearing the last one falls back to "All". Driven by the token
+              lists so they cannot drift from the backend's vocabularies. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("STATUS")}</span>
+            {filterPill(t("All"), vfS.length === 0, () => setState({ vulnFilterStatuses: [] }))}
+            {VSTATUS_ORDER.map((s) => filterPill(t(VSTATUS_LABEL[s]), vfS.includes(s), () => setState((st) => ({ vulnFilterStatuses: toggleIn(st.vulnFilterStatuses, s) }))))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span className="mono" style={{ fontSize: 10.5, letterSpacing: 1, color: "var(--st-text-faint)", fontWeight: 700 }}>{t("SEVERITY")}</span>
+            {filterPill(t("All"), vfSev.length === 0, () => setState({ vulnFilterSeverities: [] }))}
+            {(["unknown", "critical", "high", "medium", "low", "info"] as Severity[]).map((s) => filterPill(cap(s), vfSev.includes(s), () => setState((st) => ({ vulnFilterSeverities: toggleIn(st.vulnFilterSeverities, s) }))))}
+          </div>
         </div>
         <div style={{ ...CARD, overflow: "hidden" }}>
           {vulns.length > 0 && (
@@ -6370,12 +6410,12 @@ export function StormApp() {
           <>
             <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 14 }}>
               <span style={{ width: 42, height: 42, flex: "none", borderRadius: "50%", background: "var(--st-danger-soft)", color: "var(--st-danger)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="lock" size={20} /></span>
-              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{t("Deactivate user")}</h2>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "var(--st-text)" }}>{t("Block user")}</h2>
             </div>
             <div style={{ fontSize: 14, color: "var(--st-text-2)", lineHeight: 1.55 }}>
               <b style={{ color: "var(--st-text)" }}>{state.confirmLabel}</b> {t("will lose access, but their projects, findings and notes stay. You can reactivate them here later.")}
             </div>
-            {modalFooter(closeConfirm, confirmDelete, t("Deactivate"), "var(--st-danger)")}
+            {modalFooter(closeConfirm, confirmDelete, t("Block"), "var(--st-danger)")}
           </>
         ) : (
           <>

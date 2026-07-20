@@ -478,7 +478,7 @@ class HostIpAddressOut(ORMBase):
     label: str | None
     is_primary: bool
     hostnames: list[HostnameResolutionOut] = Field(default_factory=list)
-    is_cloudflare: bool = False
+    is_cloudflare: bool | None = None
     ports: list["PortOut"] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -541,6 +541,12 @@ class HostOut(ORMBase):
     """host — обычный хост; ip — служебный родитель адреса из фермы IP."""
     created_at: datetime
     updated_at: datetime
+
+
+class HiddenIpCreate(InputBaseModel):
+    """Адрес, который нужно скрыть из списка IP проекта (см. ProjectHiddenIp)."""
+
+    ip_address: str = Field(min_length=1, max_length=45)
 
 
 class PortCreate(InputBaseModel):
@@ -919,7 +925,7 @@ class IpFarmIpResult(BaseModel):
     ip_address: str
     host_id: int | None = None
     hostnames: list[HostnameResolutionOut] = Field(default_factory=list)
-    is_cloudflare: bool = False
+    is_cloudflare: bool | None = None
     created: bool = False
     # true — адрес подшит к уже существующему хосту (по адресу или по PTR-имени),
     # а не к новой служебной строке origin='ip'.
@@ -1023,6 +1029,78 @@ class JsFarmJobOut(ORMBase):
     status: str
     targets_total: int | None = None
     result: JsFarmResult | None = None
+    error: str | None = None
+    created_at: datetime
+
+
+# --- Scanner: раскрытие поддоменов корневого домена ---
+
+
+class SubFarmRequest(InputBaseModel):
+    # Пусто = корневые домены проекта; иначе — список корней по строке.
+    raw: str = Field(default="", max_length=262144)
+
+
+class SubFarmResult(BaseModel):
+    roots_scanned: int = 0
+    # Всего уникальных поддоменов в scope из всех источников.
+    subdomains_found: int = 0
+    # Из них новых для проекта (остальные уже были).
+    subdomains_new: int = 0
+    # Итоги прогона найденного фермой хостов (резолв + пробив).
+    hosts_created: int = 0
+    hosts_online: int = 0
+    hosts_offline: int = 0
+    # Какие источники реально отработали ("crt.sh", "subfinder").
+    sources_used: list[str] = Field(default_factory=list)
+    # Найденные поддомены (обрезаются до recon_result_max_items при сохранении).
+    subdomains: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class SubFarmJobOut(ORMBase):
+    id: int
+    project_id: int
+    kind: str = "subs"
+    status: str
+    targets_total: int | None = None
+    result: SubFarmResult | None = None
+    error: str | None = None
+    created_at: datetime
+
+
+# --- Scanner: скан открытых TCP-портов (nmap) ---
+
+
+class PortScanRequest(InputBaseModel):
+    # Пусто = хосты проекта; иначе — список хостов/IP по строке.
+    raw: str = Field(default="", max_length=262144)
+
+
+class PortScanHostResult(BaseModel):
+    hostname: str | None = None
+    ip_address: str | None = None
+    open_ports: list[int] = Field(default_factory=list)
+
+
+class PortScanResult(BaseModel):
+    targets_scanned: int = 0
+    targets_invalid: int = 0
+    hosts_up: int = 0
+    ports_found: int = 0
+    ports_created: int = 0
+    ports_updated: int = 0
+    hosts: list[PortScanHostResult] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class PortScanJobOut(ORMBase):
+    id: int
+    project_id: int
+    kind: str = "ports"
+    status: str
+    targets_total: int | None = None
+    result: PortScanResult | None = None
     error: str | None = None
     created_at: datetime
 

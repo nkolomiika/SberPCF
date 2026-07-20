@@ -14,11 +14,12 @@
 
 from __future__ import annotations
 
-from sqlalchemy import and_, select
+from datetime import UTC, datetime
+
+from sqlalchemy import and_, delete, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
-from app.cloudflare import is_cloudflare_ip
 from app.config import get_settings
 from app.enums import HostStatus, ReconJobKind, ReconJobStatus
 from app.exceptions import ValidationError
@@ -27,7 +28,7 @@ from app.farm.core import ParsedTarget, ProbeResult
 from app.farm.fingerprint import Tech, detect_services, has_cloudflare
 from app.farm.hosts import HostFarmService
 from app.farm.resolver import ResolvedHost, ResolvedName, ReverseResult, reverse_resolve
-from app.models import Host, HostFarmJob, HostIpAddress
+from app.models import Host, HostFarmJob, HostIpAddress, ProjectHiddenIp
 from app.schemas import HostFarmPortResult, IpFarmIpResult, IpFarmResult
 from app.ws_manager import ws_manager
 
@@ -179,18 +180,21 @@ class IpFarmService(HostFarmService):
                 if host.origin == "ip":
                     host.status = status
 
-                # CF по детекту: инструмент увидел Cloudflare на порту адреса →
-                # помечаем CF даже когда статический CIDR-список промахнулся.
-                cf_hint = has_cloudflare(
+                # CF на пробиве: заголовки ответа (server=cloudflare / cf-ray) ИЛИ
+                # детект технологий. У голого IP без SNI Cloudflare обычно молчит —
+                # тогда сигнала нет и _ensure_ips прежний флаг не понижает.
+                cf_hint = any(p.cloudflare for p in ip_probes) or has_cloudflare(
                     [t for pp in ip_probes for t in techs_by_port.get((pp.hostname, pp.port), [])]
                 )
                 ip_existed = any(a.ip_address == ip for a in host.ip_addresses)
-                ip_row = await self._ensure_ips(host, [ip], cloudflare_hint=cf_hint)
+                # is_cloudflare проставляет _ensure_ips (со стики-логикой), отдельно не трогаем.
+                ip_row = await self._ensure_ips(
+                    host, [ip], cloudflare_hint=cf_hint, cf_responded=responded
+                )
                 if ip_row is None:
                     raise RuntimeError("не удалось завести адрес")
                 # JSON-колонка не отслеживает мутацию на месте — присваиваем целиком.
                 ip_row.hostnames = [n.as_dict() for n in rev.names]
-                ip_row.is_cloudflare = is_cloudflare_ip(ip) or cf_hint
 
                 port_results: list[HostFarmPortResult] = []
                 ports_created = ports_updated = 0
@@ -302,8 +306,16 @@ class IpFarmService(HostFarmService):
             raise ValidationError(f"Слишком много IP: {len(targets)} (максимум {settings.farm_max_targets})")
         if not targets:
             raise ValidationError("Не удалось распознать ни одного IP-адреса")
+        # Явное «Add IPs» снимает адреса со скрытия: если пользователь раньше удалил
+        # адрес из списка IP, повторное добавление возвращает его в список.
+        await self.db.execute(
+            delete(ProjectHiddenIp).where(
+                and_(ProjectHiddenIp.project_id == project_id, ProjectHiddenIp.ip_address.in_(list(targets.keys())))
+            )
+        )
         # Уже добавленные адреса фиксируем синхронно — воркер исключит их из пробива.
         existing = await self._existing_target_keys(project_id, targets)
+        new_count = len(targets) - len(existing)
         # Заготовок, в отличие от фермы хостов, не создаём: до обратного резолва
         # неизвестно, заводить ли новый Host или подшить адрес к существующему.
         # Строки всё равно появляются по ходу — _persist_ips коммитит поадресно.
@@ -312,10 +324,16 @@ class IpFarmService(HostFarmService):
             created_by=actor_id,
             kind=self.kind,
             status=ReconJobStatus.PENDING,
-            targets_total=len(targets) - len(existing),
+            targets_total=new_count,
             raw=raw,
             skipped_targets=sorted(existing),
         )
+        # Пробивать нечего (все адреса уже добавлены) — закрываем задачу сразу и не
+        # будим воркер: иначе фронт показал бы «Probing 0 IPs…» и зря поллил.
+        if new_count == 0:
+            job.status = ReconJobStatus.DONE
+            job.result = IpFarmResult(ips_skipped=len(existing)).model_dump()
+            job.finished_at = datetime.now(UTC)
         self.db.add(job)
         await self.db.commit()
         await self.db.refresh(job)

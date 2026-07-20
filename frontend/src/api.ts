@@ -663,6 +663,23 @@ export async function deleteHost(projectId: number, hostId: number): Promise<voi
   await api.delete(`/projects/${projectId}/hosts/${hostId}`);
 }
 
+/* ── Скрытые IP: «удаление» адреса из вкладки IP без разрыва привязки к хостам ──
+   Список адресов, скрытых из вкладки IP. Фронт фильтрует по нему ipsRows. */
+export async function getHiddenIps(projectId: number): Promise<string[]> {
+  const { data } = await api.get<string[]>(`/projects/${projectId}/hidden-ips`);
+  return data;
+}
+
+/** Скрывает адрес из списка IP (сносит отдельную IP-запись, привязку к хостам хранит). */
+export async function hideIp(projectId: number, ip: string): Promise<void> {
+  await api.post(`/projects/${projectId}/hidden-ips`, { ip_address: ip });
+}
+
+/** Возвращает адрес в список IP. */
+export async function unhideIp(projectId: number, ip: string): Promise<void> {
+  await api.delete(`/projects/${projectId}/hidden-ips/${encodeURIComponent(ip)}`);
+}
+
 // ---- recon farm: серверный пробив вставленных списков хостов и IP ----
 
 /** Запускает фоновый пробив вставленного списка; возвращает созданную задачу. */

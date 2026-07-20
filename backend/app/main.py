@@ -25,6 +25,7 @@ from app.routers import (
     project_credentials,
     project_notes,
     reports,
+    scanner,
     users,
     vulnerabilities,
     v2_agent,
@@ -63,6 +64,7 @@ def _register_routes() -> None:
     app.include_router(project_credentials.router, prefix=prefix)
     app.include_router(assets.router, prefix=prefix)
     app.include_router(farm.router, prefix=prefix)
+    app.include_router(scanner.router, prefix=prefix)
     app.include_router(vulnerabilities.router, prefix=prefix)
     app.include_router(files.router, prefix=prefix)
     app.include_router(images.router, prefix=prefix)
@@ -180,6 +182,9 @@ async def startup() -> None:
             await conn.execute(text("ALTER TABLE hosts ADD COLUMN IF NOT EXISTS origin VARCHAR(16) NOT NULL DEFAULT 'host'"))
             await conn.execute(text("ALTER TABLE host_ip_addresses ADD COLUMN IF NOT EXISTS hostnames JSON"))
             await conn.execute(text("ALTER TABLE host_ip_addresses ADD COLUMN IF NOT EXISTS is_cloudflare BOOLEAN NOT NULL DEFAULT false"))
+            # is_cloudflare стал трёхзначным (NULL = ещё неизвестно / пробится): снимаем NOT NULL и default.
+            await conn.execute(text("ALTER TABLE host_ip_addresses ALTER COLUMN is_cloudflare DROP NOT NULL"))
+            await conn.execute(text("ALTER TABLE host_ip_addresses ALTER COLUMN is_cloudflare DROP DEFAULT"))
             await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'hosts'"))
             await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS raw TEXT"))
             await conn.execute(text("ALTER TABLE host_farm_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"))

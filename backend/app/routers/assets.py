@@ -10,6 +10,7 @@ from app.schemas import (
     EndpointCreate,
     EndpointOut,
     EndpointUpdate,
+    HiddenIpCreate,
     HostCreate,
     HostOut,
     HostUpdate,
@@ -97,6 +98,44 @@ async def delete_host(
 ) -> None:
     """Удаляет хост."""
     await AssetService(db).delete_host(project_id, host_id, current_user.id)
+
+
+# ── Скрытые IP: «удаление» адреса из вкладки IP без разрыва привязки к хостам ──
+@router.get("/projects/{project_id}/hidden-ips", response_model=list[str])
+async def list_hidden_ips(
+    project_id: int,
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> list[str]:
+    """Адреса, скрытые из списка IP этого проекта (фронт фильтрует по ним)."""
+    return await AssetService(db).list_hidden_ips(project_id)
+
+
+@router.post("/projects/{project_id}/hidden-ips", status_code=status.HTTP_204_NO_CONTENT)
+async def hide_ip(
+    project_id: int,
+    payload: HiddenIpCreate,
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Скрывает адрес из списка IP: сносит отдельную IP-запись (origin='ip') с этим
+    адресом, но привязку к домен-хостам сохраняет."""
+    await AssetService(db).hide_ip(project_id, payload.ip_address, current_user.id)
+
+
+@router.delete("/projects/{project_id}/hidden-ips/{ip_address}", status_code=status.HTTP_204_NO_CONTENT)
+async def unhide_ip(
+    project_id: int,
+    ip_address: str,
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Снимает адрес со скрытия — снова показывается в списке IP."""
+    await AssetService(db).unhide_ip(project_id, ip_address, current_user.id)
 
 
 @router.get("/projects/{project_id}/hosts/{host_id}/ports", response_model=list[PortOut])

@@ -25,6 +25,8 @@ from app.enums import ReconJobKind, ReconJobStatus
 from app.farm.hosts import HostFarmService
 from app.farm.ips import IpFarmService
 from app.farm.js import JsFarmService
+from app.farm.portscan import PortScanFarmService
+from app.farm.subs import SubdomainFarmService
 from app.models import HostFarmJob
 
 settings = get_settings()
@@ -34,6 +36,8 @@ _SERVICES = {
     ReconJobKind.HOSTS: HostFarmService,
     ReconJobKind.IPS: IpFarmService,
     ReconJobKind.JS: JsFarmService,
+    ReconJobKind.SUBS: SubdomainFarmService,
+    ReconJobKind.PORTS: PortScanFarmService,
 }
 
 # Списки в result-блобе, которые обрезаем до recon_result_max_items (счётчики целы).
@@ -115,6 +119,11 @@ def enqueue_job(job: HostFarmJob, background_tasks: BackgroundTasks) -> None:
     В режиме очереди делать ничего не нужно — задача уже лежит в БД со
     статусом pending, её подхватит relay воркера.
     """
+    # Задача, закрытая ещё в create_job (пробивать нечего — все цели уже добавлены),
+    # исполнителю не отдаётся: relay берёт только pending, а BackgroundTasks впустую
+    # разбудил бы run_recon_job (тот всё равно вернётся на guard status==done).
+    if job.status != ReconJobStatus.PENDING:
+        return
     if settings.recon_worker_enabled:
         return
     background_tasks.add_task(run_recon_job, job.id)
