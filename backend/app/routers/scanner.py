@@ -10,11 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import enforce_csrf, get_current_user, require_project_access
-from app.farm import PortScanFarmService, SubdomainFarmService, enqueue_job
+from app.farm import PortScanFarmService, ReverseFarmService, SubdomainFarmService, enqueue_job
 from app.models import User
 from app.schemas import (
     PortScanJobOut,
     PortScanRequest,
+    ReverseFarmJobOut,
+    ReverseFarmRequest,
     SubFarmJobOut,
     SubFarmRequest,
 )
@@ -90,3 +92,39 @@ async def get_port_scan_job(
     """Статус задачи скана портов. Задачу чужого kind не отдаёт."""
     job = await PortScanFarmService(db).get_job(project_id, job_id)
     return PortScanJobOut.model_validate(job)
+
+
+@router.post(
+    "/projects/{project_id}/scanner/reverse",
+    response_model=ReverseFarmJobOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_reverse_scan(
+    project_id: int,
+    payload: ReverseFarmRequest,
+    background_tasks: BackgroundTasks,
+    _: None = Depends(enforce_csrf),
+    current_user: User = Depends(get_current_user),
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> ReverseFarmJobOut:
+    """Берёт IP (или все адреса проекта) и ставит обратный резолв с раскрытием
+    хостов в фон. Этот кросс-рекон намеренно НЕ делается при обычном «Add IPs»."""
+    job = await ReverseFarmService(db).create_job(project_id, payload.raw, current_user.id)
+    enqueue_job(job, background_tasks)
+    return ReverseFarmJobOut.model_validate(job)
+
+
+@router.get(
+    "/projects/{project_id}/scanner/reverse/jobs/{job_id}",
+    response_model=ReverseFarmJobOut,
+)
+async def get_reverse_scan_job(
+    project_id: int,
+    job_id: int,
+    _project=Depends(require_project_access),
+    db: AsyncSession = Depends(get_db),
+) -> ReverseFarmJobOut:
+    """Статус задачи обратного резолва. Задачу чужого kind не отдаёт."""
+    job = await ReverseFarmService(db).get_job(project_id, job_id)
+    return ReverseFarmJobOut.model_validate(job)

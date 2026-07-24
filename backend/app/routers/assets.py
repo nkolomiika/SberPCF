@@ -1,9 +1,10 @@
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import enforce_csrf, get_current_user, require_project_access
+from app.farm import JsFarmService
 from app.models import User
 from app.pagination import PageParams, to_paginated_response
 from app.schemas import (
@@ -288,6 +289,25 @@ async def list_js_files(
 ) -> list[JsFileOut]:
     """JS-файлы проекта с находками — читает раздел JS (группируется по хосту на фронте)."""
     return await AssetService(db).list_js_files(project_id)
+
+
+@router.get("/projects/{project_id}/js-files/archive")
+async def download_js_archive(
+    project_id: int,
+    host_id: int | None = Query(None),
+    _project=Depends(require_project_access),
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Zip-архив найденных .js. Файлы в БД не хранятся — их URL докачиваются по
+    требованию через тот же SSRF-safe транспорт, что и скан. `host_id` сужает
+    архив до одного хоста; без него — все домены проекта."""
+    name, blob = await JsFarmService(db).build_archive(project_id, host_id)
+    return Response(
+        content=blob,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 @router.get("/projects/{project_id}/hosts/{host_id}/endpoints", response_model=list[EndpointOut])

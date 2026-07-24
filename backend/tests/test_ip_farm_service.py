@@ -373,6 +373,16 @@ async def test_promotion_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_promotion_skipped_when_resolve_hosts_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_hosts=False (обычное «Add IPs») не продвигает PTR-имя в ферму хостов —
+    кросс-рекон делается только явным запуском Reverse-DNS сканера."""
+    svc, host_stub = _promotion_service(monkeypatch, [ResolvedName("api.acme.com", "ptr", confirmed=True)])
+    await svc.probe_and_import(101, "1.2.3.4", actor_id=7, resolve_hosts=False)
+
+    host_stub.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_skip_targets_are_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Уже добавленный адрес исключается из резолва/пробива и считается пропущенным."""
     svc, _ = _promotion_service(monkeypatch, [])

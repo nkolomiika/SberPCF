@@ -26,6 +26,7 @@ from app.farm.hosts import HostFarmService
 from app.farm.ips import IpFarmService
 from app.farm.js import JsFarmService
 from app.farm.portscan import PortScanFarmService
+from app.farm.reverse import ReverseFarmService
 from app.farm.subs import SubdomainFarmService
 from app.models import HostFarmJob
 
@@ -38,6 +39,7 @@ _SERVICES = {
     ReconJobKind.JS: JsFarmService,
     ReconJobKind.SUBS: SubdomainFarmService,
     ReconJobKind.PORTS: PortScanFarmService,
+    ReconJobKind.REVERSE: ReverseFarmService,
 }
 
 # Списки в result-блобе, которые обрезаем до recon_result_max_items (счётчики целы).
@@ -81,6 +83,12 @@ async def run_recon_job(job_id: int) -> None:
         # Уже добавленные ранее цели (посчитаны в create_job) исключаются из пробива.
         # У фермы JS такого понятия нет — её probe_and_import не принимает skip_targets.
         skip_kwargs = {} if kind == ReconJobKind.JS else {"skip_targets": job.skipped_targets or []}
+        # «Add IPs» заводит ТОЛЬКО сам адрес. Кросс-рекон (обратный резолв IP → его
+        # PTR-имя → прогон имени фермой хостов) вынесен в scanner-инструмент Reverse
+        # DNS и на обычном добавлении не запускается — иначе добавление 8.8.8.8
+        # затягивало dns.google и его сосед-адрес 8.8.4.4.
+        if kind == ReconJobKind.IPS:
+            skip_kwargs["resolve_hosts"] = False
         job.status = ReconJobStatus.RUNNING
         job.attempts += 1
         await db.commit()

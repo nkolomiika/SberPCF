@@ -467,7 +467,7 @@ export interface Vulnerability {
   project_id: number;
   title: string;
   description: string | null;
-  severity: "critical" | "high" | "medium" | "low" | "info" | "unknown";
+  severity: "critical" | "high" | "medium" | "low" | "info";
   status: "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
   cvss_version: "4.0" | null;
   cvss_score: number | null;

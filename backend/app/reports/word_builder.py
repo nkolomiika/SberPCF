@@ -41,7 +41,6 @@ SEVERITY_RU: dict[Severity, str] = {
     Severity.MEDIUM: "Средний",
     Severity.LOW: "Низкий",
     Severity.INFO: "Слабость/недостаток",
-    Severity.UNKNOWN: "Не определён",
 }
 
 # Цвета шрифта для уровня риска и значения CVSS в карточках уязвимостей.

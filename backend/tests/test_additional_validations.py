@@ -23,10 +23,10 @@ def test_user_create_accepts_admin_role_tc_usr_004() -> None:
     assert payload.role.value == "admin"
 
 
-def test_vulnerability_defaults_severity_to_unknown_tc_vuln_003() -> None:
-    # Критичность не обязательна: без неё находка создаётся со значением "unknown".
+def test_vulnerability_defaults_severity_to_info_tc_vuln_003() -> None:
+    # Критичность не обязательна: без неё находка создаётся со значением "info".
     payload = VulnerabilityCreate(title="No severity", host_id=1)
-    assert payload.severity == Severity.UNKNOWN
+    assert payload.severity == Severity.INFO
 
 
 def test_vulnerability_rejects_invalid_severity_tc_vuln_004() -> None:

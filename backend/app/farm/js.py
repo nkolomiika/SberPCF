@@ -17,8 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import posixpath
+import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from urllib.parse import unquote, urlparse
 
 import httpx
 from sqlalchemy import and_, select
@@ -319,3 +323,88 @@ class JsFarmService:
         if not job:
             raise NotFoundError("Задача фермы не найдена")
         return job
+
+    # --------------------------------------------------------------- archive
+
+    @staticmethod
+    def _entry_name(url: str, used: set[str]) -> str:
+        """Путь файла внутри архива: `<host>/<имя.js>`, коллизии разводятся суффиксом.
+
+        Берём хост и последний сегмент пути из самого URL — Host-join не нужен, а
+        группировка по домену совпадает с тем, как раздел JS показывает файлы.
+        """
+        parsed = urlparse(url)
+        host = parsed.netloc or "unknown"
+        base = posixpath.basename(unquote(parsed.path)) or "index.js"
+        # Чистим имя от разделителей путей — иначе один файл «вылезет» из своей папки.
+        base = base.replace("/", "_").replace("\\", "_") or "index.js"
+        name = f"{host}/{base}"
+        if name not in used:
+            used.add(name)
+            return name
+        stem, dot, ext = base.rpartition(".")
+        i = 2
+        while True:
+            variant = f"{host}/{(stem or base)}-{i}{dot}{ext}"
+            if variant not in used:
+                used.add(variant)
+                return variant
+            i += 1
+
+    async def build_archive(
+        self,
+        project_id: int,
+        host_id: int | None = None,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> tuple[str, bytes]:
+        """Собирает zip из сохранённых URL JS-файлов, докачивая их по требованию.
+
+        Файлы в БД не хранятся (скан в памяти), поэтому архив — это повторное
+        скачивание известных URL через тот же SSRF-safe транспорт, что и скан.
+        Контент может отличаться от момента скана (ключ мог быть ротирован).
+        Скоуп: один хост (`host_id`) или все домены проекта.
+        """
+        conds = [JsFile.project_id == project_id]
+        if host_id is not None:
+            conds.append(JsFile.host_id == host_id)
+        rows = (await self.db.scalars(select(JsFile).where(and_(*conds)).order_by(JsFile.url))).all()
+        urls = [f.url for f in rows if f.url][: settings.js_farm_max_total_files]
+        if not urls:
+            raise NotFoundError("Нет JS-файлов для скачивания")
+
+        # Имя архива — по хосту, если скоуп один хост, иначе по проекту.
+        archive_host = urlparse(urls[0]).netloc if host_id is not None else None
+        name = f"js-{archive_host}.zip" if archive_host else f"js-project-{project_id}.zip"
+
+        limits = httpx.Limits(max_connections=settings.js_farm_max_concurrency)
+        real_transport = build_transport(transport, limits)
+        timeout = httpx.Timeout(settings.js_farm_download_timeout_seconds)
+        sem = asyncio.Semaphore(settings.js_farm_max_concurrency)
+
+        async with httpx.AsyncClient(
+            follow_redirects=True, max_redirects=3, timeout=timeout, transport=real_transport
+        ) as client:
+
+            async def grab(url: str) -> tuple[str, bytes | None]:
+                async with sem:
+                    _ctype, body, status, _err = await self._fetch(
+                        client, url, max_bytes=settings.js_farm_max_file_bytes
+                    )
+                return url, (body if status == "ok" else None)
+
+            fetched = await asyncio.gather(*(grab(u) for u in urls))
+
+        buf = io.BytesIO()
+        used: set[str] = set()
+        wrote = 0
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for url, body in fetched:
+                if body is None:
+                    continue
+                zf.writestr(self._entry_name(url, used), body)
+                wrote += 1
+            if wrote == 0:
+                # Ни один файл не докачался — кладём заметку, чтобы архив не был пустым/битым.
+                zf.writestr("README.txt", "Ни один JS-файл не удалось скачать повторно.\n")
+        return name, buf.getvalue()

@@ -726,6 +726,16 @@ export async function getJsFiles(projectId: number): Promise<JsFile[]> {
   return data;
 }
 
+/** Zip найденных .js. `hostId` сужает архив до одного хоста; без него — весь проект.
+ *  Файлы не хранятся, поэтому бэкенд докачивает их по URL по требованию. */
+export async function downloadJsArchive(projectId: number, hostId?: number): Promise<Blob> {
+  const { data } = await api.get(`/projects/${projectId}/js-files/archive`, {
+    params: hostId != null ? { host_id: hostId } : {},
+    responseType: "blob",
+  });
+  return data as Blob;
+}
+
 export async function getPorts(projectId: number, hostId: number): Promise<Port[]> {
   const { data } = await api.get<Port[]>(`/projects/${projectId}/hosts/${hostId}/ports`);
   return data;
@@ -870,7 +880,7 @@ export async function createVulnerability(
     title: string;
     description?: string | null;
     // Необязательно: бэкенд по умолчанию ставит "unknown" (критичность не определена).
-    severity?: "critical" | "high" | "medium" | "low" | "info" | "unknown";
+    severity?: "critical" | "high" | "medium" | "low" | "info";
     cvss_version?: "4.0" | null;
     cvss_score?: number | null;
     cvss_vector?: string | null;
@@ -902,7 +912,7 @@ export async function updateVulnerability(
   payload: {
     title?: string;
     description?: string | null;
-    severity?: "critical" | "high" | "medium" | "low" | "info" | "unknown";
+    severity?: "critical" | "high" | "medium" | "low" | "info";
     cvss_version?: "4.0" | null;
     cvss_score?: number | null;
     cvss_vector?: string | null;

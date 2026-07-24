@@ -142,8 +142,16 @@ async def startup() -> None:
         if conn.dialect.name == "postgresql":
             await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'handover_to_development'"))
             await conn.execute(text("ALTER TYPE project_status ADD VALUE IF NOT EXISTS 'vulnerability_recheck'"))
-            # Критичность по умолчанию у новой находки — не определена (нет CVSS).
-            await conn.execute(text("ALTER TYPE vuln_severity ADD VALUE IF NOT EXISTS 'unknown'"))
+            # Критичность 'UNKNOWN' убрана: по умолчанию находка создаётся как INFO.
+            # Старые находки со снятым уровнем переводим в INFO (severity::text — на
+            # свежей БД метки 'UNKNOWN' в типе уже нет, каст к тексту не падает), и
+            # переставляем DEFAULT колонки. Дубль-метка 'UNKNOWN'/'unknown' остаётся в
+            # типе безвредным висяком (снять её из enum — только пересозданием типа,
+            # это делает alembic-ревизия; здесь довольно того, что ею никто не пишет).
+            await conn.execute(
+                text("UPDATE vulnerabilities SET severity = 'INFO' WHERE severity::text IN ('UNKNOWN', 'unknown')")
+            )
+            await conn.execute(text("ALTER TABLE vulnerabilities ALTER COLUMN severity SET DEFAULT 'INFO'"))
             await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS folder VARCHAR(255) NOT NULL DEFAULT ''"))
             await conn.execute(text("ALTER TABLE projects ADD COLUMN IF NOT EXISTS timeline_frozen_at TIMESTAMP WITH TIME ZONE"))
             await conn.execute(text("ALTER TABLE projects ALTER COLUMN folder SET DEFAULT ''"))

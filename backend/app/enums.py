@@ -73,10 +73,9 @@ class Severity(str, enum.Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+    # Значение по умолчанию для только что созданной находки, пока не проставлен
+    # CVSS-вектор/уровень (отдельного «не определено» больше нет).
     INFO = "info"
-    # Значение по умолчанию для только что созданной находки: критичность ещё не
-    # оценена (нет CVSS-вектора). Заполняется, когда автор проставит вектор/уровень.
-    UNKNOWN = "unknown"
 
 
 class CvssVersion(str, enum.Enum):
@@ -127,6 +126,9 @@ class ReconJobKind(str, enum.Enum):
     SUBS = "subs"
     # Scanner-раздел: скан произвольных открытых TCP-портов (nmap).
     PORTS = "ports"
+    # Scanner-раздел: обратный резолв IP → PTR-имя → прогон имени фермой хостов.
+    # Этот кросс-рекон убран из обычного «Add IPs» и делается только явным запуском.
+    REVERSE = "reverse"
 
 
 class ReconJobStatus(str, enum.Enum):

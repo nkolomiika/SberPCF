@@ -233,6 +233,7 @@ vi.mock("../api", async (importOriginal) => {
         endpoints: [], secrets: [], fetched_at: "2026-07-19T00:00:00Z",
       },
     ]),
+    downloadJsArchive: vi.fn(async () => new Blob(["zip"], { type: "application/zip" })),
     getHostFarmJob: vi.fn(async () => ({
       id: 900, project_id: 2, status: "done", targets_total: 2, error: null, created_at: "2026-07-19T00:00:00Z",
       result: {
@@ -418,7 +419,7 @@ describe("StormApp (design prototype port)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(vi.mocked(api.createVulnerability)).toHaveBeenCalledWith(
       2,
-      expect.objectContaining({ title: "SQLi in login", host_id: 11, severity: "unknown", status: "open" })
+      expect.objectContaining({ title: "SQLi in login", host_id: 11, severity: "info", status: "open" })
     );
     // Redirected onto a finding's detail card (the mock returns finding #71).
     expect(await screen.findByDisplayValue("IDOR on GET /orders/{id}")).toBeInTheDocument();
@@ -636,11 +637,15 @@ describe("StormApp (design prototype port)", () => {
     expect(screen.queryByText("vendor.js")).not.toBeInTheDocument();
   });
 
-  it("starts a JS scan and polls it to completion", async () => {
+  it("picks domains then starts a JS scan and polls it to completion", async () => {
     await openJsView();
     await screen.findByText("app.bundle.js");
-    fireEvent.click(screen.getByRole("button", { name: /Scan JS/i }));
-    expect(vi.mocked(api.startJsScan)).toHaveBeenCalledWith(2, "");
+    // The header button now opens a domain picker instead of scanning straight away.
+    fireEvent.click(screen.getByRole("button", { name: /Select domains & scan/i }));
+    // The picker seeds itself with the project's domains; starting sends that list.
+    const startBtn = await screen.findByRole("button", { name: /Start scan/i });
+    fireEvent.click(startBtn);
+    expect(vi.mocked(api.startJsScan)).toHaveBeenCalledWith(2, expect.stringContaining("api.northwind.test"));
     // A running job shows the banner, then polling flips it to done and reloads.
     expect(await screen.findByText(/Scanning 1/)).toBeInTheDocument();
     await waitFor(() => expect(vi.mocked(api.getJsScanJob)).toHaveBeenCalled(), { timeout: 3000 });

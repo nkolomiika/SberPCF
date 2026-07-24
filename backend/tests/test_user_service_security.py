@@ -18,7 +18,7 @@ async def test_admin_cannot_change_other_user_email() -> None:
     user = SimpleNamespace(id=next(_ids), username="alice", email="alice@example.com")
     service.get_user = AsyncMock(return_value=user)  # type: ignore[method-assign]
 
-    with pytest.raises(ValidationError, match="не может менять email"):
+    with pytest.raises(ValidationError, match="can't change a user's email"):
         await service.update_user(user.id, {"email": "new@example.com"}, actor_id=next(_ids))
 
 

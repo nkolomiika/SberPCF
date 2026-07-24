@@ -13,7 +13,7 @@ export type HostStatus = "up" | "down" | "unknown";
 export type Role = "lead" | "pentester";
 /** Workspace-level (account) role — separate from the project role. */
 export type WsRole = "admin" | "user";
-export type Severity = "critical" | "high" | "medium" | "low" | "info" | "unknown";
+export type Severity = "critical" | "high" | "medium" | "low" | "info";
 /** Mirrors the backend's VulnerabilityStatus verbatim — no lossy re-mapping. */
 export type VStatus = "open" | "in_progress" | "fixed" | "wont_fix" | "accepted_risk";
 export type ProjectStatus = "active" | "archived";
@@ -52,6 +52,8 @@ export interface JsFileEntry {
   id: number;
   /** Domain the file was found on — the JS view groups rows by it. */
   host: string;
+  /** Host row id the file hangs off — the per-host archive download scopes by it. */
+  hostId: number;
   url: string;
   status: string;
   size: number | null;

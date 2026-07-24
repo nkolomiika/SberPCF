@@ -47,6 +47,49 @@ docker compose up --build
 - Mailpit (dev SMTP): `http://localhost:8025`
 - RabbitMQ management: `http://localhost:15672` (`guest` / `guest`)
 
+## Dev и прод из одного кода
+
+Один и тот же код запускается локально (dev) и на сервере (prod) — **различаются
+только переменные окружения**, никаких правок в исходниках. Выбор окружения — через
+переменную `ENV_FILE` (по умолчанию `.env`); прод-настройки лежат в `.env.prod`.
+
+| | Dev (локально) | Prod (сервер) |
+|---|---|---|
+| Файл окружения | `.env` | `.env.prod` |
+| Адрес | `https://localhost`, `:3000` | `https://<адрес-сервера>` |
+| CORS / CSRF origins | `localhost` | адрес сервера |
+| `APP_BASE_URL` (ссылки в письмах) | `https://localhost:3000` | адрес сервера |
+| `DEBUG` | `true` | `false` |
+| backend | `--reload` | без reload, `restart: unless-stopped` |
+| TLS-сертификат (SAN) | `localhost`, `127.0.0.1` | + IP/домен сервера |
+
+**Локальный dev** — как раньше:
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+**Прод** (на сервере):
+
+```bash
+cp .env.prod.example .env.prod   # заполнить: адрес, секреты, SMTP
+./deploy.sh                       # собрать и поднять прод-стек
+# ./deploy.sh recreate  — пересоздать после правки .env.prod
+# ./deploy.sh logs|ps|down
+```
+
+`deploy.sh` под капотом:
+`ENV_FILE=.env.prod docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`
+(плюс экспортирует `CERT_IP`/`CERT_HOST` для самоподписанного сертификата nginx).
+
+> **Фаервол на сервере.** Наружу должен смотреть только nginx — порты `80`, `443`
+> (и `22` для SSH). Внутренние порты `8000` (backend), `9000/9001` (MinIO),
+> `5433` (Postgres), `1025/8025` (mailpit) закройте облачным фаерволом провайдера.
+>
+> `.env.prod` содержит реальные секреты и в git не коммитится (см. `.gitignore`);
+> в репозитории — только шаблон `.env.prod.example`.
+
 ## Учётные записи (локальный dev)
 
 Стартовый админ создаётся при первом запуске из `INITIAL_ADMIN_USERNAME` / `INITIAL_ADMIN_PASSWORD` в `.env`.

@@ -1,8 +1,11 @@
+import io
+import zipfile
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
+from app.exceptions import NotFoundError
 from app.farm.js import JsFarmService
 from app.farm.resolver import ResolvedHost
 from app.models import JsFile, JsSecret
@@ -167,3 +170,65 @@ async def test_persist_reports_missing_host(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result.files_scanned == 0
     assert any("хост не найден" in e for e in result.errors)
+
+
+# --------------------------------------------------------------- archive
+
+
+def _archive_rows(*urls: str) -> MagicMock:
+    """db.scalars → сохранённые JsFile (нужен только .url для докачки архива)."""
+    return AsyncMock(return_value=MagicMock(all=lambda: [MagicMock(url=u, host_id=5) for u in urls]))
+
+
+def _archive_transport(ok_paths: set[str]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ok_paths:
+            return httpx.Response(
+                200, content=JS_BODY, headers={"content-type": "application/javascript"}
+            )
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_build_archive_zips_refetched_files() -> None:
+    db = _mock_db()
+    db.scalars = _archive_rows(
+        "https://acme.com/static/app.bundle.js", "https://acme.com/vendor.js"
+    )
+    svc = JsFarmService(db)
+
+    name, blob = await svc.build_archive(
+        101, host_id=5, transport=_archive_transport({"/static/app.bundle.js", "/vendor.js"})
+    )
+
+    assert name == "js-acme.com.zip"
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        names = set(zf.namelist())
+        # Оба файла легли под папку своего хоста, с реальным содержимым.
+        assert names == {"acme.com/app.bundle.js", "acme.com/vendor.js"}
+        assert zf.read("acme.com/app.bundle.js") == JS_BODY
+
+
+@pytest.mark.asyncio
+async def test_build_archive_skips_files_that_no_longer_download() -> None:
+    db = _mock_db()
+    db.scalars = _archive_rows("https://acme.com/live.js", "https://acme.com/gone.js")
+    svc = JsFarmService(db)
+
+    # Только live.js отвечает 200 — gone.js (404) в архив не попадает.
+    _name, blob = await svc.build_archive(101, host_id=5, transport=_archive_transport({"/live.js"}))
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert zf.namelist() == ["acme.com/live.js"]
+
+
+@pytest.mark.asyncio
+async def test_build_archive_raises_without_files() -> None:
+    db = _mock_db()
+    db.scalars = AsyncMock(return_value=MagicMock(all=lambda: []))
+    svc = JsFarmService(db)
+
+    with pytest.raises(NotFoundError):
+        await svc.build_archive(101, host_id=5, transport=_archive_transport(set()))
