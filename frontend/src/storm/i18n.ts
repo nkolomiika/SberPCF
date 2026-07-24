@@ -188,6 +188,7 @@ const RU: Record<string, string> = {
 
   // ── notes ──
   "Add note": "Добавить заметку",
+  "Edit note": "Изменить заметку",
   "Save note": "Сохранить заметку",
   "No notes yet.": "Пока нет заметок.",
   "Loading note…": "Загрузка заметки…",
@@ -222,6 +223,19 @@ const RU: Record<string, string> = {
   "will lose access, but their projects, findings and notes stay. You can reactivate them here later.":
     "потеряет доступ, но его проекты, находки и заметки останутся. Вернуть его можно здесь же позже.",
   "Couldn't deactivate user": "Не удалось деактивировать пользователя",
+  "Couldn't block user": "Не удалось заблокировать пользователя",
+  // Backend error messages (canonical English → RU). getApiErrorMessage runs the
+  // server's `detail` through t(), so these render English in the English locale
+  // and Russian here.
+  "You can't block yourself": "Нельзя заблокировать самого себя",
+  "Username or email is already taken": "Логин или email уже заняты",
+  "User not found": "Пользователь не найден",
+  "Provide a password or enable sending an email invitation": "Укажите пароль или включите отправку приглашения по email",
+  "A user with this email already exists": "Пользователь с таким email уже существует",
+  "The user is not deactivated": "Пользователь не деактивирован",
+  "An admin can't change a user's email — the user must change it themselves":
+    "Администратор не может менять email пользователя — пользователь должен изменить его сам",
+  "The username can't be changed — it's tied to the user": "Юзернейм менять нельзя — он закреплён за пользователем",
   "Reactivation link sent to": "Ссылка возврата отправлена на",
   "No deactivated members.": "Нет деактивированных участников.",
   "Search by username…": "Поиск по логину…",
@@ -451,6 +465,13 @@ const RU: Record<string, string> = {
   // ── recon farm: JS ──
   JS: "JS",
   "Scan JS": "Сканировать JS",
+  "Select domains & scan": "Выбрать домены и сканировать",
+  "Choose domains": "Выбор доменов",
+  "Choose domains to scan": "Выберите домены для скана",
+  "Will be scanned": "Будет просканировано",
+  "one domain per line…": "по одному домену в строке…",
+  "Start scan": "Запустить скан",
+  "Pick at least one domain to scan.": "Выберите хотя бы один домен для скана.",
   "Total JS files": "Всего JS-файлов",
   Scanning: "Сканируем",
   "domains…": "доменов…",
@@ -458,13 +479,17 @@ const RU: Record<string, string> = {
   "Scan done": "Скан завершён",
   "Scan failed": "Скан не удался",
   "Couldn't start JS scan": "Не удалось запустить скан JS",
+  Archive: "Архив",
+  "Download JS archive": "Скачать архив JS",
+  "Preparing JS archive…": "Готовим архив JS…",
+  "Couldn't download JS archive.": "Не удалось скачать архив JS.",
   secrets: "секретов",
   paths: "путей",
   Secrets: "Секреты",
   Paths: "Пути",
   "With secrets": "С секретами",
   "Filter by JS URL or host…": "Фильтр по URL или хосту…",
-  "No JS files yet — run Scan JS.": "Пока нет JS-файлов — запустите Scan JS.",
+  "No JS files yet — pick domains and scan.": "Пока нет JS-файлов — выберите домены и запустите скан.",
   "Loading JS files…": "Загрузка JS-файлов…",
   "Nothing found in this file.": "В этом файле ничего не найдено.",
   "File could not be scanned.": "Файл не удалось просканировать.",

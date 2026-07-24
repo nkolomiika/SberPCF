@@ -39,8 +39,6 @@ export const SEV: Record<Severity, ColorPair> = {
   medium: { bg: "var(--st-warn-soft)", color: "var(--st-warn)" },
   low: { bg: "var(--st-accent-soft)", color: "var(--st-accent)" },
   info: { bg: "var(--st-elevated)", color: "var(--st-text-3)" },
-  // Критичность ещё не оценена — приглушённый нейтральный бейдж.
-  unknown: { bg: "var(--st-elevated)", color: "var(--st-text-faint)" },
 };
 
 /** Badge colour for a secret found in JS, by its severity. */
@@ -199,7 +197,7 @@ export const EDITOR_FIELDS: Record<EditorType, EditorField[]> = {
     // Searchable: a project can have many hosts, and a plain select is unusable then.
     { k: "host", label: "Affected host", type: "combo", ph: "Start typing a hostname…", opts: [] },
     // Only on "add" — see saveVulnEditor: severity follows the CVSS vector afterwards.
-    { k: "sev", label: "Severity", type: "select", opts: ["unknown", "critical", "high", "medium", "low", "info"] },
+    { k: "sev", label: "Severity", type: "select", opts: ["critical", "high", "medium", "low", "info"] },
     { k: "status", label: "Status", type: "select", opts: ["open", "in progress", "resolved"] },
   ],
   note: [

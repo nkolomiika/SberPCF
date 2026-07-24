@@ -6,8 +6,10 @@ services:
     # Порт наружу — чтобы Swagger (/docs, /api/v2/docs) был доступен с хоста.
     ports:
       - "8000:8000"
+    # Источник окружения: dev → .env, prod → .env.prod (ENV_FILE=.env.prod).
+    # Единственное отличие прода от дева; код не меняется.
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     environment:
       COOKIE_SECURE: "true"
       # BACKEND_CORS_ORIGINS / CSRF_ALLOWED_ORIGINS намеренно НЕ задаём здесь:
@@ -26,7 +28,7 @@ services:
     build:
       context: ./backend
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     command: python -m app.worker.mail_worker
     depends_on:
       db:
@@ -45,7 +47,7 @@ services:
     build:
       context: ./backend
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     command: python -m app.worker.recon_worker
     depends_on:
       db:

@@ -38,6 +38,7 @@ from app.farm.hosts import HostFarmService
 from app.farm.ips import IpFarmService
 from app.farm.js import JsFarmService
 from app.farm.portscan import PortScanFarmService
+from app.farm.reverse import ReverseFarmService
 from app.farm.subs import SubdomainFarmService
 from app.farm.jobs import enqueue_job, run_recon_job
 from app.farm.resolver import (
@@ -55,6 +56,7 @@ __all__ = [
     "IpFarmService",
     "JsFarmService",
     "PortScanFarmService",
+    "ReverseFarmService",
     "SubdomainFarmService",
     "ParsedTarget",
     "ProbeCandidate",

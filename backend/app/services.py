@@ -486,7 +486,6 @@ class JiraIntegrationService:
         "medium": "Средняя",
         "low": "Низкая",
         "info": "Информационная",
-        "unknown": "Не определена",
     }
 
     @staticmethod
@@ -836,7 +835,7 @@ class UserService:
             query = query.where(User.id != exclude_user_id)
         exists = await self.db.scalar(query)
         if exists:
-            raise ConflictError("username или email уже заняты")
+            raise ConflictError("Username or email is already taken")
 
     async def _enqueue_temporary_password_mail(
         self,
@@ -917,7 +916,7 @@ class UserService:
         """Возвращает пользователя по идентификатору."""
         user = await self.db.scalar(select(User).where(User.id == user_id))
         if not user:
-            raise NotFoundError("Пользователь не найден")
+            raise NotFoundError("User not found")
         return user
 
     async def create_user(self, payload: dict, actor_id: int, ip_address: str | None = None) -> User:
@@ -928,7 +927,7 @@ class UserService:
         if send_invite_email:
             self._ensure_mail_delivery_enabled()
         if not temporary_password and not send_invite_email:
-            raise ValidationError("Нужно указать пароль или включить отправку приглашения на email")
+            raise ValidationError("Provide a password or enable sending an email invitation")
         if not temporary_password:
             temporary_password = self._generate_temporary_password()
         user = User(
@@ -991,7 +990,7 @@ class UserService:
         email = payload["email"]
         existing_user = await self.db.scalar(select(User).where(User.email == email))
         if existing_user:
-            raise ConflictError("Пользователь с таким email уже существует")
+            raise ConflictError("A user with this email already exists")
         now = datetime.now(UTC)
         active_invite = await self.db.scalar(
             select(Invitation).where(
@@ -1288,7 +1287,7 @@ class UserService:
         self._ensure_mail_delivery_enabled()
         user = await self.get_user(user_id)
         if not user.is_locked:
-            raise ValidationError("Пользователь не деактивирован")
+            raise ValidationError("The user is not deactivated")
         # Прежние неиспользованные ссылки гасим: активной остаётся только последняя.
         await self.db.execute(
             update(AccountReactivationToken)
@@ -1365,12 +1364,12 @@ class UserService:
         user = await self.get_user(user_id)
         submitted_email = payload.pop("email", None)
         if submitted_email is not None and submitted_email != user.email:
-            raise ValidationError("Администратор не может менять email пользователя. Пользователь должен изменить его сам.")
+            raise ValidationError("An admin can't change a user's email — the user must change it themselves")
         # Юзернейм неизменяем — даже админом: на него завязаны логин, упоминания и
         # история действий, поэтому его правку не принимаем (как и email).
         submitted_username = payload.pop("username", None)
         if submitted_username is not None and submitted_username != user.username:
-            raise ValidationError("Юзернейм менять нельзя — он закреплён за пользователем.")
+            raise ValidationError("The username can't be changed — it's tied to the user")
         await self._ensure_unique_identity(username=user.username, email=user.email, exclude_user_id=user.id)
         for key, value in payload.items():
             if value is not None:
@@ -1403,7 +1402,7 @@ class UserService:
         Всё авторство и связи при этом сохраняются.
         """
         if user_id == actor_id:
-            raise ValidationError("Нельзя удалить самого себя")
+            raise ValidationError("You can't block yourself")
         user = await self.get_user(user_id)
         user.is_locked = True
         await self.db.execute(
@@ -1811,7 +1810,7 @@ class ProjectService:
         await self.get_project(project_id)
         user = await self.db.scalar(select(User).where(User.id == user_id))
         if not user:
-            raise NotFoundError("Пользователь не найден")
+            raise NotFoundError("User not found")
         exists = await self.db.scalar(
             select(ProjectMember).where(and_(ProjectMember.project_id == project_id, ProjectMember.user_id == user_id))
         )

@@ -678,8 +678,8 @@ class VulnerabilityCreate(InputBaseModel):
     host_id: int
     title: str = Field(min_length=1, max_length=500)
     description: str | None = None
-    # По умолчанию критичность не определена — она уточняется CVSS-вектором позже.
-    severity: Severity = Severity.UNKNOWN
+    # По умолчанию критичность — INFO; уточняется CVSS-вектором позже.
+    severity: Severity = Severity.INFO
     cvss_version: CvssVersion | None = None
     cvss_score: float | None = Field(default=None, ge=0.0, le=10.0)
     cvss_vector: str | None = Field(default=None, max_length=255)
@@ -1101,6 +1101,35 @@ class PortScanJobOut(ORMBase):
     status: str
     targets_total: int | None = None
     result: PortScanResult | None = None
+    error: str | None = None
+    created_at: datetime
+
+
+# --- Scanner: обратный резолв IP → PTR-имя → прогон именем фермой хостов ---
+
+
+class ReverseFarmRequest(InputBaseModel):
+    # Пусто = все IP-адреса проекта (origin='ip'); иначе — список IP по строке.
+    raw: str = Field(default="", max_length=262144)
+
+
+class ReverseFarmResult(BaseModel):
+    # Адресов взято в обратный резолв.
+    ips_scanned: int = 0
+    # Имён (PTR + сверка с проектом) найдено на этих адресах.
+    hostnames_found: int = 0
+    # Хостов заведено из подтверждённых PTR-имён (прогнаны фермой хостов).
+    hosts_discovered: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class ReverseFarmJobOut(ORMBase):
+    id: int
+    project_id: int
+    kind: str = "reverse"
+    status: str
+    targets_total: int | None = None
+    result: ReverseFarmResult | None = None
     error: str | None = None
     created_at: datetime
 
